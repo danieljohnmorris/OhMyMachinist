@@ -843,3 +843,97 @@ func TestReverseForwardUsesActualListener(t *testing.T) {
 		t.Fatal("accepted listener without port")
 	}
 }
+
+func TestSlowGitHubDoesNotBlockCancellation(t *testing.T) {
+	for _, operation := range []string{"refresh", "approve", "link"} {
+		t.Run(operation, func(t *testing.T) {
+			s, _ := fixture(t)
+			bin := t.TempDir()
+			ready, release := filepath.Join(bin, "ready"), filepath.Join(bin, "release")
+			t.Cleanup(func() { _ = os.WriteFile(release, []byte("release"), 0600) })
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			s.mu.Lock()
+			task, err := s.create("project", "One", "Brief", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			task.Revision = task.BaseRevision
+			task.Stage = "Review"
+			task.Step = len(task.Steps)
+			task.Status = "active"
+			task.PRURL = "https://github.com/example/project/pull/1"
+			path, body, token := "tasks/"+task.ID+"/refresh", "{}", ""
+			if operation == "approve" {
+				task.Step = len(task.Steps) - 1
+				task.Status = "awaiting_approval"
+				task.ApprovalSubject = "code"
+				task.Checks = []Check{{Passed: true, Revision: task.Revision}}
+				path = "tasks/" + task.ID + "/approve"
+				body = `{"version":1,"subject":"code"}`
+			}
+			if operation == "link" {
+				task.PRURL = ""
+				task.CodeApproved = task.Revision
+				worker := &Session{ID: "delivery", ProjectID: task.ProjectID, TaskID: task.ID, Role: "builder", Status: "running", Delivery: true}
+				s.sessions[worker.ID] = worker
+				s.active = worker.ID
+				s.tokens["delivery-token"] = worker.ID
+				path, token = "tools/link_pr", "delivery-token"
+				body = `{"task_id":"` + task.ID + `","pr_url":"https://github.com/example/project/pull/1"}`
+			}
+			head := task.Revision
+			s.mu.Unlock()
+			script := "#!/bin/sh\ntouch " + shellQuote(ready) + "\nwhile [ ! -f " + shellQuote(release) + " ]; do sleep 0.01; done\nprintf '%s' '{\"state\":\"OPEN\",\"headRefOid\":\"" + head + "\",\"statusCheckRollup\":[]}'\n"
+			if err := os.WriteFile(filepath.Join(bin, "gh"), []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			result := make(chan *httptest.ResponseRecorder, 1)
+			go func() { result <- call(s, "POST", path, body, token) }()
+			deadline := time.Now().Add(3 * time.Second)
+			for {
+				if _, err := os.Stat(ready); err == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("GitHub query did not start")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			status := make(chan *httptest.ResponseRecorder, 1)
+			go func() { status <- call(s, "GET", "status", "", "") }()
+			blocked := false
+			select {
+			case <-status:
+			case <-time.After(time.Second):
+				blocked = true
+			}
+			if !blocked {
+				w := call(s, "POST", "tasks/"+task.ID+"/cancel", "{}", "")
+				if w.Code != 200 {
+					t.Fatal(w.Body.String())
+				}
+			}
+			if err := os.WriteFile(release, []byte("release"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			var response *httptest.ResponseRecorder
+			select {
+			case response = <-result:
+			case <-time.After(3 * time.Second):
+				t.Fatal("GitHub request did not finish")
+			}
+			if blocked {
+				t.Fatal("GitHub blocked status and cancellation")
+			}
+			if response.Code != 409 {
+				t.Fatalf("stale GitHub result accepted: %d", response.Code)
+			}
+			s.mu.Lock()
+			if task.Status != "cancelled" || task.ObservedAt != "" || task.CodeApprovalVersion != 0 {
+				t.Fatal("stale result changed cancelled task")
+			}
+			s.active = ""
+			s.mu.Unlock()
+		})
+	}
+}

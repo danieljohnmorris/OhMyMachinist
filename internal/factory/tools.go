@@ -207,8 +207,16 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 			fail(w, errors.New("PR must belong to configured project repository"))
 			return
 		}
-		pr, e := readPR(r.Context(), in.PRURL)
+		pr, e := s.readPRSnapshot(r.Context(), t, in.PRURL)
 		if e != nil {
+			fail(w, e)
+			return
+		}
+		if s.active != session.ID || s.tokens[token] != session.ID || session.Status == "cancelled" || session.Status == "interrupted" {
+			http.Error(w, "delivery session stopped while reading GitHub", 403)
+			return
+		}
+		if e := s.deliveryReady(t); e != nil {
 			fail(w, e)
 			return
 		}

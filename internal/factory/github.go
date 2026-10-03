@@ -34,7 +34,7 @@ func (s *Service) refresh(t *Task) error {
 	if !validPR(t.PRURL, s.cfg.Projects[t.ProjectID].GitHub) {
 		return errors.New("invalid project pull request")
 	}
-	pr, e := readPR(context.Background(), t.PRURL)
+	pr, e := s.readPRSnapshot(context.Background(), t, t.PRURL)
 	if e != nil {
 		return e
 	}
@@ -130,16 +130,12 @@ func (s *Service) Observe(ctx context.Context) {
 			}
 			s.mu.Lock()
 			t := s.tasks[key]
-			if s.closed || s.taskBusy(t.ID) {
+			if s.closed || t == nil || t.Status == "done" || t.Status == "cancelled" || s.taskBusy(t.ID) {
 				s.mu.Unlock()
 				continue
 			}
-			raw, version := t.PRURL, t.Version
-			s.mu.Unlock()
-			pr, e := readPR(ctx, raw)
-			s.mu.Lock()
-			t = s.tasks[key]
-			if !s.closed && t.Version == version && t.PRURL == raw && !s.taskBusy(t.ID) {
+			pr, e := s.readPRSnapshot(ctx, t, t.PRURL)
+			if !s.closed && !errors.Is(e, errStalePR) && !s.taskBusy(t.ID) {
 				if e != nil {
 					t.GitHubError = e.Error()
 					_ = s.saveTask(t)
@@ -159,4 +155,18 @@ func (s *Service) taskBusy(task string) bool {
 		}
 	}
 	return false
+}
+
+var errStalePR = errors.New("task changed while reading GitHub; reload before continuing")
+
+// The caller holds mu. Keep network waits outside it, then reject stale results.
+func (s *Service) readPRSnapshot(ctx context.Context, t *Task, raw string) (githubPR, error) {
+	id, version, step, status, revision, linked := t.ID, t.Version, t.Step, t.Status, t.Revision, t.PRURL
+	s.mu.Unlock()
+	pr, err := readPR(ctx, raw)
+	s.mu.Lock()
+	if s.closed || s.tasks[id] != t || t.Version != version || t.Step != step || t.Status != status || t.Revision != revision || t.PRURL != linked {
+		return githubPR{}, errStalePR
+	}
+	return pr, err
 }

@@ -312,8 +312,10 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request) {
 				return
 			case "refresh":
 				if e := s.refresh(t); e != nil {
-					t.GitHubError = e.Error()
-					_ = s.saveTask(t)
+					if !errors.Is(e, errStalePR) {
+						t.GitHubError = e.Error()
+						_ = s.saveTask(t)
+					}
 					fail(w, e)
 					return
 				}
