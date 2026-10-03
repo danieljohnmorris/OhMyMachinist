@@ -211,7 +211,7 @@ func (s *Service) execute(ctx context.Context, v Session, token string, runner R
 		emit(Event{Kind: "activity", Title: "Checks", Text: output})
 	} else {
 		provider, runErr = runner(ctx, RunRequest{Host: func() string {
-			if v.Role == "foreman" {
+			if v.isForeman() {
 				return "local"
 			}
 			return s.cfg.Projects[v.ProjectID].Host
@@ -232,7 +232,7 @@ func (s *Service) execute(ctx context.Context, v Session, token string, runner R
 		}
 	} else if runErr != nil {
 		current.Status = "failed"
-		if v.Role != "foreman" && s.cfg.Projects[v.ProjectID].Host != "local" && s.cfg.Projects[v.ProjectID].Host != "" {
+		if !v.isForeman() && s.cfg.Projects[v.ProjectID].Host != "local" && s.cfg.Projects[v.ProjectID].Host != "" {
 			current.Status = "interrupted"
 		}
 		current.Error = runErr.Error()

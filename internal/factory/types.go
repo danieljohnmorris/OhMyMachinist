@@ -116,3 +116,9 @@ type RunRequest struct {
 type RunFunc func(context.Context, RunRequest, func(Event), func(context.Context, string) (bool, error)) (string, error)
 
 func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
+
+// Agent profile names do not grant coordinator authority. Only the project
+// conversation, which has no task assignment, can manage workers.
+func (v *Session) isForeman() bool {
+	return v.TaskID == "" && v.Role == "foreman"
+}

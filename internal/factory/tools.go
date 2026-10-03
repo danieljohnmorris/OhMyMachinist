@@ -41,14 +41,14 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 	case "inspect_tasks":
 		tasks := []*Task{}
 		for _, t := range s.tasks {
-			if t.ProjectID == session.ProjectID && (session.Role == "foreman" || session.TaskID == t.ID) {
+			if t.ProjectID == session.ProjectID && (session.isForeman() || session.TaskID == t.ID) {
 				tasks = append(tasks, t)
 			}
 		}
 		jsonReply(w, 200, map[string]any{"tasks": tasks})
 		return
 	case "create_task":
-		if session.Role != "foreman" {
+		if !session.isForeman() {
 			http.Error(w, "Foreman only", 403)
 			return
 		}
@@ -70,7 +70,7 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 		jsonReply(w, 200, map[string]any{"task": t})
 		return
 	case "start_step":
-		if session.Role != "foreman" {
+		if !session.isForeman() {
 			http.Error(w, "Foreman only", 403)
 			return
 		}
@@ -87,7 +87,7 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 		jsonReply(w, 200, map[string]any{"task": t, "session": v})
 		return
 	case "send_message":
-		if session.Role != "foreman" {
+		if !session.isForeman() {
 			http.Error(w, "Foreman only", 403)
 			return
 		}
@@ -120,12 +120,23 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 				return
 			}
 		}
+		if t.Repairs >= 3 {
+			fail(w, errors.New("repair limit reached; human continuation required"))
+			return
+		}
 		if t.Status == "failed" {
 			if e := s.repair(t, in.Message); e != nil {
 				fail(w, e)
 				return
 			}
-			_ = s.saveTask(t)
+			if e := s.saveTask(t); e != nil {
+				fail(w, e)
+				return
+			}
+			if t.Status == "failed" {
+				fail(w, errors.New("repair limit reached; human continuation required"))
+				return
+			}
 		}
 		target := t.Step
 		if delivery {
@@ -161,7 +172,7 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 		jsonReply(w, 200, map[string]any{"task": t, "session": worker})
 		return
 	case "cancel_task":
-		if session.Role != "foreman" {
+		if !session.isForeman() {
 			http.Error(w, "Foreman only", 403)
 			return
 		}

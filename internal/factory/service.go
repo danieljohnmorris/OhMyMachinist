@@ -219,7 +219,7 @@ func (s *Service) foreman(project string) (*Session, error) {
 		return nil, errors.New("unknown project")
 	}
 	for _, v := range s.sessions {
-		if v.ProjectID == project && v.Role == "foreman" {
+		if v.ProjectID == project && v.isForeman() {
 			return v, nil
 		}
 	}

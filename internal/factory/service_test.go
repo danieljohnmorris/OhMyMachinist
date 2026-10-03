@@ -687,3 +687,142 @@ func TestPlanningChangeReportCannotSkipDesignApproval(t *testing.T) {
 	s.mu.Unlock()
 	idle(t, s)
 }
+
+func TestForemanCannotMessagePastRepairLimit(t *testing.T) {
+	s, _ := fixture(t)
+	s.mu.Lock()
+	task, err := s.create("project", "One", "Brief", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.Design = "Design"
+	s.advance(task)
+	if err = s.approve(task, task.Version, "design"); err != nil {
+		t.Fatal(err)
+	}
+	task.Repairs = 2
+	task.Status = "failed"
+	worker := &Session{ID: "builder", ProjectID: task.ProjectID, TaskID: task.ID, Role: "builder", Status: "completed", Step: 2, Directory: task.Directory}
+	s.sessions[worker.ID] = worker
+	foreman, _ := s.foreman(task.ProjectID)
+	s.active = foreman.ID
+	s.tokens["foreman-token"] = foreman.ID
+	s.mu.Unlock()
+	for _, request := range []string{"third", "fourth"} {
+		body := `{"task_id":"` + task.ID + `","request_id":"` + request + `","message":"try again"}`
+		w := call(s, "POST", "tools/send_message", body, "foreman-token")
+		if w.Code == 200 {
+			t.Fatal("foreman bypassed repair-limit pause")
+		}
+		s.mu.Lock()
+		if task.Repairs != 3 || task.Status != "failed" || len(s.queue) != 0 || worker.Status != "completed" {
+			t.Fatal("paused task was changed or requeued")
+		}
+		s.mu.Unlock()
+	}
+	s.mu.Lock()
+	s.active = ""
+	s.mu.Unlock()
+}
+
+func TestForemanProfileWorkerRemainsTaskScoped(t *testing.T) {
+	s, _ := fixture(t)
+	s.mu.Lock()
+	own, err := s.create("project", "One", "Brief", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := s.create("project", "Two", "Brief", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := &Session{ID: "worker", ProjectID: own.ProjectID, TaskID: own.ID, Role: "foreman", Status: "running", Directory: own.Directory}
+	s.sessions[worker.ID] = worker
+	s.active = worker.ID
+	s.tokens["worker-token"] = worker.ID
+	s.mu.Unlock()
+	body := `{"task_id":"` + other.ID + `","request_id":"r","title":"Three","brief":"Brief","message":"hello"}`
+	for _, name := range []string{"create_task", "start_step", "send_message", "cancel_task"} {
+		if w := call(s, "POST", "tools/"+name, body, "worker-token"); w.Code != 403 {
+			t.Fatalf("worker obtained foreman tool %s: %d", name, w.Code)
+		}
+	}
+	w := call(s, "POST", "tools/inspect_tasks", "{}", "worker-token")
+	var result struct{ Tasks []Task }
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Tasks) != 1 || result.Tasks[0].ID != own.ID {
+		t.Fatal("worker inspected another task")
+	}
+	s.mu.Lock()
+	foreman, err := s.foreman(own.ProjectID)
+	if err != nil || foreman.ID == worker.ID || foreman.TaskID != "" {
+		t.Fatal("worker was selected as project foreman")
+	}
+	s.active = ""
+	s.mu.Unlock()
+}
+
+func TestRecoveryPreservesRepairPause(t *testing.T) {
+	s, _ := fixture(t)
+	s.mu.Lock()
+	task, err := s.create("project", "One", "Brief", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.Stage = "Build"
+	task.Step = 2
+	task.Status = "failed"
+	task.Repairs = 3
+	old := &Session{ID: "old-checks", ProjectID: task.ProjectID, TaskID: task.ID, Role: "script", Status: "failed", Step: 3, Directory: task.Directory}
+	s.sessions[old.ID] = old
+	s.mu.Unlock()
+	w := call(s, "POST", "sessions/"+old.ID+"/resume", `{"confirmed_stopped":true}`, "")
+	if w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	s.mu.Lock()
+	if old.Status != "completed" || task.Status != "failed" || task.Repairs != 3 || len(s.queue) != 0 {
+		t.Fatal("recovery resumed work past the repair limit")
+	}
+	version := task.Version
+	s.mu.Unlock()
+	w = call(s, "POST", "tasks/"+task.ID+"/continue", `{"version":`+strconv.Itoa(version)+`}`, "")
+	if w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	idle(t, s)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if task.Repairs != 0 || task.Status != "active" {
+		t.Fatal("human continuation could not release recovered ownership")
+	}
+}
+
+func TestRecoveryCannotReopenTerminalTask(t *testing.T) {
+	for _, status := range []string{"cancelled", "done"} {
+		t.Run(status, func(t *testing.T) {
+			s, _ := fixture(t)
+			s.mu.Lock()
+			task, err := s.create("project", "One", "Brief", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			task.Status = status
+			task.Repairs = 3
+			old := &Session{ID: "old-worker", ProjectID: task.ProjectID, TaskID: task.ID, Role: "builder", Status: "failed", Step: 2, Directory: task.Directory}
+			s.sessions[old.ID] = old
+			s.mu.Unlock()
+			w := call(s, "POST", "sessions/"+old.ID+"/resume", `{"confirmed_stopped":true}`, "")
+			if w.Code != 409 {
+				t.Fatalf("terminal task recovery accepted: %d", w.Code)
+			}
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if task.Status != status || old.Status != "failed" || len(s.queue) != 0 {
+				t.Fatal("terminal task mutated during recovery")
+			}
+		})
+	}
+}

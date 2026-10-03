@@ -162,8 +162,29 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				if task := s.tasks[v.TaskID]; task != nil {
+					if task.Status == "cancelled" || task.Status == "done" {
+						fail(w, errors.New("task is no longer active"))
+						return
+					}
 					if e := s.validateTask(task); e != nil {
 						fail(w, e)
+						return
+					}
+					if task.Repairs >= 3 {
+						v.Status = "completed"
+						v.Error = ""
+						if e := s.saveSession(v); e != nil {
+							fail(w, e)
+							return
+						}
+						task.Status = "failed"
+						task.Activity = "Repair limit reached. Review the task before continuing."
+						if e := s.saveTask(task); e != nil {
+							fail(w, e)
+							return
+						}
+						s.signal()
+						jsonReply(w, 200, map[string]any{"session": v})
 						return
 					}
 				}
