@@ -700,6 +700,9 @@ func TestForemanCannotMessagePastRepairLimit(t *testing.T) {
 	if err = s.approve(task, task.Version, "design"); err != nil {
 		t.Fatal(err)
 	}
+	s.mu.Unlock()
+	idle(t, s)
+	s.mu.Lock()
 	task.Repairs = 2
 	task.Status = "failed"
 	worker := &Session{ID: "builder", ProjectID: task.ProjectID, TaskID: task.ID, Role: "builder", Status: "completed", Step: 2, Directory: task.Directory}
@@ -715,10 +718,11 @@ func TestForemanCannotMessagePastRepairLimit(t *testing.T) {
 			t.Fatal("foreman bypassed repair-limit pause")
 		}
 		s.mu.Lock()
-		if task.Repairs != 3 || task.Status != "failed" || len(s.queue) != 0 || worker.Status != "completed" {
-			t.Fatal("paused task was changed or requeued")
-		}
+		repairs, status, queued, workerStatus := task.Repairs, task.Status, len(s.queue), worker.Status
 		s.mu.Unlock()
+		if repairs != 3 || status != "failed" || queued != 0 || workerStatus != "completed" {
+			t.Fatalf("paused task was changed or requeued: repairs=%d status=%s queued=%d worker=%s", repairs, status, queued, workerStatus)
+		}
 	}
 	s.mu.Lock()
 	s.active = ""
