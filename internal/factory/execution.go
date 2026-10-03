@@ -71,15 +71,11 @@ func (s *Service) runClaude(ctx context.Context, r RunRequest, emit func(Event),
 	toolURL := r.URL
 	if r.Host != "" && r.Host != "local" {
 		h := s.cfg.Hosts[r.Host]
-		u, e := url.Parse(r.URL)
+		forward, e := reverseForward(r.URL, h.ToolsPort)
 		if e != nil {
 			return "", e
 		}
-		_, port, e := net.SplitHostPort(u.Host)
-		if e != nil {
-			return "", e
-		}
-		driver = &agent.Claude{Command: "ssh", Args: []string{"-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes", "-R", fmt.Sprintf("127.0.0.1:%d:127.0.0.1:%s", h.ToolsPort, port), h.SSH, shellArgs(h.ACPCommand)}, Remote: true}
+		driver = &agent.Claude{Command: "ssh", Args: []string{"-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes", "-R", forward, h.SSH, shellArgs(h.ACPCommand)}, Remote: true}
 		command = h.MachinistCommand
 		toolURL = fmt.Sprintf("http://127.0.0.1:%d", h.ToolsPort)
 	}
@@ -444,4 +440,16 @@ func safeFactoryTool(name string) bool {
 		return true
 	}
 	return false
+}
+
+func reverseForward(rawURL string, toolsPort int) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", err
+	}
+	host, port, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("127.0.0.1:%d:%s", toolsPort, net.JoinHostPort(host, port)), nil
 }

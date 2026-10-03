@@ -826,3 +826,20 @@ func TestRecoveryCannotReopenTerminalTask(t *testing.T) {
 		})
 	}
 }
+
+func TestReverseForwardUsesActualListener(t *testing.T) {
+	for _, host := range []string{"127.0.0.1:7331", "127.0.0.2:7331", "[::1]:7331"} {
+		t.Run(host, func(t *testing.T) {
+			got, err := reverseForward("http://"+host, 7332)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := "127.0.0.1:7332:" + host; got != want {
+				t.Fatalf("forward=%q, want actual listener %q", got, want)
+			}
+		})
+	}
+	if _, err := reverseForward("http://[::1]", 7332); err == nil {
+		t.Fatal("accepted listener without port")
+	}
+}
