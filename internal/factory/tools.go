@@ -220,6 +220,10 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 			fail(w, e)
 			return
 		}
+		if s.tokens[token] != session.ID || session.Status == "cancelled" || session.Status == "interrupted" {
+			http.Error(w, "delivery session stopped while reading workspace", 403)
+			return
+		}
 		if pr.HeadRefOID != t.Revision {
 			fail(w, errors.New("PR head differs from the human-approved revision"))
 			return
@@ -278,13 +282,16 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 				t.Design = in.Design
 				t.Version++
 			} else if strings.EqualFold(step.Stage, "build") {
-				rev, e := s.git(t.ProjectID, t.Directory, "rev-parse", "HEAD")
+				rev, dirty, e := s.workspaceState(t)
 				if e != nil {
 					fail(w, e)
 					return
 				}
-				dirty, e := s.git(t.ProjectID, t.Directory, "status", "--porcelain")
-				if e != nil || dirty != "" {
+				if s.tokens[token] != session.ID || session.Status == "cancelled" || session.Status == "interrupted" {
+					http.Error(w, "worker session stopped while reading workspace", 403)
+					return
+				}
+				if dirty != "" {
 					fail(w, errors.New("commit the implementation before reporting"))
 					return
 				}
@@ -363,9 +370,11 @@ func (s *Service) approve(t *Task, version int, subject string) error {
 		if t.Revision == "" {
 			return errors.New("no submitted revision")
 		}
-		current, e := s.git(t.ProjectID, t.Directory, "rev-parse", "HEAD")
-		dirty, de := s.git(t.ProjectID, t.Directory, "status", "--porcelain")
-		if e != nil || de != nil || current != t.Revision || dirty != "" {
+		current, dirty, e := s.workspaceState(t)
+		if e != nil {
+			return e
+		}
+		if current != t.Revision || dirty != "" {
 			return errors.New("workspace changed; submit and validate its current revision")
 		}
 		for _, check := range t.Checks {
@@ -507,11 +516,7 @@ func (s *Service) deliveryReady(t *Task) error {
 	if e := s.validateTask(t); e != nil {
 		return e
 	}
-	rev, e := s.git(t.ProjectID, t.Directory, "rev-parse", "HEAD")
-	if e != nil {
-		return e
-	}
-	dirty, e := s.git(t.ProjectID, t.Directory, "status", "--porcelain")
+	rev, dirty, e := s.workspaceState(t)
 	if e != nil {
 		return e
 	}

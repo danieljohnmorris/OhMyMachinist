@@ -1019,3 +1019,182 @@ func TestSlowDiffDoesNotBlockCancellation(t *testing.T) {
 		t.Fatalf("accepted stale diff: %d", response.Code)
 	}
 }
+
+func TestSlowBuildReportDoesNotBlockCancellation(t *testing.T) {
+	s, _ := fixture(t)
+	s.mu.Lock()
+	task, err := s.create("project", "One", "Brief", "")
+	task.Step, task.Stage = 2, "Build"
+	worker := &Session{ID: "builder", TaskID: task.ID, ProjectID: task.ProjectID, Step: 2, Status: "running", Role: "builder"}
+	s.sessions[worker.ID], s.active, s.tokens["worker-token"] = worker, worker.ID, worker.ID
+	s.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	ready, release := filepath.Join(bin, "ready"), filepath.Join(bin, "release")
+	t.Cleanup(func() { _ = os.WriteFile(release, []byte("release"), 0600) })
+	script := "#!/bin/sh\nif [ \"$1\" = rev-parse ]; then touch " + shellQuote(ready) + "; while [ ! -f " + shellQuote(release) + " ]; do sleep 0.01; done; fi\nexec " + shellQuote(git) + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	result := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		result <- call(s, "POST", "tools/report", `{"task_id":"`+task.ID+`","report_id":"built","summary":"Built","outcome":"complete"}`, "worker-token")
+	}()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("workspace read did not start")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancelled := make(chan *httptest.ResponseRecorder, 1)
+	go func() { cancelled <- call(s, "POST", "tasks/"+task.ID+"/cancel", "{}", "") }()
+	blocked := false
+	select {
+	case response := <-cancelled:
+		if response.Code != 200 {
+			t.Fatal(response.Body.String())
+		}
+	case <-time.After(time.Second):
+		blocked = true
+	}
+	_ = os.WriteFile(release, []byte("release"), 0600)
+	response := <-result
+	if blocked {
+		t.Fatal("workspace read blocked cancellation")
+	}
+	if response.Code != 409 {
+		t.Fatalf("accepted stale report: %d", response.Code)
+	}
+}
+
+func TestRemoteFailedChecksAllowBuilderRepair(t *testing.T) {
+	for _, exitCode := range []int{1, 255} {
+		t.Run(strconv.Itoa(exitCode), func(t *testing.T) {
+			s, _ := fixture(t)
+			bin := t.TempDir()
+			// Emulate SSH running the fixed command on its target host.
+			if err := os.WriteFile(filepath.Join(bin, "ssh"), []byte("#!/bin/sh\nexec /bin/sh -c \"$4\"\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			s.mu.Lock()
+			task, err := s.create("project", "One", "Brief", "")
+			if err != nil {
+				s.mu.Unlock()
+				t.Fatal(err)
+			}
+			project := s.cfg.Projects["project"]
+			project.Host = "remote"
+			s.cfg.Projects["project"] = project
+			s.cfg.Hosts = map[string]config.FactoryHost{"remote": {SSH: "fixture"}}
+			task.ProjectSnapshot, task.HostSnapshot = project, s.cfg.Hosts["remote"]
+			task.Step, task.Stage, task.Revision, task.DesignApprovalVersion = 3, "Build", task.BaseRevision, 1
+			task.Steps[3].Command = []string{"sh", "-c", "exit " + strconv.Itoa(exitCode)}
+			builder := &Session{ID: "builder", ProjectID: task.ProjectID, TaskID: task.ID, Role: "builder", Status: "completed", Step: 2, Directory: task.Directory}
+			s.sessions[builder.ID] = builder
+			check, err := s.start(task)
+			s.mu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			idle(t, s)
+			s.mu.Lock()
+			status, taskStatus := check.Status, task.Status
+			if exitCode == 255 {
+				s.mu.Unlock()
+				if status != "interrupted" || taskStatus != "interrupted" {
+					t.Fatalf("lost SSH ownership treated as completed: session=%s task=%s", status, taskStatus)
+				}
+				return
+			}
+			foreman, err := s.foreman("project")
+			if err != nil {
+				s.mu.Unlock()
+				t.Fatal(err)
+			}
+			foreman.Status, s.active, s.tokens["foreman-token"] = "running", foreman.ID, foreman.ID
+			s.mu.Unlock()
+			if status != "failed" || taskStatus != "failed" {
+				t.Fatalf("completed failure treated as interrupted: session=%s task=%s", status, taskStatus)
+			}
+			response := call(s, "POST", "tools/send_message", `{"request_id":"repair","task_id":"`+task.ID+`","message":"Fix the failing check"}`, "foreman-token")
+			s.mu.Lock()
+			step, repairs := task.Step, task.Repairs
+			s.active = ""
+			s.tokens = map[string]string{}
+			s.mu.Unlock()
+			if response.Code != 200 || step != 2 || repairs != 1 {
+				t.Fatalf("repair rejected: %d %s step=%d repairs=%d", response.Code, response.Body.String(), step, repairs)
+			}
+		})
+	}
+}
+
+func TestSlowBuildReportRejectsCancelledSession(t *testing.T) {
+	s, _ := fixture(t)
+	s.mu.Lock()
+	task, err := s.create("project", "One", "Brief", "")
+	task.Step, task.Stage = 2, "Build"
+	worker := &Session{ID: "builder", TaskID: task.ID, ProjectID: task.ProjectID, Step: 2, Status: "running", Role: "builder"}
+	s.sessions[worker.ID], s.active, s.tokens["worker-token"] = worker, worker.ID, worker.ID
+	s.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	ready, release := filepath.Join(bin, "ready"), filepath.Join(bin, "release")
+	t.Cleanup(func() { _ = os.WriteFile(release, []byte("release"), 0600) })
+	script := "#!/bin/sh\nif [ \"$1\" = rev-parse ]; then touch " + shellQuote(ready) + "; while [ ! -f " + shellQuote(release) + " ]; do sleep 0.01; done; fi\nexec " + shellQuote(git) + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	result := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		result <- call(s, "POST", "tools/report", `{"task_id":"`+task.ID+`","report_id":"built","summary":"Built","outcome":"complete"}`, "worker-token")
+	}()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("workspace read did not start")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancelled := make(chan *httptest.ResponseRecorder, 1)
+	go func() { cancelled <- call(s, "POST", "sessions/"+worker.ID+"/cancel", "{}", "") }()
+	blocked := false
+	select {
+	case response := <-cancelled:
+		if response.Code != 200 {
+			t.Fatal(response.Body.String())
+		}
+	case <-time.After(time.Second):
+		blocked = true
+	}
+	_ = os.WriteFile(release, []byte("release"), 0600)
+	response := <-result
+	if blocked {
+		t.Fatal("workspace read blocked cancellation")
+	}
+	if response.Code != 409 {
+		t.Fatalf("accepted stale report: %d", response.Code)
+	}
+}

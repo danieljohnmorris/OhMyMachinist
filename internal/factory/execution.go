@@ -228,7 +228,9 @@ func (s *Service) execute(ctx context.Context, v Session, token string, runner R
 		}
 	} else if runErr != nil {
 		current.Status = "failed"
-		if !v.isForeman() && s.cfg.Projects[v.ProjectID].Host != "local" && s.cfg.Projects[v.ProjectID].Host != "" {
+		var exitErr *exec.ExitError
+		completedScriptFailure := len(script) > 0 && ctx.Err() == nil && errors.As(runErr, &exitErr) && exitErr.ExitCode() > 0 && exitErr.ExitCode() != 255
+		if !v.isForeman() && !completedScriptFailure && s.cfg.Projects[v.ProjectID].Host != "local" && s.cfg.Projects[v.ProjectID].Host != "" {
 			current.Status = "interrupted"
 		}
 		current.Error = runErr.Error()
@@ -239,29 +241,37 @@ func (s *Service) execute(ctx context.Context, v Session, token string, runner R
 	}
 	if t := s.tasks[v.TaskID]; t != nil && t.Step == v.Step && t.Status != "cancelled" {
 		if len(script) > 0 {
-			rev, _ := s.git(t.ProjectID, t.Directory, "rev-parse", "HEAD")
-			kept := t.Checks[:0]
-			for _, c := range t.Checks {
-				if c.StepID != t.Steps[v.Step].ID {
-					kept = append(kept, c)
-				}
-			}
-			t.Checks = kept
-			t.Checks = append(t.Checks, Check{StepID: t.Steps[v.Step].ID, Name: t.Steps[v.Step].Name, Passed: runErr == nil, Output: output, Revision: rev})
-			if runErr == nil {
-				current, ge := s.git(t.ProjectID, t.Directory, "rev-parse", "HEAD")
-				dirty, de := s.git(t.ProjectID, t.Directory, "status", "--porcelain")
-				if ge != nil || de != nil || current != t.Revision || dirty != "" {
-					runErr = errors.New("checks changed the submitted workspace; rebuild and validate")
-					t.Checks[len(t.Checks)-1].Passed = false
-					t.Status = "failed"
-					t.Activity = runErr.Error()
-				} else {
-					s.advance(t)
+			rev, dirty, readErr := s.workspaceState(t)
+			if readErr != nil {
+				if t.Status != "cancelled" && current.Status != "cancelled" {
+					t.Status, current.Status = "interrupted", "interrupted"
+					t.Activity = "Cannot verify check workspace: " + readErr.Error()
 				}
 			} else {
-				t.Status = "failed"
-				t.Activity = "Checks failed"
+				kept := t.Checks[:0]
+				for _, c := range t.Checks {
+					if c.StepID != t.Steps[v.Step].ID {
+						kept = append(kept, c)
+					}
+				}
+				t.Checks = append(kept, Check{StepID: t.Steps[v.Step].ID, Name: t.Steps[v.Step].Name, Passed: runErr == nil, Output: output, Revision: rev})
+				if runErr == nil {
+					if rev != t.Revision || dirty != "" {
+						runErr = errors.New("checks changed the submitted workspace; rebuild and validate")
+						t.Checks[len(t.Checks)-1].Passed = false
+						t.Status = "failed"
+						t.Activity = runErr.Error()
+					} else {
+						s.advance(t)
+					}
+				} else {
+					t.Status = "failed"
+					t.Activity = "Checks failed"
+					if current.Status == "interrupted" {
+						t.Status = "interrupted"
+						t.Activity = "Check process needs attention"
+					}
+				}
 			}
 		} else if runErr != nil {
 			t.Status = "interrupted"
@@ -458,4 +468,26 @@ func reverseForward(rawURL string, toolsPort int) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("127.0.0.1:%d:%s", toolsPort, net.JoinHostPort(host, port)), nil
+}
+
+// Caller holds mu. Repository reads can wait on SSH, so keep state operations responsive.
+func (s *Service) workspaceState(t *Task) (string, string, error) {
+	project, directory := t.ProjectID, t.Directory
+	version, step, status, revision, approved, active := t.Version, t.Step, t.Status, t.Revision, t.CodeApproved, s.active
+	owner := s.sessions[active]
+	ownerStatus, ownerRequest := "", ""
+	if owner != nil {
+		ownerStatus, ownerRequest = owner.Status, owner.RequestID
+	}
+	s.mu.Unlock()
+	rev, err := s.git(project, directory, "rev-parse", "HEAD")
+	var dirty string
+	if err == nil {
+		dirty, err = s.git(project, directory, "status", "--porcelain")
+	}
+	s.mu.Lock()
+	if s.closed || s.tasks[t.ID] != t || t.ProjectID != project || t.Directory != directory || t.Version != version || t.Step != step || t.Status != status || t.Revision != revision || t.CodeApproved != approved || s.active != active || s.sessions[active] != owner || (owner != nil && (owner.Status != ownerStatus || owner.RequestID != ownerRequest)) {
+		return "", "", errors.New("task changed while reading workspace; reload before continuing")
+	}
+	return rev, dirty, err
 }
