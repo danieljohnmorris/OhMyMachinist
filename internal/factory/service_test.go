@@ -241,6 +241,11 @@ func TestPRIdentityAndRepairLimit(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	task.Design = "Design"
+	s.advance(task)
+	if e = s.approve(task, task.Version, "design"); e != nil {
+		t.Fatal(e)
+	}
 	for i := 0; i < 3; i++ {
 		if e = s.repair(task, "Fix it"); e != nil {
 			t.Fatal(e)
@@ -449,6 +454,11 @@ func TestHumanCanContinueAtRepairLimit(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	task.Design = "Design"
+	s.advance(task)
+	if e = s.approve(task, task.Version, "design"); e != nil {
+		t.Fatal(e)
+	}
 	for i := 0; i < 3; i++ {
 		_ = s.repair(task, "Fix it")
 	}
@@ -557,6 +567,11 @@ func TestRebuildClearsPreviousDeliveryMode(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	task.Design = "Design"
+	s.advance(task)
+	if e = s.approve(task, task.Version, "design"); e != nil {
+		t.Fatal(e)
+	}
 	task.Revision = task.BaseRevision
 	task.CodeApproved = task.Revision
 	task.Step = len(task.Steps)
@@ -621,4 +636,54 @@ func TestMachineContextIsNotLabeledAsUserMessage(t *testing.T) {
 	if user != 1 || contextCount != 1 {
 		t.Fatalf("expected one user and one context, got %d/%d", user, contextCount)
 	}
+}
+
+func TestPlanningChangeReportCannotSkipDesignApproval(t *testing.T) {
+	s, _ := fixture(t)
+	s.mu.Lock()
+	task, err := s.create("project", "One", "Brief", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := &Session{ID: "planner", ProjectID: task.ProjectID, TaskID: task.ID, Role: "planner", Status: "running", Step: 0, Directory: task.Directory}
+	s.sessions[worker.ID] = worker
+	s.active = worker.ID
+	s.tokens["planning-token"] = worker.ID
+	s.mu.Unlock()
+	body := `{"task_id":"` + task.ID + `","report_id":"changes","summary":"Rework the design","outcome":"changes"}`
+	w := call(s, "POST", "tools/report", body, "planning-token")
+	if w.Code == 200 {
+		t.Fatal("planning change report skipped the design gate")
+	}
+	s.mu.Lock()
+	if task.Step != 0 || task.Version != 1 || task.Design != "" || task.Repairs != 0 {
+		t.Fatal("rejected report changed the task")
+	}
+	worker.Status = "completed"
+	s.active = ""
+	task.Status = "failed"
+	if err := s.repair(task, "retry planning"); err == nil {
+		t.Fatal("failed planning entered implementation repair")
+	}
+	s.mu.Unlock()
+	body = `{"task_id":"` + task.ID + `","report_id":"ready","summary":"Design ready","outcome":"complete","design":"Approved only by a human"}`
+	s.mu.Lock()
+	worker.Status = "running"
+	s.active = worker.ID
+	s.mu.Unlock()
+	if w = call(s, "POST", "tools/report", body, "planning-token"); w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	s.mu.Lock()
+	if task.Step != 1 || task.ApprovalSubject != "design" {
+		t.Fatal("valid design did not reach approval")
+	}
+	if _, err := s.start(task); err == nil {
+		t.Fatal("builder started without human design approval")
+	}
+	worker.Status = "completed"
+	s.active = ""
+	s.next()
+	s.mu.Unlock()
+	idle(t, s)
 }

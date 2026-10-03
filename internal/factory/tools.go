@@ -383,6 +383,9 @@ func (s *Service) approve(t *Task, version int, subject string) error {
 	return nil
 }
 func (s *Service) repair(t *Task, feedback string) error {
+	if strings.EqualFold(t.Stage, "design") {
+		return errors.New("design must complete human approval before implementation repair")
+	}
 	if strings.TrimSpace(feedback) == "" {
 		return errors.New("feedback is required")
 	}
@@ -438,7 +441,7 @@ func (s *Service) changes(t *Task, version int, message string) error {
 	if strings.TrimSpace(message) == "" {
 		return errors.New("feedback is required")
 	}
-	if t.ApprovalSubject == "design" {
+	if t.ApprovalSubject == "design" || strings.EqualFold(t.Stage, "design") {
 		t.Step = 0
 		t.Version++
 		t.Design = ""
