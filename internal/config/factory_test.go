@@ -175,3 +175,30 @@ func TestFactoryRequiresApprovalAfterFinalDesignProducer(t *testing.T) {
 		t.Fatalf("reapproved final design rejected: %v", err)
 	}
 }
+
+func TestFactoryRequiresChecksAfterLastBuilder(t *testing.T) {
+	for _, checked := range []bool{false, true} {
+		t.Run(map[bool]string{false: "unchecked revision", true: "checked revision"}[checked], func(t *testing.T) {
+			c := factoryFixture(t)
+			pipeline := c.Factory.Pipelines["delivery"]
+			second := pipeline.Steps[2]
+			second.ID = "second-build"
+			steps := append([]FactoryStep(nil), pipeline.Steps[:4]...)
+			steps = append(steps, second)
+			if checked {
+				check := pipeline.Steps[3]
+				check.ID = "final-checks"
+				steps = append(steps, check)
+			}
+			pipeline.Steps = append(steps, pipeline.Steps[4:]...)
+			c.Factory.Pipelines["delivery"] = pipeline
+			_, err := c.ResolveFactory()
+			if checked && err != nil {
+				t.Fatal(err)
+			}
+			if !checked && (err == nil || !strings.Contains(err.Error(), "checks before review")) {
+				t.Fatalf("unchecked final builder accepted: %v", err)
+			}
+		})
+	}
+}

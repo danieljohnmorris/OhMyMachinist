@@ -244,6 +244,7 @@ func (c Config) ResolveFactory() (ResolvedFactory, error) {
 						return fail("pipeline %q requires design approval before build", id)
 					}
 					build = true
+					checks = false
 				}
 				if s.Stage == "review" {
 					if !checks {
