@@ -251,8 +251,24 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request) {
 					sessions = append(sessions, v)
 				}
 			}
-			diff, _ := s.git(t.ProjectID, t.Directory, "diff", t.BaseRevision)
-			files, _ := s.git(t.ProjectID, t.Directory, "diff", "--name-only", t.BaseRevision)
+			project, directory, base := t.ProjectID, t.Directory, t.BaseRevision
+			version, status := t.Version, t.Status
+			s.mu.Unlock()
+			diff, diffErr := s.git(project, directory, "diff", base)
+			files, filesErr := s.git(project, directory, "diff", "--name-only", base)
+			s.mu.Lock()
+			if s.closed || s.tasks[t.ID] != t || t.Version != version || t.Status != status || t.BaseRevision != base || t.Directory != directory {
+				fail(w, errors.New("task changed while reading changes; reload before continuing"))
+				return
+			}
+			if diffErr != nil {
+				fail(w, diffErr)
+				return
+			}
+			if filesErr != nil {
+				fail(w, filesErr)
+				return
+			}
 
 			jsonReply(w, 200, map[string]any{"task": t, "sessions": sessions, "diff": diff, "files": strings.Fields(files), "checks": t.Checks})
 			return

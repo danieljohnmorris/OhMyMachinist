@@ -941,3 +941,81 @@ func TestSlowGitHubDoesNotBlockCancellation(t *testing.T) {
 		})
 	}
 }
+
+func TestCreateRequiresBaseRevision(t *testing.T) {
+	for _, output := range []string{"exit 1", "exit 0"} {
+		t.Run(output, func(t *testing.T) {
+			s, _ := fixture(t)
+			git, err := exec.LookPath("git")
+			if err != nil {
+				t.Fatal(err)
+			}
+			bin := t.TempDir()
+			script := "#!/bin/sh\nif [ \"$1\" = rev-parse ]; then " + output + "; fi\nexec " + shellQuote(git) + " \"$@\"\n"
+			if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			s.mu.Lock()
+			task, err := s.create("project", "One", "Brief", "")
+			count := len(s.tasks)
+			s.mu.Unlock()
+			if err == nil || task != nil || count != 0 {
+				t.Fatalf("accepted missing baseline: task=%v err=%v count=%d", task, err, count)
+			}
+		})
+	}
+}
+
+func TestSlowDiffDoesNotBlockCancellation(t *testing.T) {
+	s, _ := fixture(t)
+	s.mu.Lock()
+	task, err := s.create("project", "One", "Brief", "")
+	s.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	ready, release := filepath.Join(bin, "ready"), filepath.Join(bin, "release")
+	t.Cleanup(func() { _ = os.WriteFile(release, []byte("release"), 0600) })
+	script := "#!/bin/sh\nif [ \"$1\" = diff ]; then touch " + shellQuote(ready) + "; while [ ! -f " + shellQuote(release) + " ]; do sleep 0.01; done; fi\nexec " + shellQuote(git) + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	result := make(chan *httptest.ResponseRecorder, 1)
+	go func() { result <- call(s, "GET", "tasks/"+task.ID, "", "") }()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("diff did not start")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancelled := make(chan *httptest.ResponseRecorder, 1)
+	go func() { cancelled <- call(s, "POST", "tasks/"+task.ID+"/cancel", "{}", "") }()
+	blocked := false
+	select {
+	case response := <-cancelled:
+		if response.Code != 200 {
+			t.Fatal(response.Body.String())
+		}
+	case <-time.After(time.Second):
+		blocked = true
+	}
+	_ = os.WriteFile(release, []byte("release"), 0600)
+	response := <-result
+	if blocked {
+		t.Fatal("diff blocked cancellation")
+	}
+	if response.Code != 409 {
+		t.Fatalf("accepted stale diff: %d", response.Code)
+	}
+}

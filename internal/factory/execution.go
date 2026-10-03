@@ -412,7 +412,13 @@ func (s *Service) create(project, title, brief, pipeline string) (*Task, error) 
 		return nil, e
 	}
 	t := &Task{ProjectSnapshot: s.cfg.Projects[project], HostSnapshot: s.cfg.Hosts[s.cfg.Projects[project].Host], ID: key, ProjectID: project, Title: title, Brief: brief, Pipeline: pipeline, Stage: "Design", Status: "active", Activity: "Ready for planning", Directory: dir, Branch: branch, Version: 1, CreatedAt: now(), Checks: []Check{}, Agents: map[string]config.ResolvedAgent{}, Steps: append([]config.FactoryStep(nil), definition.Steps...)}
-	t.BaseRevision, _ = s.git(project, dir, "rev-parse", "HEAD")
+	t.BaseRevision, e = s.git(project, dir, "rev-parse", "HEAD")
+	if e != nil {
+		return nil, fmt.Errorf("record task base revision: %w", e)
+	}
+	if t.BaseRevision == "" {
+		return nil, errors.New("record task base revision: Git returned an empty revision")
+	}
 	for i := range t.Steps {
 		t.Steps[i].Command = append([]string(nil), t.Steps[i].Command...)
 	}
