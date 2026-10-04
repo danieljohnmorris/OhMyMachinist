@@ -111,7 +111,8 @@ The foreman stays local. A project's configured host runs its workspace steps
 through SSH using the remote host's own Claude authentication. The example has a
 commented remote configuration. Install the same Machinist version and pinned
 adapter on that host. Configure `ssh`, the remote `acp_command`, and
-`machinist_command`. The project path is absolute on the remote host.
+`machinist_command`. The project path is a POSIX absolute path on the remote host, such as
+`/srv/project`, regardless of the operating system running the browser server.
 
 `tools_port` defaults to 7332. It must be an unused loopback port on that host.
 SSH reverse forwarding connects the remote agent's scoped tool bridge to the

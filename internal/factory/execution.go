@@ -425,6 +425,10 @@ func (s *Service) start(t *Task) (*Session, error) {
 	return v, nil
 }
 func (s *Service) create(project, title, brief, pipeline string, valid ...func() bool) (*Task, error) {
+	return s.createWithRequest(project, title, brief, pipeline, "", valid...)
+}
+
+func (s *Service) createWithRequest(project, title, brief, pipeline, requestKey string, valid ...func() bool) (*Task, error) {
 	if strings.TrimSpace(title) == "" || strings.TrimSpace(brief) == "" {
 		return nil, errors.New("title and brief are required")
 	}
@@ -490,10 +494,17 @@ func (s *Service) create(project, title, brief, pipeline string, valid ...func()
 	for key, a := range s.cfg.Agents {
 		t.Agents[key] = a
 	}
-	if e = s.saveTask(t); e != nil {
+	writes := []recordWrite{{"task", t.ID, diskTask(t)}}
+	if requestKey != "" {
+		writes = append(writes, recordWrite{"request", requestKey, t.ID})
+	}
+	if e = s.commitRecords(writes, "", Event{}); e != nil {
 		return nil, e
 	}
 	s.tasks[t.ID] = t
+	if requestKey != "" {
+		s.requests[requestKey] = t.ID
+	}
 	return t, nil
 }
 

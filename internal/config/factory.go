@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -168,7 +169,7 @@ func (c Config) ResolveFactory() (ResolvedFactory, error) {
 				return fail("project %q: %v", id, err)
 			}
 			p.Path = path
-		} else if !filepath.IsAbs(p.Path) || strings.ContainsAny(p.Path, "\x00\r\n") {
+		} else if !path.IsAbs(p.Path) || strings.ContainsAny(p.Path, "\x00\r\n") {
 			return fail("remote project %q path must be absolute", id)
 		}
 		if p.Name == "" {

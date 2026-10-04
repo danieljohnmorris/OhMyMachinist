@@ -10,6 +10,7 @@ import (
 	"github.com/owainlewis/machinist/internal/config"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -360,18 +361,21 @@ func workspace(ctx context.Context, p config.FactoryProject, h config.FactoryHos
 			return "", "", e
 		}
 	}
-	root, e := os.UserCacheDir()
-	if e != nil {
-		return "", "", e
-	}
-	dir := filepath.Join(root, "machinist", "factory", task)
+	var dir string
 	if p.Host != "" && p.Host != "local" {
-		dir = filepath.Join(filepath.Dir(p.Path), ".machinist-worktrees", task)
-	} else if e = os.MkdirAll(filepath.Dir(dir), 0700); e != nil {
-		return "", "", e
+		dir = path.Join(path.Dir(p.Path), ".machinist-worktrees", task)
+	} else {
+		root, e := os.UserCacheDir()
+		if e != nil {
+			return "", "", e
+		}
+		dir = filepath.Join(root, "machinist", "factory", task)
+		if e = os.MkdirAll(filepath.Dir(dir), 0700); e != nil {
+			return "", "", e
+		}
 	}
 	branch := "codex/factory-" + task
-	if _, e = projectGit(ctx, p, h, p.Path, "worktree", "add", "-b", branch, dir, "HEAD"); e != nil {
+	if _, e := projectGit(ctx, p, h, p.Path, "worktree", "add", "-b", branch, dir, "HEAD"); e != nil {
 		return "", "", e
 	}
 	return dir, branch, nil

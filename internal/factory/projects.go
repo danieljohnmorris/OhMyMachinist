@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -77,6 +78,14 @@ func githubFromOrigin(origin string) string {
 	}
 	return path
 }
+
+// Remote SSH hosts use POSIX paths independently of the controller's operating system.
+func cleanProjectPath(host, raw string) (string, bool) {
+	if host != "" && host != "local" {
+		return path.Clean(raw), path.IsAbs(raw)
+	}
+	return filepath.Clean(raw), filepath.IsAbs(raw)
+}
 func (s *Service) addProject(w http.ResponseWriter, r *http.Request) {
 	var in projectInput
 	if !decode(w, r, &in) {
@@ -86,7 +95,8 @@ func (s *Service) addProject(w http.ResponseWriter, r *http.Request) {
 	if in.Host == "" {
 		in.Host = "local"
 	}
-	if in.RequestID == "" || in.Name == "" || !filepath.IsAbs(in.Path) || strings.ContainsAny(in.Path, "\x00\r\n") {
+	cleanPath, absolute := cleanProjectPath(in.Host, in.Path)
+	if in.RequestID == "" || in.Name == "" || !absolute || strings.ContainsAny(in.Path, "\x00\r\n") {
 		fail(w, errors.New("request_id, name and an absolute repository path are required"))
 		return
 	}
@@ -106,7 +116,7 @@ func (s *Service) addProject(w http.ResponseWriter, r *http.Request) {
 		fail(w, errors.New("github must be owner/repository"))
 		return
 	}
-	in.Path = filepath.Clean(in.Path)
+	in.Path = cleanPath
 	s.mu.Lock()
 	if !s.cfg.Enabled || s.closed {
 		s.mu.Unlock()
@@ -127,7 +137,8 @@ func (s *Service) addProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, p := range s.cfg.Projects {
-		if p.Host == in.Host && filepath.Clean(p.Path) == in.Path {
+		existingPath, _ := cleanProjectPath(p.Host, p.Path)
+		if p.Host == in.Host && existingPath == in.Path {
 			s.mu.Unlock()
 			fail(w, errors.New("this repository is already a project on that host"))
 			return

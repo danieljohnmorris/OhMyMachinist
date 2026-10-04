@@ -430,3 +430,51 @@ func TestBrowserProjectRejectsUnsafeGitHubRepository(t *testing.T) {
 		}
 	}
 }
+
+func TestBrowserRemotePathsUsePOSIXRules(t *testing.T) {
+	for _, tc := range []struct {
+		raw, want string
+		absolute  bool
+	}{
+		{"/srv/project/../repo", "/srv/repo", true},
+		{`/srv/repo\literal/project`, `/srv/repo\literal/project`, true},
+		{"C:/srv/project", "C:/srv/project", false},
+		{`C:\srv\project`, `C:\srv\project`, false},
+		{"relative/repo", "relative/repo", false},
+	} {
+		clean, absolute := cleanProjectPath("vm", tc.raw)
+		if clean != tc.want || absolute != tc.absolute {
+			t.Fatalf("remote path used controller rules: %q -> %q absolute=%v", tc.raw, clean, absolute)
+		}
+	}
+	local := filepath.Join(t.TempDir(), "repo", "..", "project")
+	clean, absolute := cleanProjectPath("local", local)
+	if clean != filepath.Clean(local) || !absolute {
+		t.Fatal("local path rules changed")
+	}
+}
+
+func TestRemoteWorkspaceUsesPOSIXJoinAndDir(t *testing.T) {
+	bin := t.TempDir()
+	log := filepath.Join(bin, "command")
+	script := "#!/bin/sh\nprintf '%s' \"$4\" > " + shellQuote(log) + "\n"
+	if e := os.WriteFile(filepath.Join(bin, "ssh"), []byte(script), 0700); e != nil {
+		t.Fatal(e)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	p := config.FactoryProject{Host: "vm", Path: `/srv/repo\literal/project`}
+	dir, branch, e := workspace(context.Background(), p, config.FactoryHost{SSH: "vm"}, "t_test")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if dir != `/srv/repo\literal/.machinist-worktrees/t_test` || branch != "codex/factory-t_test" {
+		t.Fatalf("remote path used controller separators: %q", dir)
+	}
+	command, e := os.ReadFile(log)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if !strings.Contains(string(command), shellQuote(dir)) {
+		t.Fatal("Git command used a different remote path")
+	}
+}

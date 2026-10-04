@@ -266,3 +266,33 @@ func TestFactoryGitHubRepositoryUsesSafeNonemptyComponents(t *testing.T) {
 		})
 	}
 }
+
+func TestFactoryRemotePathsUsePOSIXRules(t *testing.T) {
+	for _, value := range []string{"/srv/project", `/srv/repo\literal/project`} {
+		t.Run(value, func(t *testing.T) {
+			c := factoryFixture(t)
+			c.Factory.Hosts = map[string]FactoryHost{"vm": {SSH: "vm", ACPCommand: []string{"claude-agent-acp"}}}
+			p := c.Factory.Projects["project"]
+			p.Host = "vm"
+			p.Path = value
+			c.Factory.Projects["project"] = p
+			resolved, err := c.ResolveFactory()
+			if err != nil || resolved.Projects["project"].Path != value {
+				t.Fatalf("POSIX remote path rejected or changed: %q err=%v", value, err)
+			}
+		})
+	}
+	for _, value := range []string{"relative/repo", "C:/srv/project", `C:\srv\project`} {
+		t.Run(value, func(t *testing.T) {
+			c := factoryFixture(t)
+			c.Factory.Hosts = map[string]FactoryHost{"vm": {SSH: "vm", ACPCommand: []string{"claude-agent-acp"}}}
+			p := c.Factory.Projects["project"]
+			p.Host = "vm"
+			p.Path = value
+			c.Factory.Projects["project"] = p
+			if _, err := c.ResolveFactory(); err == nil {
+				t.Fatalf("non-POSIX remote path accepted: %q", value)
+			}
+		})
+	}
+}

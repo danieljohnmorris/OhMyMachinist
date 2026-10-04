@@ -58,14 +58,10 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 			return
 		}
 		turn := session.RequestID
-		t, e := s.create(session.ProjectID, in.Title, in.Brief, in.Pipeline, func() bool {
+		t, e := s.createWithRequest(session.ProjectID, in.Title, in.Brief, in.Pipeline, key, func() bool {
 			return s.active == session.ID && s.tokens[token] == session.ID && session.RequestID == turn && session.Status != "cancelled" && session.Status != "interrupted"
 		})
 		if e != nil {
-			fail(w, e)
-			return
-		}
-		if e = s.request(key, t.ID); e != nil {
 			fail(w, e)
 			return
 		}
