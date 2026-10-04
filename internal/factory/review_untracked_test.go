@@ -3,6 +3,7 @@ package factory
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -125,5 +126,42 @@ func TestUntrackedNameBudgetReportsIncompleteReview(t *testing.T) {
 	diff, truncated, files, filesTruncated := readRecoveryDetail(t, s, task)
 	if !filesTruncated || !truncated || len(strings.Join(files, "\x00")) > (64<<10) || len(files) >= 350 || !strings.Contains(diff, "Output truncated:") {
 		t.Fatal("untracked list truncation is not explicit", truncated, filesTruncated, len(files))
+	}
+}
+
+func TestNestedUntrackedRepositoryDoesNotHideRecoveryEvidence(t *testing.T) {
+	s, _ := fixture(t)
+	s.mu.Lock()
+	task, e := s.create("project", "Nested repository", "Brief", "")
+	s.mu.Unlock()
+	if e != nil {
+		t.Fatal(e)
+	}
+	nested := filepath.Join(task.Directory, "nested repository")
+	if e = os.Mkdir(nested, 0700); e != nil {
+		t.Fatal(e)
+	}
+	if output, e := exec.Command("git", "init", nested).CombinedOutput(); e != nil {
+		t.Fatal(string(output), e)
+	}
+	if e = os.WriteFile(filepath.Join(nested, "nested-file.txt"), []byte("NESTED_CONTENT_NOT_RENDERED"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	if e = os.WriteFile(filepath.Join(task.Directory, "new-file.txt"), []byte("regular untracked recovery\n"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	if e = os.WriteFile(filepath.Join(task.Directory, "file.txt"), []byte("regular tracked recovery\n"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	diff, truncated, files, filesTruncated := readRecoveryDetail(t, s, task)
+	found := map[string]bool{}
+	for _, name := range files {
+		found[name] = true
+	}
+	if truncated || filesTruncated || len(files) != 3 || !found["nested repository/"] || !found["new-file.txt"] || !found["file.txt"] {
+		t.Fatal("nested repository hid filenames", files)
+	}
+	if !strings.Contains(diff, "+regular untracked recovery") || !strings.Contains(diff, "+regular tracked recovery") || !strings.Contains(diff, `Untracked directory or nested repository: "nested repository/"`) || !strings.Contains(diff, "Contents are not rendered") || strings.Contains(diff, "NESTED_CONTENT_NOT_RENDERED") {
+		t.Fatal("nested repository hid or exposed unintended content", diff)
 	}
 }

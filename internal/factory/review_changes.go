@@ -2,6 +2,7 @@ package factory
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -57,6 +58,17 @@ func (s *Service) reviewChanges(project, directory, base string) (string, bool, 
 		if left <= 0 {
 			diffTruncated = true
 			break
+		}
+		// ls-files represents an untracked nested repository as a directory.
+		if strings.HasSuffix(name, "/") {
+			metadata := fmt.Sprintf("\n[Untracked directory or nested repository: %q. Contents are not rendered; inspect it separately before approval.]\n", name)
+			if len(metadata) > left {
+				diff += strings.ToValidUTF8(metadata[:left], "")
+				diffTruncated = true
+			} else {
+				diff += metadata
+			}
+			continue
 		}
 		// Git renders a symlink's link text, rather than reading its target.
 		added, truncated, e := s.gitLimitedContext(ctx, project, directory, left, true, "diff", "--no-index", "--", "/dev/null", name)
