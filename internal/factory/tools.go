@@ -117,21 +117,27 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 			fail(w, errors.New("repair limit reached; human continuation required"))
 			return
 		}
+		var candidate *Task
 		if t.Status == "failed" {
-			if e := s.repair(t, in.Message); e != nil {
-				fail(w, e)
+			copyTask := *t
+			if err := repairTask(&copyTask, in.Message); err != nil {
+				fail(w, err)
 				return
 			}
-			if e := s.saveTask(t); e != nil {
-				fail(w, e)
-				return
-			}
-			if t.Status == "failed" {
+			if copyTask.Status == "failed" {
+				if err := s.commitTransition(t, &copyTask, "Repair limit reached for task "+t.ID+". Ask the human to review saved work and authorize another repair pass.", nil); err != nil {
+					fail(w, err)
+					return
+				}
 				fail(w, errors.New("repair limit reached; human continuation required"))
 				return
 			}
+			candidate = &copyTask
 		}
 		target := t.Step
+		if candidate != nil {
+			target = candidate.Step
+		}
 		if delivery {
 			target = -1
 			for i, step := range t.Steps {
@@ -156,12 +162,13 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 			fail(w, errors.New("start the eligible step first"))
 			return
 		}
+		previous := *worker
 		worker.Delivery = delivery
-		if e := s.enqueue(worker, in.Message, in.RequestID); e != nil {
-			fail(w, e)
+		if err := s.acceptConfirmedTurn(worker, in.Message, in.RequestID, key, false, candidate); err != nil {
+			*worker = previous
+			fail(w, err)
 			return
 		}
-		_ = s.request(key, t.ID)
 		jsonReply(w, 200, map[string]any{"task": t, "session": worker})
 		return
 	case "cancel_task":
@@ -215,18 +222,22 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 			fail(w, errors.New("PR head differs from the human-approved revision"))
 			return
 		}
-		t.PRURL = in.PRURL
-		t.Activity = "Waiting for verified merge"
-		t.GitHubHead = pr.HeadRefOID
-		t.ObservedAt = now()
-		t.GitHubError = ""
-		if e = s.saveTask(t); e != nil {
-			fail(w, e)
+		if t.PRURL == in.PRURL && t.GitHubHead == pr.HeadRefOID {
+			session.Reported = true
+			jsonReply(w, 200, map[string]any{"task": t})
+			return
+		}
+		copyTask := *t
+		copyTask.PRURL = in.PRURL
+		copyTask.Activity = "Waiting for verified merge"
+		copyTask.GitHubHead = pr.HeadRefOID
+		copyTask.ObservedAt = now()
+		copyTask.GitHubError = ""
+		if err := s.commitTransition(t, &copyTask, "Approved revision published for task "+t.ID+": "+in.PRURL+". It remains in Review until GitHub verifies merge.", nil); err != nil {
+			fail(w, err)
 			return
 		}
 		session.Reported = true
-		s.notify(t.ProjectID, "Approved revision published for task "+t.ID+": "+in.PRURL+". It remains in Review until GitHub verifies merge.")
-		s.signal()
 		jsonReply(w, 200, map[string]any{"task": t})
 		return
 	case "report":

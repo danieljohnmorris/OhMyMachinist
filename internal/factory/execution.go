@@ -396,11 +396,13 @@ func (s *Service) start(t *Task) (*Session, error) {
 		return nil, errors.New("repair limit reached; human attention required")
 	}
 	if strings.EqualFold(step.Stage, "review") && step.Type == "agent" { // Human review until provider read-only containment is proved.
-		t.Review = "Human review required: inspect the submitted diff and checks."
-		s.advance(t)
-		if e := s.saveTask(t); e != nil {
-			return nil, e
+		copyTask := *t
+		copyTask.Review = "Human review required: inspect the submitted diff and checks."
+		s.advance(&copyTask)
+		if err := s.saveTask(&copyTask); err != nil {
+			return nil, err
 		}
+		*t = copyTask
 		s.signal()
 		return nil, nil
 	}
@@ -411,19 +413,24 @@ func (s *Service) start(t *Task) (*Session, error) {
 			break
 		}
 	}
-	if v == nil {
+	fresh := v == nil
+	if fresh {
 		v = &Session{ID: id("s_"), ProjectID: t.ProjectID, TaskID: t.ID, Role: step.Agent, Directory: t.Directory, Step: t.Step, Status: "idle", CreatedAt: now()}
 		s.sessions[v.ID] = v
 	}
+	previous := *v
 	v.Delivery = false
-	t.Status = "active"
-	t.Stage = step.Stage
-	t.Activity = "Queued: " + step.Name
-	if e := s.saveTask(t); e != nil {
-		return nil, e
-	}
-	if e := s.enqueue(v, t.Activity+"\n"+v.Pending, id("step_")); e != nil {
-		return nil, e
+	copyTask := *t
+	copyTask.Status = "active"
+	copyTask.Stage = step.Stage
+	copyTask.Activity = "Queued: " + step.Name
+	request := id("step_")
+	if err := s.acceptConfirmedTurn(v, copyTask.Activity+"\n"+v.Pending, request, "turn:"+v.ID+":"+request, false, &copyTask); err != nil {
+		*v = previous
+		if fresh {
+			delete(s.sessions, v.ID)
+		}
+		return nil, err
 	}
 	return v, nil
 }

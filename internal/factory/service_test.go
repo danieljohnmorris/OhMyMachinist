@@ -708,6 +708,7 @@ func TestForemanCannotMessagePastRepairLimit(t *testing.T) {
 	worker := &Session{ID: "builder", ProjectID: task.ProjectID, TaskID: task.ID, Role: "builder", Status: "completed", Step: 2, Directory: task.Directory}
 	s.sessions[worker.ID] = worker
 	foreman, _ := s.foreman(task.ProjectID)
+	foreman.Status = "running"
 	s.active = foreman.ID
 	s.tokens["foreman-token"] = foreman.ID
 	s.mu.Unlock()
