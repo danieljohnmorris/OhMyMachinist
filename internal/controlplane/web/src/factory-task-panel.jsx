@@ -428,7 +428,10 @@ export function TaskPanel({ detail, busy, close, mutate, onDiscuss }) {
                       }
                     >
                       <summary>
-                        <strong>{session.role}</strong>
+                        <strong>
+                          {session.role ||
+                            (session.type === "script" ? "Check run" : "Run")}
+                        </strong>
                         <small>
                           {(session.status || "Loading").replaceAll("_", " ")}
                         </small>

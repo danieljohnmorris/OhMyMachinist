@@ -277,12 +277,25 @@
   flex: 1;
   color: var(--muted-foreground);
 }
+.review-file-tools label:focus-within {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 14%, transparent);
+}
 .review-file-tools input {
   min-width: 0;
+  min-height: 20px;
   width: 100%;
   background: none;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
   font-size: 12px;
   outline: none;
+}
+.review-file-tools input:focus {
+  outline: none;
+  box-shadow: none;
 }
 .review-file {
   margin: 0 0 12px;

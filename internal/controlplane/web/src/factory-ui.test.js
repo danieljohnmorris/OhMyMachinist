@@ -153,7 +153,7 @@ test("factory shows real worker permissions, transcript, and current approval ve
       body = {
         session: {
           id: "worker",
-          role: "builder",
+          role: "",
           status: task.status === "failed" ? "failed" : "awaiting_permission",
         },
         events: [
@@ -286,6 +286,10 @@ test("factory shows real worker permissions, transcript, and current approval ve
     .dispatchEvent(
       new dom.window.MouseEvent("mousedown", { bubbles: true, button: 0 }),
     );
+  assert.equal(
+    document.querySelector(".review-agent summary strong").textContent,
+    "Run",
+  );
   const detailReads = () =>
     calls.filter(
       ([url, options]) =>
