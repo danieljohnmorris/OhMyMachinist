@@ -398,8 +398,13 @@ func workspaceAt(ctx context.Context, p config.FactoryProject, h config.FactoryH
 		return "", "", "", errors.New("source repository returned an empty revision")
 	}
 	branch := "codex/factory-" + task
-	if _, e := projectGit(ctx, p, h, p.Path, "worktree", "add", "-b", branch, dir, base); e != nil {
-		return "", "", "", e
+	// Create the branch first so checkout failure still has verified ownership.
+	if _, e := projectGit(ctx, p, h, p.Path, "branch", branch, base); e != nil {
+		// An existing branch or lost SSH acknowledgement has no verified ownership.
+		return dir, branch, "", e
+	}
+	if _, e := projectGit(ctx, p, h, p.Path, "worktree", "add", dir, branch); e != nil {
+		return dir, branch, base, e
 	}
 	return dir, branch, base, nil
 }
@@ -408,6 +413,22 @@ func workspaceAt(ctx context.Context, p config.FactoryProject, h config.FactoryH
 func cleanupWorkspace(ctx context.Context, p config.FactoryProject, h config.FactoryHost, dir, branch, base string) error {
 	if base == "" {
 		return errors.New("original revision is unknown")
+	}
+	// Git may remove a failed checkout while leaving its newly created branch.
+	registered, e := projectGit(ctx, p, h, p.Path, "worktree", "list", "--porcelain")
+	if e != nil {
+		return e
+	}
+	used := false
+	for _, line := range strings.Split(registered, "\n") {
+		if line == "branch refs/heads/"+branch {
+			used = true
+			break
+		}
+	}
+	if !used {
+		_, e = projectGit(ctx, p, h, p.Path, "update-ref", "-d", "refs/heads/"+branch, base)
+		return e
 	}
 	actualBranch, e := projectGit(ctx, p, h, dir, "symbolic-ref", "--short", "HEAD")
 	if e != nil {

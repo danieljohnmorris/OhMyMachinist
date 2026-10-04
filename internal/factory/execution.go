@@ -235,6 +235,10 @@ func (s *Service) execute(ctx context.Context, v Session, token string, runner R
 	if current == nil {
 		return
 	}
+	originalSession := current
+	copySession := *current
+	current = &copySession
+	var originalTask, finishedTask *Task
 	current.ProviderID = provider
 	if current.Status == "cancelled" || (current.Status == "interrupted" && ctx.Err() != nil) || s.closed {
 		current.Status = "interrupted"
@@ -249,20 +253,30 @@ func (s *Service) execute(ctx context.Context, v Session, token string, runner R
 			current.Status = "interrupted"
 		}
 		current.Error = runErr.Error()
-		_ = s.event(v.ID, Event{Kind: "error", Text: runErr.Error()})
+
 	} else {
 		current.Status = "completed"
-		_ = s.event(v.ID, Event{Kind: "completed", Title: "Turn complete"})
+
 	}
 	workerAttention := ""
 	if t := s.tasks[v.TaskID]; t != nil && (t.Step == v.Step || v.Delivery) && t.Status != "cancelled" && t.Status != "done" {
+		originalTask = t
+		copyTask := *t
+		copyTask.Checks = append([]Check(nil), t.Checks...)
+		t = &copyTask
+		finishedTask = t
 		if v.Delivery && current.Reported && current.Status == "interrupted" {
 			t.Status = "interrupted"
 			t.Activity = "PR linked. Confirm the remote delivery process has stopped."
 			workerAttention = t.Activity
 		} else if len(script) > 0 {
-			rev, dirty, readErr := s.workspaceState(t)
+			rev, dirty, readErr := s.workspaceState(originalTask)
 			if readErr != nil {
+				// Preserve cancellation or task changes made while Git reads were unlocked.
+				*t = *originalTask
+				t.Checks = append([]Check(nil), originalTask.Checks...)
+				*current = *originalSession
+				current.ProviderID = provider
 				if t.Status != "cancelled" && current.Status != "cancelled" {
 					t.Status, current.Status = "interrupted", "interrupted"
 					t.Activity = "Cannot verify check workspace: " + readErr.Error()
@@ -305,21 +319,65 @@ func (s *Service) execute(ctx context.Context, v Session, token string, runner R
 			}
 			current.Error = t.Activity
 			workerAttention = t.Activity
-			_ = s.event(v.ID, Event{Kind: "error", Text: t.Activity})
+
 		}
-		_ = s.saveTask(t)
 	}
-	_ = s.saveSession(current)
+	message := ""
+	if len(script) > 0 && !s.closed && finishedTask != nil && finishedTask.Status != "cancelled" {
+		message = "Script result for task " + v.TaskID + ": inspect checks and continue the eligible pipeline."
+	}
+	if workerAttention != "" && !s.closed {
+		message = "Worker task " + v.TaskID + " needs human attention: " + workerAttention + " Ask the human to inspect saved work and explicitly confirm recovery. Do not automatically retry or claim pipeline completion."
+	}
+	var persistErr error
+	if finishedTask != nil && message != "" {
+		persistErr = s.commitTransition(originalTask, finishedTask, message, map[*Session]Session{originalSession: *current})
+	} else {
+		records := []recordWrite{{"session", current.ID, diskSession(current)}}
+		if finishedTask != nil {
+			records = append(records, recordWrite{"task", finishedTask.ID, diskTask(finishedTask)})
+		}
+		persistErr = s.commitRecords(records, "", Event{})
+		if persistErr == nil {
+			*originalSession = *current
+			if finishedTask != nil {
+				*originalTask = *finishedTask
+			}
+		}
+	}
+	if persistErr != nil {
+		// A failed result transaction must not advance a pipeline or claim completion.
+		recovery := *originalSession
+		if provider != "" {
+			recovery.ProviderID = provider
+		}
+		recovery.Status = "interrupted"
+		recovery.Error = "Could not persist turn result: " + persistErr.Error() + ". Review saved work before explicitly recovering."
+		records := []recordWrite{{"session", recovery.ID, diskSession(&recovery)}}
+		var paused *Task
+		if originalTask != nil && originalTask.Status != "cancelled" {
+			copyTask := *originalTask
+			copyTask.Status = "interrupted"
+			copyTask.Activity = recovery.Error
+			paused = &copyTask
+			records = append(records, recordWrite{"task", paused.ID, diskTask(paused)})
+		}
+		_ = s.commitRecords(records, "", Event{})
+		*originalSession = recovery
+		if paused != nil {
+			*originalTask = *paused
+		}
+	}
+	current = originalSession
+	if current.Status == "completed" {
+		_ = s.event(v.ID, Event{Kind: "completed", Title: "Turn complete"})
+	} else if current.Error != "" {
+		_ = s.event(v.ID, Event{Kind: "error", Text: current.Error})
+	}
 	s.active = ""
 	s.cancel = nil
 	if len(current.ReportQueue) > 0 && current.Status == "completed" && !s.closed {
 		_ = s.enqueue(current, "Inspect the pending worker reports and continue eligible work.", id("reports_"))
-	}
-	if len(script) > 0 && !s.closed {
-		s.notify(v.ProjectID, "Script result for task "+v.TaskID+": inspect checks and continue the eligible pipeline.")
-	}
-	if workerAttention != "" && !s.closed {
-		s.notify(v.ProjectID, "Worker task "+v.TaskID+" needs human attention: "+workerAttention+" Ask the human to inspect saved work and explicitly confirm recovery. Do not automatically retry or claim pipeline completion.")
 	}
 	s.signal()
 	s.next()
