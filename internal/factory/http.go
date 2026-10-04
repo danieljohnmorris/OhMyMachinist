@@ -268,8 +268,18 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request) {
 			project, directory, base := t.ProjectID, t.Directory, t.BaseRevision
 			version, status := t.Version, t.Status
 			s.mu.Unlock()
-			diff, diffErr := s.git(project, directory, "diff", base)
-			files, filesErr := s.git(project, directory, "diff", "--name-only", base)
+			diff, diffTruncated, diffErr := s.gitLimited(project, directory, 1<<20, "diff", base)
+			if diffTruncated {
+				diff += "\n[Output truncated: diff exceeds 1 MiB. Inspect the full change in the repository before approval.]"
+			}
+			files, filesTruncated, filesErr := s.gitLimited(project, directory, 64<<10, "diff", "--name-only", base)
+			if filesTruncated {
+				if end := strings.LastIndex(files, "\n"); end >= 0 {
+					files = files[:end]
+				} else {
+					files = ""
+				}
+			}
 			s.mu.Lock()
 			if s.closed || s.tasks[t.ID] != t || t.Version != version || t.Status != status || t.BaseRevision != base || t.Directory != directory {
 				fail(w, errors.New("task changed while reading changes; reload before continuing"))
@@ -284,7 +294,7 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			jsonReply(w, 200, map[string]any{"task": t, "sessions": sessions, "diff": diff, "files": strings.Fields(files), "checks": t.Checks})
+			jsonReply(w, 200, map[string]any{"task": t, "sessions": sessions, "diff": diff, "diff_truncated": diffTruncated, "files": strings.Fields(files), "files_truncated": filesTruncated, "checks": t.Checks})
 			return
 		}
 		if len(parts) == 3 && r.Method == "POST" {

@@ -57,7 +57,8 @@ func serveFactoryTools(ctx context.Context, input io.Reader, output io.Writer, a
 	}
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 4096), 1<<20)
-	client := &http.Client{Timeout: 45 * time.Second}
+	// Remote setup can take two minutes; delivery can include two workspace reads and a GitHub read.
+	client := &http.Client{Timeout: 3 * time.Minute}
 	for scanner.Scan() {
 		var request struct {
 			JSONRPC string          `json:"jsonrpc"`

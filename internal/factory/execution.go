@@ -42,6 +42,19 @@ func (s *Service) git(project, dir string, args ...string) (string, error) {
 	}
 	return strings.TrimSpace(string(b)), nil
 }
+
+// gitLimited keeps browser review output bounded without changing revision/status reads.
+func (s *Service) gitLimited(project, dir string, limit int, args ...string) (string, bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := s.command(ctx, project, dir, append([]string{"git"}, args...))
+	out, stderr := &boundedBuffer{limit: limit}, &boundedBuffer{limit: 64 << 10}
+	cmd.Stdout, cmd.Stderr = out, stderr
+	if err := cmd.Run(); err != nil {
+		return "", false, fmt.Errorf("git: %s (%w)", stderr.String(), err)
+	}
+	return string(out.data), out.truncated, nil
+}
 func (s *Service) foremanDirectory(project string) string {
 	p := s.cfg.Projects[project]
 	if p.Host == "" || p.Host == "local" {
@@ -283,10 +296,8 @@ func (s *Service) execute(ctx context.Context, v Session, token string, runner R
 	_ = s.saveSession(current)
 	s.active = ""
 	s.cancel = nil
-	if len(current.ReportQueue) > 0 && !s.closed {
-		messages := strings.Join(current.ReportQueue, "\n")
-		current.ReportQueue = nil
-		_ = s.enqueue(current, messages, id("reports_"))
+	if len(current.ReportQueue) > 0 && current.Status == "completed" && !s.closed {
+		_ = s.enqueue(current, "Inspect the pending worker reports and continue eligible work.", id("reports_"))
 	}
 	if len(script) > 0 && !s.closed {
 		s.notify(v.ProjectID, "Script result for task "+v.TaskID+": inspect checks and continue the eligible pipeline.")
@@ -296,12 +307,16 @@ func (s *Service) execute(ctx context.Context, v Session, token string, runner R
 }
 
 type boundedBuffer struct {
-	data  []byte
-	limit int
+	data      []byte
+	limit     int
+	truncated bool
 }
 
 func (b *boundedBuffer) Write(p []byte) (int, error) {
 	n := len(p)
+	if n > b.limit-len(b.data) {
+		b.truncated = true
+	}
 	if left := b.limit - len(b.data); left > 0 {
 		if len(p) > left {
 			p = p[:left]
@@ -312,7 +327,7 @@ func (b *boundedBuffer) Write(p []byte) (int, error) {
 }
 func (b *boundedBuffer) String() string {
 	out := string(b.data)
-	if len(b.data) >= b.limit {
+	if b.truncated {
 		out += "\n[Output truncated]"
 	}
 	return out

@@ -517,12 +517,14 @@ export function FactoryApp({ status, onStatus }) {
               {detail.diff && (
                 <section>
                   <h3>Changes</h3>
+                  {detail.diff_truncated && <p role="alert">This change is too large to show in full. Review the complete diff before approving delivery.</p>}
                   <pre className="factory-diff">{detail.diff}</pre>
                 </section>
               )}
               {detail.files?.length > 0 && (
                 <section>
                   <h3>Files</h3>
+                  {detail.files_truncated && <p role="alert">Only part of the file list is shown.</p>}
                   {detail.files.map((f) => (
                     <p key={f.path || f}>{f.path || f}</p>
                   ))}

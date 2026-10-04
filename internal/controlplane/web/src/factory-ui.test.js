@@ -91,7 +91,7 @@ test("factory shows real worker permissions, transcript, and current approval ve
         ],
       };
     else if (url === "/api/factory/tasks/task_a")
-      body = { task, diff: "+ search", sessions: [{ id: "worker" }] };
+      body = { task, diff: "+ search", diff_truncated: true, files: ["search.js"], files_truncated: true, sessions: [{ id: "worker" }] };
     return { ok: true, json: async () => body };
   };
   const server = await createServer({
@@ -128,6 +128,8 @@ test("factory shows real worker permissions, transcript, and current approval ve
     assert.match(document.body.textContent, /Saved worker output/),
   );
   assert.match(document.body.textContent, /Unit tests · Passed/);
+  assert.match(document.body.textContent, /too large to show in full/);
+  assert.match(document.body.textContent, /Only part of the file list/);
   [...document.querySelectorAll("button")]
     .find((b) => b.textContent === "Allow")
     .click();
