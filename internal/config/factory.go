@@ -10,6 +10,20 @@ import (
 
 var factoryProjectID = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
+// ValidGitHubRepository validates the two URL path components used for PR tracking.
+func ValidGitHubRepository(value string) bool {
+	parts := strings.Split(value, "/")
+	if len(parts) != 2 {
+		return false
+	}
+	for _, part := range parts {
+		if !factoryProjectID.MatchString(part) || part == "." || part == ".." {
+			return false
+		}
+	}
+	return true
+}
+
 // FactoryConfig is operator-managed configuration, never agent-authored state.
 type FactoryConfig struct {
 	Hosts           map[string]FactoryHost     `toml:"hosts"`
@@ -160,7 +174,7 @@ func (c Config) ResolveFactory() (ResolvedFactory, error) {
 		if p.Name == "" {
 			p.Name = id
 		}
-		if p.GitHub != "" && (len(strings.Split(p.GitHub, "/")) != 2 || strings.ContainsAny(p.GitHub, " \r\n\x00")) {
+		if p.GitHub != "" && !ValidGitHubRepository(p.GitHub) {
 			return fail("project %q github must be owner/repository", id)
 		}
 		r.Projects[id] = p

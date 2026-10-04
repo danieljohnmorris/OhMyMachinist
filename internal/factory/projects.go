@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -61,8 +60,6 @@ func validGitURL(raw string) bool {
 	return true
 }
 
-var githubPart = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
-
 func githubFromOrigin(origin string) string {
 	var path string
 	if strings.HasPrefix(origin, "git@github.com:") {
@@ -75,8 +72,7 @@ func githubFromOrigin(origin string) string {
 		path = strings.TrimPrefix(u.Path, "/")
 	}
 	path = strings.TrimSuffix(path, ".git")
-	parts := strings.Split(path, "/")
-	if len(parts) != 2 || !githubPart.MatchString(parts[0]) || !githubPart.MatchString(parts[1]) {
+	if !config.ValidGitHubRepository(path) {
 		return ""
 	}
 	return path
@@ -106,7 +102,7 @@ func (s *Service) addProject(w http.ResponseWriter, r *http.Request) {
 		fail(w, errors.New("git_url is only used when cloning a repository"))
 		return
 	}
-	if in.GitHub != "" && (len(strings.Split(in.GitHub, "/")) != 2 || strings.ContainsAny(in.GitHub, " \r\n\x00")) {
+	if in.GitHub != "" && !config.ValidGitHubRepository(in.GitHub) {
 		fail(w, errors.New("github must be owner/repository"))
 		return
 	}

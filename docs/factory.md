@@ -58,7 +58,9 @@ project and its task workspaces to that machine. Remote paths are paths on that
 host. Remote credentials and build tools must already be installed there. Git
 URLs cannot contain passwords or HTTPS user credentials; use the host's normal
 Git authentication. GitHub delivery tracking is inferred from a GitHub origin;
-other Git hosts remain usable without GitHub PR tracking.
+other Git hosts remain usable without GitHub PR tracking. Explicit `github` values
+use two nonempty safe components, `owner/repository`, with ASCII letters, numbers,
+dots, hyphens or underscores; query strings and fragments are not allowed.
 
 Browser-added projects are saved in the existing Machinist SQLite database.
 Configured project IDs take precedence over stored entries after restart.
@@ -125,7 +127,8 @@ has stopped. SSH cancellation stops the local connection but cannot prove the
 remote process is dead. Inspect the remote host before confirming recovery.
 Never resume uncertain remote work on another host. An agent process exiting is
 not pipeline completion. If it exits without an accepted structured report, the
-foreman is notified and the task pauses for explicit human recovery.
+foreman is notified and the task pauses for explicit human recovery. Delivery
+turns must link the published PR; an unlinked exit also pauses for human recovery.
 
 A project permits four unfinished tasks. Turns queue across conversations; wait
 or stop before sending another instruction to a busy conversation. After three

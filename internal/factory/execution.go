@@ -252,8 +252,12 @@ func (s *Service) execute(ctx context.Context, v Session, token string, runner R
 		_ = s.event(v.ID, Event{Kind: "completed", Title: "Turn complete"})
 	}
 	workerAttention := ""
-	if t := s.tasks[v.TaskID]; t != nil && t.Step == v.Step && t.Status != "cancelled" {
-		if len(script) > 0 {
+	if t := s.tasks[v.TaskID]; t != nil && (t.Step == v.Step || v.Delivery) && t.Status != "cancelled" && t.Status != "done" {
+		if v.Delivery && current.Reported && current.Status == "interrupted" {
+			t.Status = "interrupted"
+			t.Activity = "PR linked. Confirm the remote delivery process has stopped."
+			workerAttention = t.Activity
+		} else if len(script) > 0 {
 			rev, dirty, readErr := s.workspaceState(t)
 			if readErr != nil {
 				if t.Status != "cancelled" && current.Status != "cancelled" {
@@ -293,6 +297,9 @@ func (s *Service) execute(ctx context.Context, v Session, token string, runner R
 		} else if !current.Reported && t.Status == "active" {
 			t.Status, current.Status = "interrupted", "interrupted"
 			t.Activity = "Agent finished without a structured report. Review saved work before resuming."
+			if v.Delivery {
+				t.Activity = "Delivery finished without linking a pull request. Review saved work and GitHub before resuming."
+			}
 			current.Error = t.Activity
 			workerAttention = t.Activity
 			_ = s.event(v.ID, Event{Kind: "error", Text: t.Activity})

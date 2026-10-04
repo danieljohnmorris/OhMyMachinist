@@ -240,6 +240,7 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 			fail(w, e)
 			return
 		}
+		session.Reported = true
 		s.notify(t.ProjectID, "Approved revision published for task "+t.ID+": "+in.PRURL+". It remains in Review until GitHub verifies merge.")
 		s.signal()
 		jsonReply(w, 200, map[string]any{"task": t})

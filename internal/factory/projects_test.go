@@ -419,3 +419,14 @@ func TestGitURLRejectsCredentialsAndOptionLikeHosts(t *testing.T) {
 		}
 	}
 }
+
+func TestBrowserProjectRejectsUnsafeGitHubRepository(t *testing.T) {
+	s, _ := fixture(t)
+	for _, value := range []string{"owner/", "/repo", "owner/repo?x", "owner/repo#x", "owner/..", "owner/repo%2Fextra"} {
+		in := projectInput{RequestID: "unsafe", Name: "Project", Host: "local", Source: "folder", Path: s.cfg.Projects["project"].Path, GitHub: value}
+		w := call(s, "POST", "projects", projectBody(t, in), "")
+		if w.Code != 409 || !strings.Contains(w.Body.String(), "github must be owner/repository") {
+			t.Fatalf("unsafe GitHub repository accepted: %q %d %s", value, w.Code, w.Body.String())
+		}
+	}
+}

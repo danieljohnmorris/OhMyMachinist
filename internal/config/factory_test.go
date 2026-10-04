@@ -240,3 +240,29 @@ func TestFactoryProjectIDsAreSafeURLSegments(t *testing.T) {
 		})
 	}
 }
+
+func TestFactoryGitHubRepositoryUsesSafeNonemptyComponents(t *testing.T) {
+	for _, value := range []string{"owner/", "/repo", "owner/repo?x", "owner/repo#x", "owner/repo/extra", "./repo", "owner/..", "owner/repo%2Fextra", "owner name/repo", "owner/repo\\name"} {
+		t.Run(value, func(t *testing.T) {
+			c := factoryFixture(t)
+			p := c.Factory.Projects["project"]
+			p.GitHub = value
+			c.Factory.Projects["project"] = p
+			_, err := c.ResolveFactory()
+			if err == nil || !strings.Contains(err.Error(), "github must be owner/repository") {
+				t.Fatalf("unsafe GitHub repository accepted: %q err=%v", value, err)
+			}
+		})
+	}
+	for _, value := range []string{"", "owner/repo", "owner-name/repo_name.v2"} {
+		t.Run(value, func(t *testing.T) {
+			c := factoryFixture(t)
+			p := c.Factory.Projects["project"]
+			p.GitHub = value
+			c.Factory.Projects["project"] = p
+			if _, err := c.ResolveFactory(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

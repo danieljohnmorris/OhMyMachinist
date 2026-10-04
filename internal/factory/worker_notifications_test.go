@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"github.com/owainlewis/machinist/internal/config"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -331,6 +333,103 @@ func TestHumanReviewWaitsForAnyEarlierWorkspaceOwner(t *testing.T) {
 			s.mu.Unlock()
 			if e == nil || step != 4 || review != "" {
 				t.Fatal("human-review stage advanced while earlier session still owned workspace")
+			}
+		})
+	}
+}
+
+func TestDeliveryExitRequiresLinkedPRAndPreservesAcceptedPublication(t *testing.T) {
+	for _, outcome := range []string{"unlinked", "error", "linked", "linked-remote-error"} {
+		t.Run(outcome, func(t *testing.T) {
+			s, _ := fixture(t)
+			s.mu.Lock()
+			task, e := s.create("project", "Deliver", "Publish the approved revision", "")
+			if e != nil {
+				s.mu.Unlock()
+				t.Fatal(e)
+			}
+			task.Step = len(task.Steps)
+			task.Stage = "Review"
+			task.Revision = task.BaseRevision
+			task.CodeApproved = task.Revision
+			task.CodeApprovalVersion = task.Version
+			if outcome == "linked-remote-error" {
+				p := s.cfg.Projects["project"]
+				p.Host = "vm"
+				s.cfg.Projects["project"] = p
+				s.cfg.Hosts["vm"] = config.FactoryHost{Name: "VM", SSH: "vm"}
+				task.ProjectSnapshot = p
+				task.HostSnapshot = s.cfg.Hosts["vm"]
+			}
+			builder := &Session{ID: "delivery-builder", ProjectID: task.ProjectID, TaskID: task.ID, Role: "builder", Status: "completed", Step: 2, Directory: task.Directory}
+			s.sessions[builder.ID] = builder
+			foreman, e := s.foreman("project")
+			if e != nil {
+				s.mu.Unlock()
+				t.Fatal(e)
+			}
+			foreman.Status = "running"
+			s.active = foreman.ID
+			s.tokens["delivery-foreman"] = foreman.ID
+			s.mu.Unlock()
+			tools := t.TempDir()
+			gh := "#!/bin/sh\nprintf '%s\\n' " + shellQuote(`{"state":"OPEN","headRefOid":"`+task.Revision+`","statusCheckRollup":[]}`) + "\n"
+			if e = os.WriteFile(filepath.Join(tools, "gh"), []byte(gh), 0700); e != nil {
+				t.Fatal(e)
+			}
+			if e = os.WriteFile(filepath.Join(tools, "ssh"), []byte("#!/bin/sh\nexec sh -c \"$4\"\n"), 0700); e != nil {
+				t.Fatal(e)
+			}
+			t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
+			notifications := make(chan string, 3)
+			deliveries := make(chan struct{}, 2)
+			s.SetRunner(func(ctx context.Context, r RunRequest, emit func(Event), permission func(context.Context, string) (bool, error)) (string, error) {
+				if strings.HasPrefix(r.SystemPrompt, "Foreman") {
+					notifications <- r.Prompt
+					return "foreman", nil
+				}
+				deliveries <- struct{}{}
+				if strings.HasPrefix(outcome, "linked") {
+					w := call(s, "POST", "tools/link_pr", `{"task_id":"`+task.ID+`","pr_url":"https://github.com/example/project/pull/7"}`, r.Token)
+					if w.Code != 200 {
+						t.Error(w.Body.String())
+					}
+				}
+				if outcome == "error" || outcome == "linked-remote-error" {
+					return "builder", errors.New("provider disconnected")
+				}
+				return "builder", nil
+			})
+			w := call(s, "POST", "tools/send_message", `{"request_id":"deliver","task_id":"`+task.ID+`","message":"Publish approved work"}`, "delivery-foreman")
+			if w.Code != 200 {
+				t.Fatal(w.Body.String())
+			}
+			s.mu.Lock()
+			s.active = ""
+			foreman.Status = "completed"
+			delete(s.tokens, "delivery-foreman")
+			s.next()
+			s.mu.Unlock()
+			idle(t, s)
+			s.mu.Lock()
+			status, workerStatus, linked := task.Status, builder.Status, task.PRURL
+			s.mu.Unlock()
+			if len(deliveries) != 1 || len(notifications) != 1 {
+				t.Fatalf("unexpected delivery/notice counts: %d/%d", len(deliveries), len(notifications))
+			}
+			notice := <-notifications
+			if strings.HasPrefix(outcome, "linked") {
+				if linked == "" || strings.Contains(notice, "without linking") {
+					t.Fatal("accepted PR publication mistaken for missing result")
+				}
+				if outcome == "linked" && (status != "active" || workerStatus != "completed" || strings.Contains(notice, "needs human attention")) {
+					t.Fatal("successful delivery did not remain in Review")
+				}
+				if outcome == "linked-remote-error" && (status != "interrupted" || workerStatus != "interrupted" || !strings.Contains(notice, "Confirm the remote delivery process")) {
+					t.Fatal("remote publication hid uncertain process ownership")
+				}
+			} else if status != "interrupted" || workerStatus != "interrupted" || linked != "" || !strings.Contains(notice, "needs human attention") {
+				t.Fatal("unlinked delivery silently stalled")
 			}
 		})
 	}
