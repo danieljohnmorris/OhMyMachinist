@@ -457,7 +457,7 @@ func TestBrowserRemotePathsUsePOSIXRules(t *testing.T) {
 func TestRemoteWorkspaceUsesPOSIXJoinAndDir(t *testing.T) {
 	bin := t.TempDir()
 	log := filepath.Join(bin, "command")
-	script := "#!/bin/sh\nprintf '%s' \"$4\" > " + shellQuote(log) + "\n"
+	script := "#!/bin/sh\nprintf '%s' \"$4\" > " + shellQuote(log) + "\ncase \"$4\" in *rev-parse*) printf 'source-revision\\n';; esac\n"
 	if e := os.WriteFile(filepath.Join(bin, "ssh"), []byte(script), 0700); e != nil {
 		t.Fatal(e)
 	}

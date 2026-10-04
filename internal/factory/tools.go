@@ -453,13 +453,17 @@ func (s *Service) approve(t *Task, version int, subject string) error {
 		t.DesignApprovalVersion = version
 	}
 	s.advance(t)
+	return s.commitTransition(original, t, "Human approved "+subject+" for task "+t.ID+". Inspect and continue the next eligible step.", nil)
+}
+
+// Publish a human transition and its coordinator feedback together.
+func (s *Service) commitTransition(original, t *Task, message string, updates map[*Session]Session) error {
 	foreman, err := s.foreman(t.ProjectID)
 	if err != nil {
 		return err
 	}
 	copyForeman := *foreman
 	copyForeman.ReportQueue = append([]string(nil), foreman.ReportQueue...)
-	message := "Human approved " + subject + " for task " + t.ID + ". Inspect and continue the next eligible step."
 	queue := false
 	switch foreman.Status {
 	case "running", "awaiting_permission", "interrupted", "failed", "cancelled":
@@ -472,8 +476,15 @@ func (s *Service) approve(t *Task, version int, subject string) error {
 		copyForeman.RequestID = id("notification_")
 		queue = true
 	}
-	if err = s.commitRecords([]recordWrite{{"task", t.ID, diskTask(t)}, {"session", foreman.ID, diskSession(&copyForeman)}}, "", Event{}); err != nil {
+	records := []recordWrite{{"task", t.ID, diskTask(t)}, {"session", foreman.ID, diskSession(&copyForeman)}}
+	for worker, update := range updates {
+		records = append(records, recordWrite{"session", worker.ID, diskSession(&update)})
+	}
+	if err = s.commitRecords(records, "", Event{}); err != nil {
 		return err
+	}
+	for worker, update := range updates {
+		*worker = update
 	}
 	*original = *t
 	*foreman = copyForeman
@@ -549,6 +560,10 @@ func (s *Service) changes(t *Task, version int, message string) error {
 	if strings.TrimSpace(message) == "" {
 		return errors.New("feedback is required")
 	}
+	original := t
+	copyTask := *t
+	t = &copyTask
+	updates := map[*Session]Session{}
 	if t.ApprovalSubject == "design" || strings.EqualFold(t.Stage, "design") {
 		t.Step = 0
 		t.Version++
@@ -557,16 +572,21 @@ func (s *Service) changes(t *Task, version int, message string) error {
 		t.Activity = "Design changes requested: " + message
 		t.ApprovalSubject = ""
 	} else {
-		if e := s.repair(t, message); e != nil {
+		if e := repairTask(t, message); e != nil {
 			return e
 		}
 	}
-	if e := s.saveTask(t); e != nil {
-		return e
+	if t.Stage == "Build" {
+		for _, worker := range s.sessions {
+			if worker.TaskID == t.ID && worker.Step == t.Step {
+				update := *worker
+				update.Delivery = false
+				update.Pending = message
+				updates[worker] = update
+			}
+		}
 	}
-	s.notify(t.ProjectID, "Human requested changes on task "+t.ID+": "+message+". Inspect task and start the eligible step.")
-	s.signal()
-	return nil
+	return s.commitTransition(original, t, "Human requested changes on task "+t.ID+": "+message+". Inspect task and start the eligible step.", updates)
 }
 
 // notify queues durable reports at a turn boundary instead of interrupting chat.

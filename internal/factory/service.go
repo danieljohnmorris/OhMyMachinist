@@ -356,9 +356,13 @@ func (s *Service) next() {
 
 // workspace uses immutable host/project values and runs without the service lock.
 func workspace(ctx context.Context, p config.FactoryProject, h config.FactoryHost, task string) (string, string, error) {
+	dir, branch, _, err := workspaceAt(ctx, p, h, task)
+	return dir, branch, err
+}
+func workspaceAt(ctx context.Context, p config.FactoryProject, h config.FactoryHost, task string) (string, string, string, error) {
 	if p.Source == "git" {
 		if e := prepareProject(ctx, p, h); e != nil {
-			return "", "", e
+			return "", "", "", e
 		}
 	}
 	var dir string
@@ -367,18 +371,25 @@ func workspace(ctx context.Context, p config.FactoryProject, h config.FactoryHos
 	} else {
 		root, e := os.UserCacheDir()
 		if e != nil {
-			return "", "", e
+			return "", "", "", e
 		}
 		dir = filepath.Join(root, "machinist", "factory", task)
 		if e = os.MkdirAll(filepath.Dir(dir), 0700); e != nil {
-			return "", "", e
+			return "", "", "", e
 		}
 	}
-	branch := "codex/factory-" + task
-	if _, e := projectGit(ctx, p, h, p.Path, "worktree", "add", "-b", branch, dir, "HEAD"); e != nil {
-		return "", "", e
+	base, e := projectGit(ctx, p, h, p.Path, "rev-parse", "HEAD")
+	if e != nil {
+		return "", "", "", e
 	}
-	return dir, branch, nil
+	if base == "" {
+		return "", "", "", errors.New("source repository returned an empty revision")
+	}
+	branch := "codex/factory-" + task
+	if _, e := projectGit(ctx, p, h, p.Path, "worktree", "add", "-b", branch, dir, base); e != nil {
+		return "", "", "", e
+	}
+	return dir, branch, base, nil
 }
 
 // Remove only the worktree just created by this attempt, while preserving any new work.

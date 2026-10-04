@@ -467,14 +467,14 @@ func (s *Service) createWithRequest(project, title, brief, pipeline, requestKey 
 	key := id("t_")
 	s.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	dir, branch, e := workspace(ctx, p, host, key)
-	var base string
+	dir, branch, base, e := workspaceAt(ctx, p, host, key)
 	if e == nil {
-		base, e = projectGit(ctx, p, host, dir, "rev-parse", "HEAD")
+		var observed string
+		observed, e = projectGit(ctx, p, host, dir, "rev-parse", "HEAD")
 		if e != nil {
 			e = fmt.Errorf("record task base revision: %w", e)
-		} else if base == "" {
-			e = errors.New("record task base revision: Git returned an empty revision")
+		} else if observed != base {
+			e = errors.New("record task base revision: workspace differs from the pinned source revision")
 		}
 	}
 	cancel()
