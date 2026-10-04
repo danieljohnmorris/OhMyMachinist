@@ -2,12 +2,41 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 )
+
+// ValidGitURL accepts clone URLs without embedded credentials or option-like hosts.
+func ValidGitURL(raw string) bool {
+	if raw == "" || strings.ContainsAny(raw, "\x00\r\n\t ") || strings.HasPrefix(raw, "-") {
+		return false
+	}
+	// SSH's familiar git@host:path syntax contains a login, never a password.
+	if strings.HasPrefix(raw, "git@") && !strings.Contains(raw, "://") {
+		host, path, ok := strings.Cut(strings.TrimPrefix(raw, "git@"), ":")
+		return ok && host != "" && path != "" && !strings.HasPrefix(host, "-") && !strings.ContainsAny(host, "/:@")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" || strings.HasPrefix(u.Hostname(), "-") || u.Path == "" || u.RawQuery != "" || u.Fragment != "" {
+		return false
+	}
+	if u.Scheme != "https" && u.Scheme != "ssh" {
+		return false
+	}
+	if u.User != nil {
+		if u.Scheme != "ssh" || u.User.Username() != "git" {
+			return false
+		}
+		if _, ok := u.User.Password(); ok {
+			return false
+		}
+	}
+	return true
+}
 
 var factoryProjectID = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
@@ -153,6 +182,15 @@ func (c Config) ResolveFactory() (ResolvedFactory, error) {
 	for id, p := range f.Projects {
 		if !factoryProjectID.MatchString(id) || id == "." || id == ".." {
 			return fail("project ID %q must contain only ASCII letters, numbers, dots, hyphens or underscores, and cannot be . or ..", id)
+		}
+		switch p.Source {
+		case "", "folder": // An omitted source retains existing-folder behavior.
+		case "git":
+			if !ValidGitURL(p.GitURL) {
+				return fail("project %q git source requires a valid HTTPS or SSH git_url without credentials", id)
+			}
+		default:
+			return fail("project %q source must be folder or git", id)
 		}
 		if strings.TrimSpace(p.Path) == "" {
 			return fail("project paths must be non-empty")

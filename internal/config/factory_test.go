@@ -296,3 +296,33 @@ func TestFactoryRemotePathsUsePOSIXRules(t *testing.T) {
 		})
 	}
 }
+
+func TestFactoryProjectSourceValidation(t *testing.T) {
+	for _, tc := range []struct {
+		source, url string
+		valid       bool
+	}{
+		{"", "", true}, {"folder", "", true}, {"folder", "legacy unused value", true},
+		{"unexpected", "", false}, {"Git", "https://github.com/owner/repo.git", false},
+		{"git", "", false}, {"git", "-repository", false}, {"git", "https://token@github.com/owner/repo.git", false},
+		{"git", "ssh://git:secret@github.com/owner/repo.git", false}, {"git", "git@-oProxyCommand=command:repo", false},
+		{"git", "https://github.com/owner/repo.git?token=secret", false}, {"git", "file:///tmp/repo", false},
+		{"git", "https://github.com/owner/repo.git", true}, {"git", "ssh://git@github.com/owner/repo.git", true},
+		{"git", "git@github.com:owner/repo.git", true},
+	} {
+		t.Run(tc.source+tc.url, func(t *testing.T) {
+			c := factoryFixture(t)
+			p := c.Factory.Projects["project"]
+			p.Source = tc.source
+			p.GitURL = tc.url
+			c.Factory.Projects["project"] = p
+			resolved, e := c.ResolveFactory()
+			if (e == nil) != tc.valid {
+				t.Fatalf("source %q URL %q validation mismatch: %v", tc.source, tc.url, e)
+			}
+			if tc.valid && resolved.Projects["project"].Source != tc.source {
+				t.Fatal("source unexpectedly changed")
+			}
+		})
+	}
+}

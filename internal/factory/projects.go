@@ -35,32 +35,7 @@ func projectSource(p config.FactoryProject) string {
 func publicProject(key string, p config.FactoryProject) map[string]any {
 	return map[string]any{"id": key, "name": p.Name, "host": p.Host, "path": p.Path, "source": projectSource(p), "github": p.GitHub}
 }
-func validGitURL(raw string) bool {
-	if raw == "" || strings.ContainsAny(raw, "\x00\r\n\t ") || strings.HasPrefix(raw, "-") {
-		return false
-	}
-	// SSH's familiar git@host:path syntax contains a login, never a password.
-	if strings.HasPrefix(raw, "git@") && !strings.Contains(raw, "://") {
-		host, path, ok := strings.Cut(strings.TrimPrefix(raw, "git@"), ":")
-		return ok && host != "" && path != "" && !strings.HasPrefix(host, "-") && !strings.ContainsAny(host, "/:@")
-	}
-	u, err := url.Parse(raw)
-	if err != nil || u.Hostname() == "" || strings.HasPrefix(u.Hostname(), "-") || u.Path == "" || u.RawQuery != "" || u.Fragment != "" {
-		return false
-	}
-	if u.Scheme != "https" && u.Scheme != "ssh" {
-		return false
-	}
-	if u.User != nil {
-		if u.Scheme != "ssh" || u.User.Username() != "git" {
-			return false
-		}
-		if _, ok := u.User.Password(); ok {
-			return false
-		}
-	}
-	return true
-}
+func validGitURL(raw string) bool { return config.ValidGitURL(raw) }
 
 func githubFromOrigin(origin string) string {
 	var path string
