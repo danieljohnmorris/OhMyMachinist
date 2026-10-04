@@ -3,6 +3,7 @@ package factory
 import (
 	"context"
 	"errors"
+	"github.com/owainlewis/machinist/internal/config"
 	"strings"
 	"testing"
 	"time"
@@ -216,5 +217,121 @@ func TestBlockedWorkerFollowupWithoutReportNeedsExplicitRecovery(t *testing.T) {
 	s.mu.Unlock()
 	if taskStatus != "interrupted" || workerStatus != "interrupted" {
 		t.Fatal("unreported followup can repeat without human recovery")
+	}
+}
+
+func TestReportedRemoteSessionOwnsWorkspaceUntilConfirmedStopped(t *testing.T) {
+	s, _ := fixture(t)
+	s.mu.Lock()
+	task, e := s.create("project", "Remote report", "Preserve workspace ownership", "")
+	if e != nil {
+		s.mu.Unlock()
+		t.Fatal(e)
+	}
+	project := s.cfg.Projects["project"]
+	project.Host = "vm"
+	s.cfg.Projects["project"] = project
+	s.cfg.Hosts["vm"] = config.FactoryHost{Name: "VM", SSH: "vm"}
+	task.ProjectSnapshot = project
+	task.HostSnapshot = s.cfg.Hosts["vm"]
+	s.mu.Unlock()
+	planningRuns := make(chan struct{}, 2)
+	buildStarted := make(chan struct{}, 1)
+	s.SetRunner(func(ctx context.Context, r RunRequest, emit func(Event), permission func(context.Context, string) (bool, error)) (string, error) {
+		if strings.HasPrefix(r.SystemPrompt, "Foreman") {
+			return "foreman", nil
+		}
+		if r.SystemPrompt == "Builder" {
+			buildStarted <- struct{}{}
+			<-ctx.Done()
+			return "builder", ctx.Err()
+		}
+		planningRuns <- struct{}{}
+		w := call(s, "POST", "tools/report", `{"task_id":"`+task.ID+`","report_id":"design","summary":"Design ready","outcome":"complete","design":"Approved plan"}`, r.Token)
+		if w.Code != 200 {
+			t.Error(w.Body.String())
+		}
+		return "planner", errors.New("SSH connection lost after report")
+	})
+	s.mu.Lock()
+	planner, e := s.start(task)
+	s.mu.Unlock()
+	if e != nil {
+		t.Fatal(e)
+	}
+	idle(t, s)
+	s.mu.Lock()
+	step, sessionStatus := task.Step, planner.Status
+	s.mu.Unlock()
+	if step != 1 || sessionStatus != "interrupted" {
+		t.Fatalf("reported disconnect not interrupted: step=%d status=%s", step, sessionStatus)
+	}
+	w := call(s, "POST", "tasks/"+task.ID+"/approve", `{"version":2,"subject":"design"}`, "")
+	if w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	idle(t, s)
+	s.mu.Lock()
+	_, startErr := s.start(task)
+	s.mu.Unlock()
+	if startErr == nil {
+		t.Fatal("later step started while prior remote process was uncertain")
+	}
+	select {
+	case <-buildStarted:
+		t.Fatal("builder started before remote confirmation")
+	default:
+	}
+	w = call(s, "POST", "sessions/"+planner.ID+"/resume", `{"confirmed_stopped":false}`, "")
+	if w.Code != 409 {
+		t.Fatal("confirmation was bypassed")
+	}
+	w = call(s, "POST", "sessions/"+planner.ID+"/resume", `{"confirmed_stopped":true}`, "")
+	if w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	idle(t, s)
+	s.mu.Lock()
+	status, step := planner.Status, task.Step
+	builder, startErr := s.start(task)
+	s.mu.Unlock()
+	if status != "completed" || step != 2 || startErr != nil {
+		t.Fatalf("confirmed reported turn did not release next step: status=%s step=%d err=%v", status, step, startErr)
+	}
+	select {
+	case <-buildStarted:
+	case <-time.After(time.Second):
+		t.Fatal("confirmed recovery did not allow builder")
+	}
+	if len(planningRuns) != 1 {
+		t.Fatal("confirmed recovery replayed already reported planning")
+	}
+	w = call(s, "POST", "sessions/"+builder.ID+"/cancel", `{}`, "")
+	if w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	idle(t, s)
+}
+
+func TestHumanReviewWaitsForAnyEarlierWorkspaceOwner(t *testing.T) {
+	for _, status := range []string{"running", "queued", "awaiting_permission", "interrupted"} {
+		t.Run(status, func(t *testing.T) {
+			s, _ := fixture(t)
+			s.mu.Lock()
+			task, e := s.create("project", "Earlier owner", "Review shared workspace", "")
+			if e != nil {
+				s.mu.Unlock()
+				t.Fatal(e)
+			}
+			task.Step, task.Stage, task.Status = 4, "Review", "active"
+			previous := &Session{ID: "previous-build", ProjectID: task.ProjectID, TaskID: task.ID, Step: 2, Status: status}
+			s.sessions[previous.ID] = previous
+			_, e = s.start(task)
+			step, review := task.Step, task.Review
+			s.mu.Unlock()
+			if e == nil || step != 4 || review != "" {
+				t.Fatal("human-review stage advanced while earlier session still owned workspace")
+			}
+		})
 	}
 }

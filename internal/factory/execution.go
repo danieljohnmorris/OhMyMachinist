@@ -363,6 +363,9 @@ func (s *Service) start(t *Task) (*Session, error) {
 	if e := s.validateTask(t); e != nil {
 		return nil, e
 	}
+	if s.taskBusy(t.ID) {
+		return nil, errors.New("task has a running or interrupted session; confirm stopped and resume before continuing")
+	}
 	if t.Status == "interrupted" {
 		return nil, errors.New("resume the interrupted task session after confirming the previous process stopped")
 	}
@@ -390,11 +393,6 @@ func (s *Service) start(t *Task) (*Session, error) {
 		}
 		s.signal()
 		return nil, nil
-	}
-	for _, v := range s.sessions {
-		if v.TaskID == t.ID && v.Step == t.Step && (v.Status == "running" || v.Status == "queued" || v.Status == "awaiting_permission" || v.Status == "interrupted") {
-			return nil, errors.New("step is running or interrupted; confirm stopped and resume")
-		}
 	}
 	var v *Session
 	for _, candidate := range s.sessions {
