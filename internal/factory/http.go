@@ -226,48 +226,52 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 					if task.Repairs >= 3 {
-						v.Status = "completed"
-						v.Error = ""
-						if e := s.saveSession(v); e != nil {
-							fail(w, e)
+						copySession := *v
+						copySession.Status = "completed"
+						copySession.Error = ""
+						copyTask := *task
+						copyTask.Status = "failed"
+						copyTask.Activity = "Repair limit reached. Review the task before continuing."
+						if err := s.commitRecords([]recordWrite{{"task", task.ID, diskTask(&copyTask)}, {"session", v.ID, diskSession(&copySession)}}, "", Event{}); err != nil {
+							fail(w, err)
 							return
 						}
-						task.Status = "failed"
-						task.Activity = "Repair limit reached. Review the task before continuing."
-						if e := s.saveTask(task); e != nil {
-							fail(w, e)
-							return
-						}
+						*task = copyTask
+						*v = copySession
 						s.signal()
 						jsonReply(w, 200, map[string]any{"session": v})
 						return
 					}
 				}
 				if task := s.tasks[v.TaskID]; task != nil && task.Step != v.Step && !v.Delivery {
-					v.Status = "completed"
-					v.Error = ""
-					_ = s.saveSession(v)
-					task.Status = "active"
-					task.Activity = "Previous reported turn confirmed stopped"
-					if task.Step < len(task.Steps) && task.Steps[task.Step].Type == "approval" {
-						task.Status = "awaiting_approval"
-						task.ApprovalSubject = task.Steps[task.Step].Subject
-						task.Activity = "Needs your approval"
+					copySession := *v
+					copySession.Status = "completed"
+					copySession.Error = ""
+					copyTask := *task
+					copyTask.Status = "active"
+					copyTask.Activity = "Previous reported turn confirmed stopped"
+					if copyTask.Step < len(copyTask.Steps) && copyTask.Steps[copyTask.Step].Type == "approval" {
+						copyTask.Status = "awaiting_approval"
+						copyTask.ApprovalSubject = copyTask.Steps[copyTask.Step].Subject
+						copyTask.Activity = "Needs your approval"
 					}
-					_ = s.saveTask(task)
-					s.notify(task.ProjectID, "Previous reported task turn confirmed stopped. Inspect task "+task.ID+" and continue its eligible pipeline.")
-					s.signal()
+					if err := s.commitTransition(task, &copyTask, "Previous reported task turn confirmed stopped. Inspect task "+task.ID+" and continue its eligible pipeline.", map[*Session]Session{v: copySession}); err != nil {
+						fail(w, err)
+						return
+					}
 					jsonReply(w, 200, map[string]any{"session": v})
 					return
 				}
-				v.Status = "idle"
+				var copyTask *Task
 				if task := s.tasks[v.TaskID]; task != nil && task.Status == "interrupted" {
-					task.Status = "active"
-					task.Activity = "Resuming"
-					_ = s.saveTask(task)
+					candidate := *task
+					candidate.Status = "active"
+					candidate.Activity = "Resuming"
+					copyTask = &candidate
 				}
-				if e := s.enqueue(v, "Resume the interrupted instruction. Inspect saved files before repeating work.\n"+v.Pending, id("resume_")); e != nil {
-					fail(w, e)
+				request := id("resume_")
+				if err := s.acceptConfirmedTurn(v, "Resume the interrupted instruction. Inspect saved files before repeating work.\n"+v.Pending, request, "turn:"+v.ID+":"+request, true, copyTask); err != nil {
+					fail(w, err)
 					return
 				}
 				jsonReply(w, 202, map[string]any{"session": v})
@@ -379,16 +383,15 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request) {
 					fail(w, errors.New("task must be paused at the repair limit with its current version and stopped ownership"))
 					return
 				}
-				t.Repairs = 0
-				t.Version++
-				t.Status = "active"
-				t.Activity = "Human authorized another repair pass"
-				if e := s.saveTask(t); e != nil {
-					fail(w, e)
+				copyTask := *t
+				copyTask.Repairs = 0
+				copyTask.Version++
+				copyTask.Status = "active"
+				copyTask.Activity = "Human authorized another repair pass"
+				if err := s.commitTransition(t, &copyTask, "Human reviewed task "+t.ID+" and authorized another repair pass. Inspect and start the eligible step.", nil); err != nil {
+					fail(w, err)
 					return
 				}
-				s.notify(t.ProjectID, "Human reviewed task "+t.ID+" and authorized another repair pass. Inspect and start the eligible step.")
-				s.signal()
 				jsonReply(w, 200, map[string]any{"task": t})
 				return
 			case "refresh":

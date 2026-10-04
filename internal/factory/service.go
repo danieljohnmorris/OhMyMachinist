@@ -253,13 +253,18 @@ func (s *Service) enqueue(v *Session, prompt, request string) error {
 	return s.acceptTurn(v, prompt, request, "turn:"+v.ID+":"+request)
 }
 func (s *Service) acceptTurn(v *Session, prompt, request, key string) error {
+	return s.acceptConfirmedTurn(v, prompt, request, key, false, nil)
+}
+
+// Recovery includes its task state in the accepted turn transaction.
+func (s *Service) acceptConfirmedTurn(v *Session, prompt, request, key string, recovery bool, task *Task) error {
 	if s.closed {
 		return errors.New("factory is stopping")
 	}
 	if s.requests[key] != "" {
 		return nil
 	}
-	if v.Status == "interrupted" {
+	if v.Status == "interrupted" && !recovery {
 		return errors.New("resume interrupted conversation after confirming its previous process stopped")
 	}
 	if s.active == v.ID || v.Status == "running" || v.Status == "queued" || v.Status == "awaiting_permission" {
@@ -280,10 +285,17 @@ func (s *Service) acceptTurn(v *Session, prompt, request, key string) error {
 		event.Kind = "user"
 		event.Title = ""
 	}
-	e := s.commitRecords([]recordWrite{{"session", v.ID, diskSession(v)}, {"request", key, v.ID}}, v.ID, event)
+	records := []recordWrite{{"session", v.ID, diskSession(v)}, {"request", key, v.ID}}
+	if task != nil {
+		records = append(records, recordWrite{"task", task.ID, diskTask(task)})
+	}
+	e := s.commitRecords(records, v.ID, event)
 	if e != nil {
 		*v = previous
 		return e
+	}
+	if task != nil {
+		*s.tasks[task.ID] = *task
 	}
 	s.requests[key] = v.ID
 	s.queue = append(s.queue, v.ID)
