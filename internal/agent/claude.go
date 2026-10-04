@@ -33,8 +33,8 @@ type Option struct {
 	Name string `json:"name"`
 }
 type Permission struct {
-	ID, Title, Tool string
-	Options         []Option
+	ID, Title, Tool, Name string
+	Options               []Option
 }
 type Claude struct {
 	Command string
@@ -146,7 +146,7 @@ func (w *wire) handle(ctx context.Context, f frame) error {
 		}
 	case "session/request_permission":
 		var p struct {
-			ToolCall struct{ ToolCallID, Title, Kind string }
+			ToolCall struct{ ToolCallID, Title, Kind, Name string }
 			Options  []Option
 		}
 		if err := json.Unmarshal(f.Params, &p); err != nil {
@@ -155,7 +155,7 @@ func (w *wire) handle(ctx context.Context, f frame) error {
 		allowed := false
 		if w.permission != nil {
 			var err error
-			allowed, err = w.permission(ctx, Permission{ID: p.ToolCall.ToolCallID, Title: p.ToolCall.Title, Tool: p.ToolCall.Kind, Options: p.Options})
+			allowed, err = w.permission(ctx, Permission{ID: p.ToolCall.ToolCallID, Title: p.ToolCall.Title, Tool: p.ToolCall.Kind, Name: p.ToolCall.Name, Options: p.Options})
 			if err != nil {
 				return err
 			}

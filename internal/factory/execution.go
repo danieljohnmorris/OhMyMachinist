@@ -107,7 +107,7 @@ func (s *Service) runClaude(ctx context.Context, r RunRequest, emit func(Event),
 			return ""
 		}()})
 	}, func(ctx context.Context, p agent.Permission) (bool, error) {
-		if safeFactoryTool(p.Title) {
+		if safeFactoryPermission(p) {
 			return true, nil
 		}
 		return permission(ctx, p.Title)
@@ -602,6 +602,9 @@ func (s *Service) validateTask(t *Task) error {
 	}
 	return nil
 }
+
+// Display titles never authorize provider tool calls.
+func safeFactoryPermission(p agent.Permission) bool { return safeFactoryTool(p.Name) }
 
 func safeFactoryTool(name string) bool {
 	switch name {

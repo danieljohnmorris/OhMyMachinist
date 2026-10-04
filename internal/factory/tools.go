@@ -640,6 +640,12 @@ func (s *Service) deliveryReady(t *Task) error {
 
 // Cancellation is durable before process signalling or queue removal.
 func (s *Service) cancelTask(t *Task) error {
+	if t.Status == "done" {
+		return errors.New("completed tasks cannot be cancelled")
+	}
+	if t.Status == "cancelled" {
+		return nil
+	}
 	copyTask := *t
 	copyTask.Status = "cancelled"
 	copyTask.Activity = "Cancelled"

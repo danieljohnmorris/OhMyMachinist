@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -32,7 +33,7 @@ func TestACPProcess(t *testing.T) {
 		case "session/prompt":
 			enc.Encode(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{"update": map[string]any{"sessionUpdate": "tool_call_update", "content": []any{}, "toolCallId": "write", "status": "in_progress"}}})
 			enc.Encode(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{"update": map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]string{"type": "text", "text": "hello"}}}})
-			enc.Encode(map[string]any{"jsonrpc": "2.0", "id": 90, "method": "session/request_permission", "params": map[string]any{"toolCall": map[string]string{"toolCallId": "write", "title": "Write file", "kind": "edit"}, "options": []Option{{ID: "yes", Kind: "allow_once"}, {ID: "no", Kind: "reject_once"}}}})
+			enc.Encode(map[string]any{"jsonrpc": "2.0", "id": 90, "method": "session/request_permission", "params": map[string]any{"toolCall": map[string]string{"toolCallId": "write", "title": "Write file", "kind": "edit", "name": "Write"}, "options": []Option{{ID: "yes", Kind: "allow_once"}, {ID: "no", Kind: "reject_once"}}}})
 			var response struct {
 				Result struct{ Outcome struct{ OptionID string } }
 			}
@@ -56,7 +57,13 @@ func TestRunStreamsDeniesAndReloads(t *testing.T) {
 			if e.Kind == "text" {
 				text += e.Text
 			}
-		}, func(_ context.Context, p Permission) (bool, error) { permissions++; return false, nil })
+		}, func(_ context.Context, p Permission) (bool, error) {
+			permissions++
+			if p.Name != "Write" || p.Title != "Write file" || p.Tool != "edit" {
+				t.Errorf("permission identity lost: %+v", p)
+			}
+			return false, nil
+		})
 		cancel()
 		if err != nil || id != "saved-session" || text != "hello" || permissions != 1 {
 			t.Fatalf("id=%q text=%q permissions=%d err=%v", id, text, permissions, err)
@@ -132,5 +139,28 @@ func TestRemoteDirectoryIsProviderPath(t *testing.T) {
 	id, err := c.Run(ctx, Request{Directory: "/does-not-exist-on-local-host", Prompt: "test"}, nil, nil)
 	if err != nil || id != "saved-session" {
 		t.Fatalf("id=%q err=%v", id, err)
+	}
+}
+
+func TestPermissionDecodesACPToolNameSeparatelyFromTitle(t *testing.T) {
+	var output bytes.Buffer
+	var received Permission
+	adapter := wire{input: &output, permission: func(_ context.Context, p Permission) (bool, error) { received = p; return true, nil }}
+	request := frame{ID: json.RawMessage(`90`), Method: "session/request_permission", Params: json.RawMessage(`{"toolCall":{"toolCallId":"inspect","name":"mcp__machinist__inspect_tasks","title":"Read project tasks","kind":"read"},"options":[{"optionId":"allow","kind":"allow_once"},{"optionId":"reject","kind":"reject_once"}]}`)}
+	if err := adapter.handle(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if received.Name != "mcp__machinist__inspect_tasks" || received.Title != "Read project tasks" || received.Tool != "read" || received.ID != "inspect" {
+		t.Fatal("permission identity conflated with display fields", received)
+	}
+	var response struct {
+		Result struct {
+			Outcome struct {
+				OptionID string `json:"optionId"`
+			}
+		}
+	}
+	if err := json.Unmarshal(output.Bytes(), &response); err != nil || response.Result.Outcome.OptionID != "allow" {
+		t.Fatal("permission response incorrect", output.String(), err)
 	}
 }
