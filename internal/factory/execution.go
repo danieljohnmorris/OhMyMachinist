@@ -113,10 +113,12 @@ func (s *Service) execute(ctx context.Context, v Session, token string, runner R
 	profile := s.cfg.Agents[s.cfg.Foreman]
 	system := profile.Prompt
 	prompt := v.Pending
+	readOnly := false
 	var script []string
 	timeout := profile.Timeout
 	if t := s.tasks[v.TaskID]; t != nil {
 		step := t.Steps[v.Step]
+		readOnly = strings.EqualFold(step.Stage, "design") && !v.Delivery
 		if step.Type == "script" {
 			script = append([]string(nil), step.Command...)
 			timeout, _ = time.ParseDuration(step.Timeout)
@@ -221,7 +223,7 @@ func (s *Service) execute(ctx context.Context, v Session, token string, runner R
 		output = limited.String()
 		emit(Event{Kind: "activity", Title: "Checks", Text: output})
 	} else {
-		provider, runErr = runner(ctx, RunRequest{Host: host, Directory: v.Directory, SessionID: v.ProviderID, Prompt: prompt, SystemPrompt: system, Model: profile.Model, Token: token, URL: url, Executable: s.executable}, emit, permission)
+		provider, runErr = runner(ctx, RunRequest{Host: host, Directory: v.Directory, SessionID: v.ProviderID, Prompt: prompt, SystemPrompt: system, Model: profile.Model, Token: token, URL: url, Executable: s.executable, ReadOnly: readOnly}, emit, permission)
 	}
 	if runErr == nil && ctx.Err() != nil {
 		runErr = ctx.Err()

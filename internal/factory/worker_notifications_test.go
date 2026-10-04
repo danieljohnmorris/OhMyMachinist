@@ -224,6 +224,13 @@ func TestBlockedWorkerFollowupWithoutReportNeedsExplicitRecovery(t *testing.T) {
 
 func TestReportedRemoteSessionOwnsWorkspaceUntilConfirmedStopped(t *testing.T) {
 	s, _ := fixture(t)
+	// Run remote Git validation against the disposable local workspace, while
+	// preserving the remote ownership and disconnect behavior in the runner.
+	tools := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tools, "ssh"), []byte("#!/bin/sh\n[ \"$1\" = '-o' ] && [ \"$2\" = 'BatchMode=yes' ] && [ \"$3\" = 'vm' ] || exit 9\nexec sh -c \"$4\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
 	s.mu.Lock()
 	task, e := s.create("project", "Remote report", "Preserve workspace ownership", "")
 	if e != nil {
@@ -269,8 +276,8 @@ func TestReportedRemoteSessionOwnsWorkspaceUntilConfirmedStopped(t *testing.T) {
 		t.Fatalf("reported disconnect not interrupted: step=%d status=%s", step, sessionStatus)
 	}
 	w := call(s, "POST", "tasks/"+task.ID+"/approve", `{"version":2,"subject":"design"}`, "")
-	if w.Code != 200 {
-		t.Fatal(w.Body.String())
+	if w.Code != 409 {
+		t.Fatal("approval bypassed uncertain remote ownership", w.Body.String())
 	}
 	idle(t, s)
 	s.mu.Lock()
@@ -289,6 +296,11 @@ func TestReportedRemoteSessionOwnsWorkspaceUntilConfirmedStopped(t *testing.T) {
 		t.Fatal("confirmation was bypassed")
 	}
 	w = call(s, "POST", "sessions/"+planner.ID+"/resume", `{"confirmed_stopped":true}`, "")
+	if w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	idle(t, s)
+	w = call(s, "POST", "tasks/"+task.ID+"/approve", `{"version":2,"subject":"design"}`, "")
 	if w.Code != 200 {
 		t.Fatal(w.Body.String())
 	}

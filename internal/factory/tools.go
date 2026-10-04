@@ -276,6 +276,19 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 					fail(w, errors.New("planning report requires design text"))
 					return
 				}
+				rev, dirty, e := s.workspaceState(original)
+				if e != nil {
+					fail(w, e)
+					return
+				}
+				if s.tokens[token] != session.ID || session.Status == "cancelled" || session.Status == "interrupted" {
+					http.Error(w, "worker session stopped while reading workspace", 403)
+					return
+				}
+				if rev != original.BaseRevision || dirty != "" {
+					fail(w, errors.New("Design is planning only; restore the original workspace and remove implementation changes before reporting"))
+					return
+				}
 				t.Design = in.Design
 				t.Version++
 			} else if strings.EqualFold(step.Stage, "build") {
@@ -379,12 +392,24 @@ func (s *Service) approve(t *Task, version int, subject string) error {
 	if t.Status != "awaiting_approval" || t.Step >= len(t.Steps) {
 		return errors.New("task is not awaiting approval")
 	}
+	if s.taskBusy(t.ID) {
+		return errors.New("wait for the task agent to stop, or explicitly recover its interrupted session, before approving")
+	}
 	step := t.Steps[t.Step]
 	if step.Type != "approval" || step.Subject != subject {
 		return errors.New("approval subject does not match the pending step")
 	}
 	if subject == "design" && t.Design == "" {
 		return errors.New("no design to approve")
+	}
+	if subject == "design" {
+		rev, dirty, e := s.workspaceState(t)
+		if e != nil {
+			return e
+		}
+		if rev != t.BaseRevision || dirty != "" {
+			return errors.New("Design approval requires the original unchanged workspace; restore implementation changes first")
+		}
 	}
 	if subject == "code" {
 		if t.Revision == "" {
@@ -416,6 +441,11 @@ func (s *Service) approve(t *Task, version int, subject string) error {
 				return errors.New("GitHub checks are pending or failed")
 			}
 		}
+	}
+	original := t
+	copyTask := *t
+	t = &copyTask
+	if subject == "code" {
 		t.CodeApproved = t.Revision
 		t.CodeApprovalVersion = version
 	}
@@ -426,6 +456,7 @@ func (s *Service) approve(t *Task, version int, subject string) error {
 	if e := s.saveTask(t); e != nil {
 		return e
 	}
+	*original = *t
 	s.notify(t.ProjectID, "Human approved "+subject+" for task "+t.ID+". Inspect and continue the next eligible step.")
 	s.signal()
 	return nil
