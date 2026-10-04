@@ -35,7 +35,11 @@ operator-configured argument arrays, never shell strings submitted from chat.
 
 Open `http://127.0.0.1:7331/`. No separate managed worker is needed for local
 factory sessions. Existing batch commands still use their existing workers.
-An existing configuration without `factory.enabled = true` keeps the legacy UI.
+Factory mode is opt-in. Its History view shows previous batch runs read-only;
+new work uses the foreman and project board. Finish any batch runs that need
+browser actions before switching modes. To operate existing batch approvals,
+retries or cancellation in the legacy interface, set `factory.enabled = false`
+and restart the server. Batch commands remain available in either mode.
 
 A global `claude-agent-acp` executable is discovered on PATH. Source development
 falls back to `internal/agent/runtime` under the server's working directory.

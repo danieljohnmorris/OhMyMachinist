@@ -380,6 +380,35 @@ func workspace(ctx context.Context, p config.FactoryProject, h config.FactoryHos
 	}
 	return dir, branch, nil
 }
+
+// Remove only the worktree just created by this attempt, while preserving any new work.
+func cleanupWorkspace(ctx context.Context, p config.FactoryProject, h config.FactoryHost, dir, branch, base string) error {
+	if base == "" {
+		return errors.New("original revision is unknown")
+	}
+	actualBranch, e := projectGit(ctx, p, h, dir, "symbolic-ref", "--short", "HEAD")
+	if e != nil {
+		return e
+	}
+	head, e := projectGit(ctx, p, h, dir, "rev-parse", "HEAD")
+	if e != nil {
+		return e
+	}
+	dirty, e := projectGit(ctx, p, h, dir, "status", "--porcelain", "--untracked-files=all", "--ignored")
+	if e != nil {
+		return e
+	}
+	if actualBranch != branch || head != base || dirty != "" {
+		return errors.New("workspace changed after creation; saved files and branch were preserved")
+	}
+	if _, e = projectGit(ctx, p, h, p.Path, "worktree", "remove", "--", dir); e != nil {
+		return e
+	}
+	// Compare-and-delete preserves a concurrently changed branch reference.
+	_, e = projectGit(ctx, p, h, p.Path, "update-ref", "-d", "refs/heads/"+branch, base)
+	return e
+}
+
 func jsonReply(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

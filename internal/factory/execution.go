@@ -460,6 +460,7 @@ func (s *Service) createWithRequest(project, title, brief, pipeline, requestKey 
 		return nil, errors.New("repository setup is busy; retry shortly")
 	}
 	s.provisioning = true
+	defer func() { s.provisioning = false }()
 	key := id("t_")
 	s.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -475,16 +476,28 @@ func (s *Service) createWithRequest(project, title, brief, pipeline, requestKey 
 	}
 	cancel()
 	s.mu.Lock()
-	s.provisioning = false
+	abort := func(cause error) (*Task, error) {
+		if dir != "" && branch != "" {
+			s.mu.Unlock()
+			cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			cleanupErr := cleanupWorkspace(cleanupContext, p, host, dir, branch, base)
+			cleanupCancel()
+			s.mu.Lock()
+			if cleanupErr != nil {
+				cause = fmt.Errorf("%w; workspace retained for inspection at %s: %v", cause, dir, cleanupErr)
+			}
+		}
+		return nil, cause
+	}
 	if e != nil {
-		return nil, e
+		return abort(e)
 	}
 	if s.closed || !reflect.DeepEqual(s.cfg.Projects[project], p) || !reflect.DeepEqual(s.cfg.Hosts[p.Host], host) {
-		return nil, errors.New("factory or project changed while preparing the workspace; retry")
+		return abort(errors.New("factory or project changed while preparing the workspace; retry"))
 	}
 	for _, check := range valid {
 		if !check() {
-			return nil, errors.New("conversation changed while preparing the workspace; retry from the current turn")
+			return abort(errors.New("conversation changed while preparing the workspace; retry from the current turn"))
 		}
 	}
 	t := &Task{ProjectSnapshot: p, HostSnapshot: host, ID: key, ProjectID: project, Title: title, Brief: brief, Pipeline: pipeline, Stage: "Design", Status: "active", Activity: "Ready for planning", Directory: dir, Branch: branch, BaseRevision: base, Version: 1, CreatedAt: now(), Checks: []Check{}, Agents: map[string]config.ResolvedAgent{}, Steps: append([]config.FactoryStep(nil), definition.Steps...)}
@@ -499,7 +512,7 @@ func (s *Service) createWithRequest(project, title, brief, pipeline, requestKey 
 		writes = append(writes, recordWrite{"request", requestKey, t.ID})
 	}
 	if e = s.commitRecords(writes, "", Event{}); e != nil {
-		return nil, e
+		return abort(e)
 	}
 	s.tasks[t.ID] = t
 	if requestKey != "" {

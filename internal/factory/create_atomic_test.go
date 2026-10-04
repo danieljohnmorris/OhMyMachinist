@@ -37,6 +37,9 @@ func TestCreateTaskAndRetryMarkerCommitTogether(t *testing.T) {
 	if tasks != 0 || requests != 0 || saved != 0 {
 		t.Fatalf("partial create published: tasks=%d requests=%d saved=%d", tasks, requests, saved)
 	}
+	if len(fixtureWorktrees(t, s.cfg.Projects["project"].Path)) != 1 || fixtureFactoryBranches(t, s.cfg.Projects["project"].Path) != "" {
+		t.Fatal("failed task persistence left an orphan workspace or branch")
+	}
 	if _, e = db.Exec(`DROP TRIGGER reject_create_marker`); e != nil {
 		t.Fatal(e)
 	}
@@ -58,6 +61,9 @@ func TestCreateTaskAndRetryMarkerCommitTogether(t *testing.T) {
 	s.mu.Unlock()
 	if count != 1 {
 		t.Fatal("duplicate task after retry")
+	}
+	if len(fixtureWorktrees(t, s.cfg.Projects["project"].Path)) != 2 {
+		t.Fatal("retry left an orphan attempt workspace")
 	}
 	if e = db.QueryRow(`SELECT COUNT(*) FROM factory_records WHERE kind='task'`).Scan(&saved); e != nil || saved != 1 {
 		t.Fatal("task records duplicated")

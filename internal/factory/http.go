@@ -10,6 +10,36 @@ import (
 	"time"
 )
 
+type taskSummary struct {
+	ID                 string `json:"id"`
+	ProjectID          string `json:"project_id"`
+	Title              string `json:"title"`
+	Brief              string `json:"brief"`
+	Stage              string `json:"stage"`
+	Status             string `json:"status"`
+	Activity           string `json:"activity"`
+	ApprovalSubject    string `json:"approval_subject,omitempty"`
+	PendingPermissions int    `json:"pending_permissions"`
+	Version            int    `json:"version"`
+	CreatedAt          string `json:"created_at"`
+}
+
+func summaryText(value string) string {
+	if len(value) > 512 {
+		return strings.ToValidUTF8(value[:512], "") + "..."
+	}
+	return value
+}
+func (s *Service) summarize(t *Task) taskSummary {
+	pending := 0
+	for _, p := range s.permissions {
+		if session := s.sessions[p.SessionID]; p.Status == "pending" && session != nil && session.TaskID == t.ID {
+			pending++
+		}
+	}
+	return taskSummary{ID: t.ID, ProjectID: t.ProjectID, Title: summaryText(t.Title), Brief: summaryText(t.Brief), Stage: t.Stage, Status: t.Status, Activity: summaryText(t.Activity), ApprovalSubject: t.ApprovalSubject, PendingPermissions: pending, Version: t.Version, CreatedAt: t.CreatedAt}
+}
+
 func (s *Service) Handler() http.Handler { return http.HandlerFunc(s.serve) }
 func (s *Service) serve(w http.ResponseWriter, r *http.Request) {
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/factory/"), "/")
@@ -51,9 +81,9 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request) {
 			}
 			pipelines = append(pipelines, map[string]any{"id": key, "name": p.Name, "steps": steps})
 		}
-		tasks := []*Task{}
+		tasks := []taskSummary{}
 		for _, t := range s.tasks {
-			tasks = append(tasks, t)
+			tasks = append(tasks, s.summarize(t))
 		}
 		jsonReply(w, 200, map[string]any{"enabled": s.cfg.Enabled, "projects": projects, "hosts": hosts, "agents": agents, "pipelines": pipelines, "tasks": tasks, "csrf_token": s.csrf})
 		return
@@ -74,10 +104,10 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if len(parts) == 2 && r.Method == "GET" {
-			tasks := []*Task{}
+			tasks := []taskSummary{}
 			for _, t := range s.tasks {
 				if t.ProjectID == project {
-					tasks = append(tasks, t)
+					tasks = append(tasks, s.summarize(t))
 				}
 			}
 			jsonReply(w, 200, map[string]any{"session": v, "tasks": tasks})
