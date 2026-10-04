@@ -340,6 +340,7 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 			fail(w, e)
 			return
 		}
+		session.Reported = true
 		s.requests[key] = t.ID
 		if queue {
 			s.queue = append(s.queue, foreman.ID)
@@ -487,10 +488,7 @@ func (s *Service) changes(t *Task, version int, message string) error {
 	if e := s.saveTask(t); e != nil {
 		return e
 	}
-	foreman, e := s.foreman(t.ProjectID)
-	if e == nil && foreman.Status != "running" && foreman.Status != "queued" {
-		_ = s.enqueue(foreman, "Human requested changes on task "+t.ID+": "+message+". Inspect task and start the eligible step.", id("feedback_"))
-	}
+	s.notify(t.ProjectID, "Human requested changes on task "+t.ID+": "+message+". Inspect task and start the eligible step.")
 	s.signal()
 	return nil
 }

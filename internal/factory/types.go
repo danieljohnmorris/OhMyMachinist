@@ -17,6 +17,7 @@ type Event struct {
 	At         string `json:"at"`
 }
 type Session struct {
+	Reported    bool     `json:"-"`
 	Delivery    bool     `json:"delivery,omitempty"`
 	ReportQueue []string `json:"-"`
 	ID          string   `json:"id"`

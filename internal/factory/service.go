@@ -267,6 +267,7 @@ func (s *Service) acceptTurn(v *Session, prompt, request, key string) error {
 	previous := *v
 	v.Pending = prompt
 	v.RequestID = request
+	v.Reported = false
 	v.Status = "queued"
 	v.Error = ""
 	if len(v.ReportQueue) > 0 {

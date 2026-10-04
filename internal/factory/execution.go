@@ -251,6 +251,7 @@ func (s *Service) execute(ctx context.Context, v Session, token string, runner R
 		current.Status = "completed"
 		_ = s.event(v.ID, Event{Kind: "completed", Title: "Turn complete"})
 	}
+	workerAttention := ""
 	if t := s.tasks[v.TaskID]; t != nil && t.Step == v.Step && t.Status != "cancelled" {
 		if len(script) > 0 {
 			rev, dirty, readErr := s.workspaceState(t)
@@ -285,11 +286,16 @@ func (s *Service) execute(ctx context.Context, v Session, token string, runner R
 					}
 				}
 			}
-		} else if runErr != nil {
+		} else if !current.Reported && runErr != nil {
 			t.Status = "interrupted"
 			t.Activity = "Agent needs attention"
-		} else if t.Status == "active" && !strings.HasPrefix(t.Activity, "Blocked:") {
-			t.Activity = "Waiting for structured report"
+			workerAttention = "Agent exited with an error: " + runErr.Error()
+		} else if !current.Reported && t.Status == "active" {
+			t.Status, current.Status = "interrupted", "interrupted"
+			t.Activity = "Agent finished without a structured report. Review saved work before resuming."
+			current.Error = t.Activity
+			workerAttention = t.Activity
+			_ = s.event(v.ID, Event{Kind: "error", Text: t.Activity})
 		}
 		_ = s.saveTask(t)
 	}
@@ -301,6 +307,9 @@ func (s *Service) execute(ctx context.Context, v Session, token string, runner R
 	}
 	if len(script) > 0 && !s.closed {
 		s.notify(v.ProjectID, "Script result for task "+v.TaskID+": inspect checks and continue the eligible pipeline.")
+	}
+	if workerAttention != "" && !s.closed {
+		s.notify(v.ProjectID, "Worker task "+v.TaskID+" needs human attention: "+workerAttention+" Ask the human to inspect saved work and explicitly confirm recovery. Do not automatically retry or claim pipeline completion.")
 	}
 	s.signal()
 	s.next()

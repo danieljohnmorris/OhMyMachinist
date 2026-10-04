@@ -343,6 +343,9 @@ func TestRemoteCancellationRetainsInterruptedOwnership(t *testing.T) {
 	s.mu.Unlock()
 	started := make(chan struct{}, 1)
 	s.SetRunner(func(ctx context.Context, r RunRequest, emit func(Event), permission func(context.Context, string) (bool, error)) (string, error) {
+		if r.Host == "local" {
+			return "foreman-provider", nil
+		}
 		if r.Host != "vm" {
 			t.Error("worker moved hosts")
 		}

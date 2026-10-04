@@ -121,7 +121,9 @@ Refresh reloads saved messages and events. A server restart marks unfinished
 turns interrupted and does not replay them. Before Resume, confirm the old process
 has stopped. SSH cancellation stops the local connection but cannot prove the
 remote process is dead. Inspect the remote host before confirming recovery.
-Never resume uncertain remote work on another host.
+Never resume uncertain remote work on another host. An agent process exiting is
+not pipeline completion. If it exits without an accepted structured report, the
+foreman is notified and the task pauses for explicit human recovery.
 
 A project permits four unfinished tasks. Turns queue across conversations; wait
 or stop before sending another instruction to a busy conversation. After three
