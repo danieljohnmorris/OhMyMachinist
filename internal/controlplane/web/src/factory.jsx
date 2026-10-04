@@ -11,6 +11,8 @@ import {
   stages,
 } from "./factory-state.js";
 import "./factory.css";
+import { DisclosureAction } from "./components/ui/disclosure-action.jsx";
+import { TaskPanel } from "./factory-task-panel.jsx";
 import { ProjectSetup } from "./factory-setup.jsx";
 import { FactoryHistory } from "./factory-history.jsx";
 import { factoryView } from "./factory-state.js";
@@ -58,7 +60,6 @@ export function FactoryApp({ status, onStatus }) {
     [taskID, setTaskID] = useState(""),
     [detail, setDetail] = useState(null),
     [message, setMessage] = useState(""),
-    [feedback, setFeedback] = useState(""),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
     [connected, setConnected] = useState(true),
@@ -261,15 +262,12 @@ export function FactoryApp({ status, onStatus }) {
   }
   const tasks = project?.tasks || [],
     groups = groupTasks(tasks),
-    task = detail?.task,
-    session = chat.session,
-    subject =
-      task?.approval_subject || (task?.stage === "Design" ? "design" : "code");
+    session = chat.session;
   return (
     <div className="factory-shell">
       <aside className="factory-sidebar">
         <a className="factory-brand" href="#/factory">
-          machinist<small>factory</small>
+          machinist
         </a>
         <div className="factory-project-heading">
           <p className="factory-label">Projects</p>
@@ -511,11 +509,20 @@ export function FactoryApp({ status, onStatus }) {
                 }}
               />
               <div>
-                <small>
-                  {isBusy(session)
-                    ? "Foreman is working. Stop it before sending another message."
-                    : "Enter to send · Shift + Enter for a new line"}
-                </small>
+                <div className="factory-composer-status">
+                  <small className="factory-foreman-model">
+                    {status.foreman?.name || "Foreman"} ·{" "}
+                    {status.foreman?.runtime === "claude"
+                      ? "Claude Code"
+                      : status.foreman?.runtime || "Configured runtime"}{" "}
+                    · {status.foreman?.model || "Default model"}
+                  </small>
+                  <small>
+                    {isBusy(session)
+                      ? "Foreman is working. Stop it before sending another message."
+                      : "Enter to send · Shift + Enter for a new line"}
+                  </small>
+                </div>
                 {isBusy(session) && (
                   <Button
                     type="button"
@@ -561,273 +568,16 @@ export function FactoryApp({ status, onStatus }) {
         )}
       </main>
       {taskID && ["chat", "board"].includes(view) && (
-        <aside className="factory-inspector" aria-label="Task detail">
-          <header>
-            <button
-              aria-label="Close task detail"
-              onClick={() => setTaskID("")}
-            >
-              ←
-            </button>
-            <strong>Task detail</strong>
-          </header>
-          {!task ? (
-            <p role="status">Loading task…</p>
-          ) : (
-            <div>
-              <h2>{task.title}</h2>
-              <small>
-                {task.stage} · {task.status?.replaceAll("_", " ")}
-              </small>
-              <p>{task.brief}</p>
-              {task.error && (
-                <p role="alert" className="factory-error">
-                  {task.error}
-                </p>
-              )}
-              {task.github_error && (
-                <p role="alert">
-                  Delivery status unavailable: {task.github_error}
-                </p>
-              )}
-              {task.review && (
-                <section>
-                  <h3>Review</h3>
-                  <pre>{task.review}</pre>
-                </section>
-              )}
-              {task.design && (
-                <section>
-                  <h3>Design</h3>
-                  <pre>
-                    {typeof task.design === "string"
-                      ? task.design
-                      : JSON.stringify(task.design, null, 2)}
-                  </pre>
-                </section>
-              )}
-              {detail.diff && (
-                <section>
-                  <h3>Changes</h3>
-                  {detail.diff_truncated && (
-                    <p role="alert">
-                      This change is too large to show in full. Review the
-                      complete diff before approving delivery.
-                    </p>
-                  )}
-                  <pre className="factory-diff">{detail.diff}</pre>
-                </section>
-              )}
-              {detail.files?.length > 0 && (
-                <section>
-                  <h3>Files</h3>
-                  {detail.files_truncated && (
-                    <p role="alert">Only part of the file list is shown.</p>
-                  )}
-                  {detail.files.map((f) => (
-                    <p key={f.path || f}>{f.path || f}</p>
-                  ))}
-                </section>
-              )}
-              {(detail.checks || task.checks)?.length > 0 && (
-                <section>
-                  <h3>Checks</h3>
-                  {(detail.checks || task.checks).map((c, i) => (
-                    <div key={c.id || i}>
-                      {c.name || c.title} ·{" "}
-                      {c.status || c.result || (c.passed ? "Passed" : "Failed")}
-                      {c.output && (
-                        <details>
-                          <summary>Output</summary>
-                          <pre>{c.output}</pre>
-                        </details>
-                      )}
-                    </div>
-                  ))}
-                </section>
-              )}
-              {task.pr_url && (
-                <a href={task.pr_url} target="_blank" rel="noreferrer">
-                  Open pull request →
-                </a>
-              )}
-              {task.revision && (
-                <p>
-                  <small>Revision {task.revision}</small>
-                </p>
-              )}
-              {task.status === "awaiting_approval" && (
-                <section className="factory-decision">
-                  <h3>
-                    {subject === "review"
-                      ? "Human code review"
-                      : `Review ${subject}`}
-                  </h3>
-                  {subject === "review" && (
-                    <p>
-                      Review the diff and checks. Your approval replaces the
-                      configured agent review for this revision.
-                    </p>
-                  )}
-                  {subject === "code" && (
-                    <p>
-                      Approve this revision for publication as a pull request.
-                      It stays in Review until merge is verified.
-                    </p>
-                  )}
-                  <Button
-                    disabled={busy}
-                    onClick={() =>
-                      mutate("/tasks/" + task.id + "/approve", {
-                        version: task.version,
-                        subject,
-                      })
-                    }
-                  >
-                    {subject === "code"
-                      ? "Approve delivery"
-                      : `Approve ${subject}`}
-                  </Button>
-                  <label>
-                    What should change?
-                    <textarea
-                      rows={3}
-                      value={feedback}
-                      onChange={(e) => setFeedback(e.target.value)}
-                    />
-                  </label>
-                  <Button
-                    disabled={busy || !feedback.trim()}
-                    variant="ghost"
-                    onClick={async () => {
-                      if (
-                        await mutate("/tasks/" + task.id + "/changes", {
-                          version: task.version,
-                          message: feedback,
-                        })
-                      )
-                        setFeedback("");
-                    }}
-                  >
-                    Request changes
-                  </Button>
-                </section>
-              )}
-              {task.repairs >= 3 &&
-                task.status === "failed" &&
-                !detail.sessions?.some(isBusy) && (
-                  <section className="factory-decision">
-                    <h3>Repair limit reached</h3>
-                    <p>
-                      Three repairs failed. Review the evidence before allowing
-                      another attempt.
-                    </p>
-                    <Button
-                      disabled={busy}
-                      onClick={() =>
-                        mutate("/tasks/" + task.id + "/continue", {
-                          version: task.version,
-                        })
-                      }
-                    >
-                      Continue after review
-                    </Button>
-                  </section>
-                )}
-              <section>
-                <Button
-                  variant="ghost"
-                  onClick={() => {
-                    setMessage(`About “${task.title}”: `);
-                    navigate("chat");
-                  }}
-                >
-                  Discuss with foreman
-                </Button>
-                <Button
-                  variant="ghost"
-                  disabled={busy}
-                  onClick={() => mutate("/tasks/" + task.id + "/refresh")}
-                >
-                  Refresh delivery status
-                </Button>
-                {!["done", "cancelled"].includes(task.status) && (
-                  <Button
-                    variant="ghost"
-                    disabled={busy}
-                    onClick={() => mutate("/tasks/" + task.id + "/cancel")}
-                  >
-                    Stop task
-                  </Button>
-                )}
-              </section>
-              {detail.sessions?.length > 0 && (
-                <section>
-                  <h3>Agent activity</h3>
-                  {detail.sessions.map((s) => (
-                    <details
-                      key={s.id}
-                      open={
-                        !!s.permissions?.length ||
-                        ["interrupted", "failed"].includes(s.status)
-                      }
-                    >
-                      <summary>
-                        {s.role} · {s.status}
-                      </summary>
-                      {s.permissions?.map((p) => (
-                        <div key={p.id} className="factory-permission">
-                          <strong>Permission needed</strong>
-                          <p>{p.title}</p>
-                          <Button
-                            disabled={busy}
-                            onClick={() =>
-                              mutate("/permissions/" + p.id, { allow: true })
-                            }
-                          >
-                            Allow
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            disabled={busy}
-                            onClick={() =>
-                              mutate("/permissions/" + p.id, { allow: false })
-                            }
-                          >
-                            Deny
-                          </Button>
-                        </div>
-                      ))}
-                      {["interrupted", "failed"].includes(s.status) && (
-                        <Button
-                          variant="ghost"
-                          disabled={busy}
-                          onClick={() => {
-                            if (
-                              window.confirm(
-                                "Before resuming, confirm that the previous agent process has stopped on its host. Continue only after checking.",
-                              )
-                            )
-                              mutate("/sessions/" + s.id + "/resume", {
-                                confirmed_stopped: true,
-                              });
-                          }}
-                        >
-                          Resume agent
-                        </Button>
-                      )}
-                      <pre>
-                        {displayEvents(s.events || [])
-                          .map((e) => e.text)
-                          .join("\n\n") || "No saved output yet."}
-                      </pre>
-                    </details>
-                  ))}
-                </section>
-              )}
-            </div>
-          )}
-        </aside>
+        <TaskPanel
+          detail={detail}
+          busy={busy}
+          close={() => setTaskID("")}
+          mutate={mutate}
+          onDiscuss={(text) => {
+            setMessage(text);
+            navigate("chat");
+          }}
+        />
       )}
     </div>
   );
@@ -888,7 +638,10 @@ function Settings({ status, navigate }) {
           </small>
           {a.prompt && (
             <details>
-              <summary>Instructions</summary>
+              <summary>
+                <span>Instructions</span>
+                <DisclosureAction />
+              </summary>
               <pre>{a.prompt}</pre>
             </details>
           )}

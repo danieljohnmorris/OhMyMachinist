@@ -57,6 +57,11 @@ Choose **Add project** in the browser, then select:
   Machinist clones once, then reuses that checkout. It never replaces an existing
   folder. An existing checkout is accepted only if its origin matches exactly.
 
+**Browse folders** opens a directory picker on the selected host. Navigate to a
+repository and choose **Use this folder**, or enter an absolute path directly.
+For Git clones, choose the parent folder; the destination adds the repository
+name and remains editable. Folder browsing never creates or changes files.
+
 Execution defaults to this computer. Select a configured remote host to pin the
 project and its task workspaces to that machine. Remote paths are paths on that
 host. Remote credentials and build tools must already be installed there. Git
@@ -75,6 +80,16 @@ Existing files, local changes, and a different origin are never overwritten.
 Each task gets its own worktree and branch, not a full clone.
 
 ## Daily use
+
+The composer shows the configured foreman agent, runtime, and model. An omitted
+model is shown as **Default model**; Machinist does not guess which model the
+runtime selects.
+
+Task detail has **Design**, **Changes**, and **Checks** tabs. Designs render as
+documents; changes are grouped by file with a filter and line numbers. Failed
+checks appear first, with logs available on demand. Approval controls stay visible
+while reading. Resize or expand the panel; its width and selected tabs are saved
+in the browser. Permissions and interrupted agents remain available across tabs.
 
 1. Select a project and describe the desired change in foreman chat.
 2. The foreman creates a task-owned branch and worktree, then starts planning.

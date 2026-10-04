@@ -70,3 +70,24 @@ func (s *Service) inspectTasks(session *Session, taskID string) map[string]any {
 	}
 	return map[string]any{"tasks": tasks, "tasks_truncated": len(tasks) < len(candidates), "total_tasks": len(candidates)}
 }
+
+// Mutation acknowledgements contain routing/state fields, never saved artifacts.
+// Detailed results remain available through bounded inspect_tasks.
+func (s *Service) toolTask(t *Task) any {
+	if t == nil {
+		return nil
+	}
+	return struct {
+		taskSummary
+		Pipeline string `json:"pipeline"`
+		Repairs  int    `json:"repairs"`
+	}{s.summarize(t), summaryText(t.Pipeline), t.Repairs}
+}
+func toolSession(v *Session) *Session {
+	if v == nil {
+		return nil
+	}
+	copySession := *v
+	copySession.Error = summaryText(v.Error)
+	return &copySession
+}

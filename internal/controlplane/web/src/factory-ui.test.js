@@ -6,6 +6,7 @@ import { createServer } from "vite";
 test("factory shows real worker permissions, transcript, and current approval version", async (context) => {
   const dom = new JSDOM('<div id="root"></div>', {
       url: "http://localhost/#/factory",
+      pretendToBeVisual: true,
     }),
     prior = new Map();
   for (const name of [
@@ -15,6 +16,15 @@ test("factory shows real worker permissions, transcript, and current approval ve
     "localStorage",
     "Event",
     "MouseEvent",
+    "getComputedStyle",
+    "requestAnimationFrame",
+    "cancelAnimationFrame",
+    "HTMLElement",
+    "HTMLInputElement",
+    "Node",
+    "NodeFilter",
+    "MutationObserver",
+    "CustomEvent",
   ]) {
     prior.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
     Object.defineProperty(globalThis, name, {
@@ -46,6 +56,8 @@ test("factory shows real worker permissions, transcript, and current approval ve
     id: "task_a",
     title: "Add search",
     brief: "Complete long brief: " + "context ".repeat(100),
+    design:
+      "# Design safety\n\n<script id=unsafe>bad()</script>\n\n[unsafe](javascript:alert)\n\n```js\nconst safe = true;\n```",
     stage: "Review",
     status: "awaiting_approval",
     approval_subject: "code",
@@ -59,6 +71,12 @@ test("factory shows real worker permissions, transcript, and current approval ve
       body = {
         enabled: true,
         csrf_token: "csrf",
+        foreman: {
+          id: "foreman",
+          name: "Foreman",
+          runtime: "claude",
+          model: "",
+        },
         projects: [
           { id: "p", name: "Example" },
           { id: "remote", name: "Remote app" },
@@ -75,6 +93,13 @@ test("factory shows real worker permissions, transcript, and current approval ve
         session: { id: "remote-foreman", status: "completed" },
         events: [],
         permissions: [],
+      };
+    else if (url.startsWith("/api/factory/folders?"))
+      body = {
+        path: "/home/build/projects",
+        parent: "/home/build",
+        folders: [{ name: "app", path: "/home/build/projects/app" }],
+        truncated: false,
       };
     else if (url === "/api/v1/status")
       body = {
@@ -179,6 +204,14 @@ test("factory shows real worker permissions, transcript, and current approval ve
   await eventually(() =>
     assert.match(document.body.textContent, /Task update/),
   );
+  assert.equal(
+    document.querySelector(".factory-brand").textContent,
+    "machinist",
+  );
+  assert.match(
+    document.querySelector(".factory-foreman-model").textContent,
+    /Foreman.*Claude Code.*Default model/,
+  );
   await eventually(() =>
     assert.ok(
       [...document.querySelectorAll("button")].find((b) =>
@@ -192,6 +225,67 @@ test("factory shows real worker permissions, transcript, and current approval ve
   await eventually(() =>
     assert.match(document.body.textContent, /Saved worker output/),
   );
+  assert.equal(
+    document.querySelector("[role=tab][aria-selected=true]").textContent,
+    "Changes",
+  );
+  const separator = document.querySelector("[role=separator]");
+  const beforeWidth = Number(separator.getAttribute("aria-valuenow"));
+  separator.dispatchEvent(
+    new dom.window.KeyboardEvent("keydown", {
+      key: "ArrowLeft",
+      bubbles: true,
+    }),
+  );
+  await eventually(() =>
+    assert.equal(
+      Number(separator.getAttribute("aria-valuenow")),
+      beforeWidth + 24,
+    ),
+  );
+  assert.equal(
+    localStorage.getItem("machinist-panel-width"),
+    String(beforeWidth + 24),
+  );
+  document.querySelector('button[aria-label="Expand task panel"]').click();
+  await eventually(() =>
+    assert.ok(document.querySelector(".task-review-panel.expanded")),
+  );
+  document.querySelector('button[aria-label="Restore task panel"]').click();
+  document.querySelector("[role=tab][aria-selected=true]").dispatchEvent(
+    new dom.window.KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      bubbles: true,
+    }),
+  );
+  await eventually(() =>
+    assert.equal(
+      document.querySelector("[role=tab][aria-selected=true]").textContent,
+      "Checks",
+    ),
+  );
+  document
+    .querySelector("[role=tab][aria-selected=true]")
+    .dispatchEvent(
+      new dom.window.KeyboardEvent("keydown", { key: "Home", bubbles: true }),
+    );
+  await eventually(() =>
+    assert.equal(
+      document.querySelector(".review-markdown h2").textContent,
+      "Design safety",
+    ),
+  );
+  assert.equal(document.querySelector("script#unsafe"), null);
+  assert.equal(document.querySelector('a[href^="javascript:"]'), null);
+  assert.match(
+    document.querySelector(".review-markdown").textContent,
+    /<script id=unsafe>/,
+  );
+  [...document.querySelectorAll("[role=tab]")]
+    .find((tab) => tab.textContent === "Changes")
+    .dispatchEvent(
+      new dom.window.MouseEvent("mousedown", { bubbles: true, button: 0 }),
+    );
   const detailReads = () =>
     calls.filter(
       ([url, options]) =>
@@ -208,10 +302,23 @@ test("factory shows real worker permissions, transcript, and current approval ve
     initialDetailReads,
     "new task array and live chunks do not reload Git details",
   );
+  [...document.querySelectorAll("[role=tab]")]
+    .find((tab) => tab.textContent === "Design")
+    .dispatchEvent(
+      new dom.window.MouseEvent("mousedown", { bubbles: true, button: 0 }),
+    );
+  await eventually(() =>
+    assert.ok(document.body.textContent.includes(task.brief)),
+  );
   assert.ok(
     document.body.textContent.includes(task.brief),
     "live summaries preserve the complete inspected brief",
   );
+  [...document.querySelectorAll("[role=tab]")]
+    .find((tab) => tab.textContent === "Changes")
+    .dispatchEvent(
+      new dom.window.MouseEvent("mousedown", { bubbles: true, button: 0 }),
+    );
   task.revision = "new-revision";
   delayDetail = true;
   appendDelayedOutput = true;
@@ -232,7 +339,22 @@ test("factory shows real worker permissions, transcript, and current approval ve
     ),
   );
 
-  assert.match(document.body.textContent, /Unit tests · Passed/);
+  [...document.querySelectorAll("[role=tab]")]
+    .find((tab) => tab.textContent === "Checks")
+    .dispatchEvent(
+      new dom.window.MouseEvent("mousedown", { bubbles: true, button: 0 }),
+    );
+  await eventually(() =>
+    assert.match(document.body.textContent, /Unit tests · Passed/),
+  );
+  [...document.querySelectorAll("[role=tab]")]
+    .find((tab) => tab.textContent === "Changes")
+    .dispatchEvent(
+      new dom.window.MouseEvent("mousedown", { bubbles: true, button: 0 }),
+    );
+  await eventually(() =>
+    assert.match(document.body.textContent, /too large to show in full/),
+  );
   assert.match(document.body.textContent, /too large to show in full/);
   assert.match(document.body.textContent, /Only part of the file list/);
   [...document.querySelectorAll("button")]
@@ -263,6 +385,45 @@ test("factory shows real worker permissions, transcript, and current approval ve
           url === "/api/factory/tasks/task_a/approve" &&
           JSON.parse(o.body).version === 3 &&
           o.headers["X-Machinist-CSRF"] === "csrf",
+      ),
+    ),
+  );
+  await eventually(() =>
+    assert.ok(
+      [...document.querySelectorAll("button")].find(
+        (b) => b.textContent === "Request changes" && !b.disabled,
+      ),
+    ),
+  );
+  [...document.querySelectorAll("button")]
+    .find((b) => b.textContent === "Request changes")
+    .click();
+  await eventually(() =>
+    assert.ok(document.querySelector(".review-approval textarea")),
+  );
+  const feedbackInput = document.querySelector(".review-approval textarea");
+  Object.getOwnPropertyDescriptor(
+    dom.window.HTMLTextAreaElement.prototype,
+    "value",
+  ).set.call(feedbackInput, "Add keyboard support");
+  feedbackInput.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+  await eventually(() =>
+    assert.ok(
+      [...document.querySelectorAll("button")].find(
+        (b) => b.textContent === "Request changes" && !b.disabled,
+      ),
+    ),
+  );
+  [...document.querySelectorAll("button")]
+    .find((b) => b.textContent === "Request changes")
+    .click();
+  await eventually(() =>
+    assert.ok(
+      calls.some(
+        ([url, options]) =>
+          url === "/api/factory/tasks/task_a/changes" &&
+          JSON.parse(options.body).version === 3 &&
+          JSON.parse(options.body).message === "Add keyboard support",
       ),
     ),
   );
@@ -361,6 +522,43 @@ test("factory shows real worker permissions, transcript, and current approval ve
     document.body.textContent,
     /Existing folders are never replaced/,
   );
+  const projectHost = document.getElementById("project-host");
+  Object.getOwnPropertyDescriptor(
+    dom.window.HTMLSelectElement.prototype,
+    "value",
+  ).set.call(projectHost, "vm");
+  projectHost.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+  [...document.querySelectorAll("button")]
+    .find((button) => button.textContent === "Browse folders")
+    .click();
+  await eventually(() => assert.ok(document.querySelector("[role=dialog]")));
+  await eventually(() =>
+    assert.ok(
+      calls.some(
+        ([url, options]) =>
+          url.startsWith("/api/factory/folders?host=vm") &&
+          options.headers["X-Machinist-CSRF"] === "csrf",
+      ),
+    ),
+  );
+  await eventually(() =>
+    assert.ok(
+      [...document.querySelectorAll("button")].find(
+        (button) =>
+          button.textContent === "Use this folder" && !button.disabled,
+      ),
+    ),
+  );
+  [...document.querySelectorAll("button")]
+    .find((button) => button.textContent === "Use this folder")
+    .click();
+  await eventually(() =>
+    assert.equal(
+      document.getElementById("project-path").value,
+      "/home/build/projects/repository",
+    ),
+  );
+  assert.equal(document.querySelector("[role=dialog]"), null);
 });
 async function eventually(check) {
   const deadline = Date.now() + 1500;

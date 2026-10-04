@@ -63,6 +63,10 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request) {
 		s.stream(w, r, parts[1])
 		return
 	}
+	if path == "folders" && r.Method == "GET" {
+		s.folders(w, r)
+		return
+	}
 	if path == "projects" && r.Method == "POST" {
 		s.addProject(w, r)
 		return
@@ -96,7 +100,17 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request) {
 		for _, t := range s.tasks {
 			tasks = append(tasks, s.summarize(t))
 		}
-		jsonReply(w, 200, map[string]any{"enabled": s.cfg.Enabled, "projects": projects, "hosts": hosts, "agents": agents, "pipelines": pipelines, "tasks": tasks, "csrf_token": s.csrf})
+		profile := s.cfg.Agents[s.cfg.Foreman]
+		name := profile.Name
+		if name == "" {
+			name = s.cfg.Foreman
+		}
+		runtime := profile.Runtime
+		if runtime == "" {
+			runtime = "claude"
+		}
+		foreman := map[string]any{"id": s.cfg.Foreman, "name": name, "runtime": runtime, "model": profile.Model}
+		jsonReply(w, 200, map[string]any{"enabled": s.cfg.Enabled, "foreman": foreman, "projects": projects, "hosts": hosts, "agents": agents, "pipelines": pipelines, "tasks": tasks, "csrf_token": s.csrf})
 		return
 	}
 	if !s.cfg.Enabled {

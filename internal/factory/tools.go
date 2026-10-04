@@ -55,7 +55,7 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 		args, _ := json.Marshal([]string{in.Title, in.Brief, pipeline})
 		key := fmt.Sprintf("create:%s:%s:%x", session.ID, session.RequestID, sha256.Sum256(args))
 		if old := s.requests[key]; old != "" {
-			jsonReply(w, 200, map[string]any{"task": s.tasks[old]})
+			jsonReply(w, 200, map[string]any{"task": s.toolTask(s.tasks[old])})
 			return
 		}
 		turn := session.RequestID
@@ -67,7 +67,7 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 			return
 		}
 		s.signal()
-		jsonReply(w, 200, map[string]any{"task": t})
+		jsonReply(w, 200, map[string]any{"task": s.toolTask(t)})
 		return
 	case "start_step":
 		if !session.isForeman() {
@@ -84,7 +84,7 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 			fail(w, e)
 			return
 		}
-		jsonReply(w, 200, map[string]any{"task": t, "session": v})
+		jsonReply(w, 200, map[string]any{"task": s.toolTask(t), "session": toolSession(v)})
 		return
 	case "send_message":
 		if !session.isForeman() {
@@ -102,7 +102,7 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 		}
 		key := "worker-message:" + session.ID + ":" + in.RequestID
 		if s.requests[key] != "" {
-			jsonReply(w, 200, map[string]any{"task": t})
+			jsonReply(w, 200, map[string]any{"task": s.toolTask(t)})
 			return
 		}
 		delivery := t.Step >= len(t.Steps)
@@ -176,7 +176,7 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 			fail(w, err)
 			return
 		}
-		jsonReply(w, 200, map[string]any{"task": t, "session": worker})
+		jsonReply(w, 200, map[string]any{"task": s.toolTask(t), "session": toolSession(worker)})
 		return
 	case "cancel_task":
 		if !session.isForeman() {
@@ -192,7 +192,7 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 			fail(w, err)
 			return
 		}
-		jsonReply(w, 200, map[string]any{"task": t})
+		jsonReply(w, 200, map[string]any{"task": s.toolTask(t)})
 		return
 	case "link_pr":
 		if session.TaskID == "" || session.TaskID != in.TaskID || !session.Delivery {
@@ -231,7 +231,7 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 		}
 		if t.PRURL == in.PRURL && t.GitHubHead == pr.HeadRefOID {
 			session.Reported = true
-			jsonReply(w, 200, map[string]any{"task": t})
+			jsonReply(w, 200, map[string]any{"task": s.toolTask(t)})
 			return
 		}
 		copyTask := *t
@@ -245,7 +245,7 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 			return
 		}
 		session.Reported = true
-		jsonReply(w, 200, map[string]any{"task": t})
+		jsonReply(w, 200, map[string]any{"task": s.toolTask(t)})
 		return
 	case "report":
 		if session.TaskID == "" || session.TaskID != in.TaskID {
@@ -258,7 +258,7 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 		}
 		key := "report:" + session.ID + ":" + in.ReportID
 		if old := s.requests[key]; old != "" {
-			jsonReply(w, 200, map[string]any{"task": s.tasks[old]})
+			jsonReply(w, 200, map[string]any{"task": s.toolTask(s.tasks[old])})
 			return
 		}
 		t := s.tasks[session.TaskID]
@@ -388,7 +388,7 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 		}
 		s.signal()
 
-		jsonReply(w, 200, map[string]any{"task": t})
+		jsonReply(w, 200, map[string]any{"task": s.toolTask(t)})
 		return
 	}
 	http.NotFound(w, r)
