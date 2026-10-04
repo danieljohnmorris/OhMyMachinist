@@ -214,3 +214,29 @@ func TestFactoryAllowsBrowserOnboardingWithoutProjects(t *testing.T) {
 		t.Fatal("empty factory cannot onboard projects")
 	}
 }
+
+func TestFactoryProjectIDsAreSafeURLSegments(t *testing.T) {
+	for _, id := range []string{"", "owner/repo", "project?view=board", "project#board", "a b", "a%2Fb", ".", "..", "café", "a\\b"} {
+		t.Run(id, func(t *testing.T) {
+			c := factoryFixture(t)
+			p := c.Factory.Projects["project"]
+			c.Factory.Projects = map[string]FactoryProject{id: p}
+			_, err := c.ResolveFactory()
+			if err == nil || !strings.Contains(err.Error(), "project ID") {
+				t.Fatalf("unsafe project ID accepted: %q err=%v", id, err)
+			}
+		})
+	}
+	for _, id := range []string{"project", "my-project", "project_2", "project.v2", ".hidden", "-project", "_project"} {
+		t.Run(id, func(t *testing.T) {
+			c := factoryFixture(t)
+			p := c.Factory.Projects["project"]
+			p.Name = "Readable project name"
+			c.Factory.Projects = map[string]FactoryProject{id: p}
+			resolved, err := c.ResolveFactory()
+			if err != nil || resolved.Projects[id].Name != p.Name {
+				t.Fatalf("valid project ID rejected: %q err=%v", id, err)
+			}
+		})
+	}
+}

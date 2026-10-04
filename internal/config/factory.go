@@ -3,9 +3,12 @@ package config
 import (
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
+
+var factoryProjectID = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
 // FactoryConfig is operator-managed configuration, never agent-authored state.
 type FactoryConfig struct {
@@ -133,8 +136,11 @@ func (c Config) ResolveFactory() (ResolvedFactory, error) {
 		r.Hosts[id] = h
 	}
 	for id, p := range f.Projects {
-		if strings.TrimSpace(id) == "" || strings.TrimSpace(p.Path) == "" {
-			return fail("project names and paths must be non-empty")
+		if !factoryProjectID.MatchString(id) || id == "." || id == ".." {
+			return fail("project ID %q must contain only ASCII letters, numbers, dots, hyphens or underscores, and cannot be . or ..", id)
+		}
+		if strings.TrimSpace(p.Path) == "" {
+			return fail("project paths must be non-empty")
 		}
 		if p.Host == "" {
 			p.Host = "local"

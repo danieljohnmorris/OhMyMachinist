@@ -61,7 +61,9 @@ Git authentication. GitHub delivery tracking is inferred from a GitHub origin;
 other Git hosts remain usable without GitHub PR tracking.
 
 Browser-added projects are saved in the existing Machinist SQLite database.
-Configured project IDs take precedence over stored entries after restart. A Git
+Configured project IDs take precedence over stored entries after restart.
+Project IDs use ASCII letters, numbers, dots, hyphens or underscores; `.` and `..`
+are not valid IDs. Display names can contain spaces and other characters. A Git
 project with a missing checkout can clone again before creating a new task.
 Existing files, local changes, and a different origin are never overwritten.
 Each task gets its own worktree and branch, not a full clone.
