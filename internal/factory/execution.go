@@ -287,7 +287,7 @@ func (s *Service) execute(ctx context.Context, v Session, token string, runner R
 				}
 			}
 		} else if !current.Reported && runErr != nil {
-			t.Status = "interrupted"
+			t.Status, current.Status = "interrupted", "interrupted"
 			t.Activity = "Agent needs attention"
 			workerAttention = "Agent exited with an error: " + runErr.Error()
 		} else if !current.Reported && t.Status == "active" {

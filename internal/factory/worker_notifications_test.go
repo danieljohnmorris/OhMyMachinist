@@ -132,9 +132,26 @@ func TestWorkerExitNotifiesForemanWithoutRepeatingAcceptedReport(t *testing.T) {
 				if status != "interrupted" || !strings.Contains(prompt, "needs human attention") || !strings.Contains(prompt, "Do not automatically retry") {
 					t.Fatalf("unreported exit not surfaced: status=%s prompt=%s", status, prompt)
 				}
-				if outcome == "missing" && workerStatus != "interrupted" {
-					t.Fatal("clean exit mistaken for successful report")
+				if workerStatus != "interrupted" {
+					t.Fatal("unreported exit did not require explicit recovery")
 				}
+				s.mu.Lock()
+				foreman, _ := s.foreman("project")
+				foreman.Status = "running"
+				s.active = foreman.ID
+				s.tokens["repair-token"] = foreman.ID
+				_, startErr := s.start(task)
+				s.mu.Unlock()
+				response := call(s, "POST", "tools/send_message", `{"request_id":"retry","task_id":"`+task.ID+`","message":"Retry now"}`, "repair-token")
+				s.mu.Lock()
+				s.active = ""
+				foreman.Status = "completed"
+				delete(s.tokens, "repair-token")
+				s.mu.Unlock()
+				if startErr == nil || response.Code != 409 {
+					t.Fatal("foreman bypassed explicit recovery")
+				}
+
 			} else {
 				if strings.Contains(prompt, "needs human attention") {
 					t.Fatal("accepted report was notified again as missing")
