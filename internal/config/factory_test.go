@@ -202,3 +202,15 @@ func TestFactoryRequiresChecksAfterLastBuilder(t *testing.T) {
 		})
 	}
 }
+
+func TestFactoryAllowsBrowserOnboardingWithoutProjects(t *testing.T) {
+	c := factoryFixture(t)
+	c.Factory.Projects = nil
+	r, err := c.ResolveFactory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Enabled || len(r.Projects) != 0 || r.Hosts["local"].Name == "" {
+		t.Fatal("empty factory cannot onboard projects")
+	}
+}

@@ -26,14 +26,11 @@ func shellArgs(v []string) string {
 	return strings.Join(out, " ")
 }
 func (s *Service) command(ctx context.Context, project, dir string, args []string) *exec.Cmd {
+	s.commandMu.RLock()
 	p := s.cfg.Projects[project]
-	if p.Host != "" && p.Host != "local" {
-		h := s.cfg.Hosts[p.Host]
-		return exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", h.SSH, "cd "+shellQuote(dir)+" && "+shellArgs(args))
-	}
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-	cmd.Dir = dir
-	return cmd
+	h := s.cfg.Hosts[p.Host]
+	s.commandMu.RUnlock()
+	return hostCommand(ctx, p, h, dir, args)
 }
 func (s *Service) git(project, dir string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -125,6 +122,10 @@ func (s *Service) execute(ctx context.Context, v Session, token string, runner R
 	} else {
 		system += "\nYou are the only user-facing foreman. Use the connected machinist MCP server: mcp__machinist__inspect_tasks reads work, mcp__machinist__create_task creates a task, mcp__machinist__start_step runs its eligible step, mcp__machinist__send_message routes feedback to its worker, and mcp__machinist__cancel_task stops queued work. These are connected tools, not terminal CLI commands. Do not search for, install, or configure another Machinist instance. Delegate code changes. After human code delivery approval, use send_message to the existing builder to publish only the approved revision and link its PR. Never grant approval, merge, or bypass a pipeline gate. When a worker reports, inspect its task and start the next eligible step unless a human decision is needed."
 	}
+	host := "local"
+	if !v.isForeman() {
+		host = s.cfg.Projects[v.ProjectID].Host
+	}
 	s.mu.Unlock()
 	if timeout == 0 {
 		timeout = 30 * time.Minute
@@ -206,12 +207,10 @@ func (s *Service) execute(ctx context.Context, v Session, token string, runner R
 		output = limited.String()
 		emit(Event{Kind: "activity", Title: "Checks", Text: output})
 	} else {
-		provider, runErr = runner(ctx, RunRequest{Host: func() string {
-			if v.isForeman() {
-				return "local"
-			}
-			return s.cfg.Projects[v.ProjectID].Host
-		}(), Directory: v.Directory, SessionID: v.ProviderID, Prompt: prompt, SystemPrompt: system, Model: profile.Model, Token: token, URL: url, Executable: s.executable}, emit, permission)
+		provider, runErr = runner(ctx, RunRequest{Host: host, Directory: v.Directory, SessionID: v.ProviderID, Prompt: prompt, SystemPrompt: system, Model: profile.Model, Token: token, URL: url, Executable: s.executable}, emit, permission)
+	}
+	if runErr == nil && ctx.Err() != nil {
+		runErr = ctx.Err()
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -221,9 +220,9 @@ func (s *Service) execute(ctx context.Context, v Session, token string, runner R
 		return
 	}
 	current.ProviderID = provider
-	if current.Status == "cancelled" || s.closed {
+	if current.Status == "cancelled" || (current.Status == "interrupted" && ctx.Err() != nil) || s.closed {
 		current.Status = "interrupted"
-		if !s.closed {
+		if !s.closed && (v.isForeman() || host == "local" || host == "") {
 			current.Status = "cancelled"
 		}
 	} else if runErr != nil {
@@ -396,7 +395,7 @@ func (s *Service) start(t *Task) (*Session, error) {
 	}
 	return v, nil
 }
-func (s *Service) create(project, title, brief, pipeline string) (*Task, error) {
+func (s *Service) create(project, title, brief, pipeline string, valid ...func() bool) (*Task, error) {
 	if strings.TrimSpace(title) == "" || strings.TrimSpace(brief) == "" {
 		return nil, errors.New("title and brief are required")
 	}
@@ -416,19 +415,46 @@ func (s *Service) create(project, title, brief, pipeline string) (*Task, error) 
 	if count >= 4 {
 		return nil, errors.New("four active tasks already exist in this project")
 	}
+	p, ok := s.cfg.Projects[project]
+	if !ok {
+		return nil, errors.New("unknown project")
+	}
+	host, ok := s.cfg.Hosts[p.Host]
+	if !ok && p.Host != "" {
+		return nil, errors.New("project host is no longer configured")
+	}
+	if s.provisioning {
+		return nil, errors.New("repository setup is busy; retry shortly")
+	}
+	s.provisioning = true
 	key := id("t_")
-	dir, branch, e := s.workspace(project, key)
+	s.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	dir, branch, e := workspace(ctx, p, host, key)
+	var base string
+	if e == nil {
+		base, e = projectGit(ctx, p, host, dir, "rev-parse", "HEAD")
+		if e != nil {
+			e = fmt.Errorf("record task base revision: %w", e)
+		} else if base == "" {
+			e = errors.New("record task base revision: Git returned an empty revision")
+		}
+	}
+	cancel()
+	s.mu.Lock()
+	s.provisioning = false
 	if e != nil {
 		return nil, e
 	}
-	t := &Task{ProjectSnapshot: s.cfg.Projects[project], HostSnapshot: s.cfg.Hosts[s.cfg.Projects[project].Host], ID: key, ProjectID: project, Title: title, Brief: brief, Pipeline: pipeline, Stage: "Design", Status: "active", Activity: "Ready for planning", Directory: dir, Branch: branch, Version: 1, CreatedAt: now(), Checks: []Check{}, Agents: map[string]config.ResolvedAgent{}, Steps: append([]config.FactoryStep(nil), definition.Steps...)}
-	t.BaseRevision, e = s.git(project, dir, "rev-parse", "HEAD")
-	if e != nil {
-		return nil, fmt.Errorf("record task base revision: %w", e)
+	if s.closed || !reflect.DeepEqual(s.cfg.Projects[project], p) || !reflect.DeepEqual(s.cfg.Hosts[p.Host], host) {
+		return nil, errors.New("factory or project changed while preparing the workspace; retry")
 	}
-	if t.BaseRevision == "" {
-		return nil, errors.New("record task base revision: Git returned an empty revision")
+	for _, check := range valid {
+		if !check() {
+			return nil, errors.New("conversation changed while preparing the workspace; retry from the current turn")
+		}
 	}
+	t := &Task{ProjectSnapshot: p, HostSnapshot: host, ID: key, ProjectID: project, Title: title, Brief: brief, Pipeline: pipeline, Stage: "Design", Status: "active", Activity: "Ready for planning", Directory: dir, Branch: branch, BaseRevision: base, Version: 1, CreatedAt: now(), Checks: []Check{}, Agents: map[string]config.ResolvedAgent{}, Steps: append([]config.FactoryStep(nil), definition.Steps...)}
 	for i := range t.Steps {
 		t.Steps[i].Command = append([]string(nil), t.Steps[i].Command...)
 	}

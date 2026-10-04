@@ -19,6 +19,8 @@ import (
 type Service struct {
 	workers               sync.WaitGroup
 	mu                    sync.Mutex
+	commandMu             sync.RWMutex
+	provisioning          bool
 	db                    *sql.DB
 	cfg                   config.ResolvedFactory
 	executable, url, csrf string
@@ -47,6 +49,14 @@ func New(db *sql.DB, cfg config.ResolvedFactory, executable string) (*Service, e
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS factory_records (kind TEXT NOT NULL,id TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(kind,id)); CREATE TABLE IF NOT EXISTS factory_events (id INTEGER PRIMARY KEY AUTOINCREMENT,session_id TEXT NOT NULL,data TEXT NOT NULL); CREATE INDEX IF NOT EXISTS factory_events_session ON factory_events(session_id,id);`); err != nil {
 		return nil, err
 	}
+	if s.cfg.Hosts == nil {
+		s.cfg.Hosts = map[string]config.FactoryHost{"local": {Name: "This computer"}}
+	}
+	projects := make(map[string]config.FactoryProject, len(cfg.Projects))
+	for key, p := range cfg.Projects {
+		projects[key] = p
+	}
+	s.cfg.Projects = projects
 	rows, err := db.Query(`SELECT kind,id,data FROM factory_records`)
 	if err != nil {
 		return nil, err
@@ -58,6 +68,14 @@ func New(db *sql.DB, cfg config.ResolvedFactory, executable string) (*Service, e
 			return nil, err
 		}
 		switch kind {
+		case "project":
+			var p config.FactoryProject
+			if err = json.Unmarshal([]byte(raw), &p); err != nil {
+				return nil, err
+			}
+			if _, configured := s.cfg.Projects[key]; !configured {
+				s.cfg.Projects[key] = p
+			}
 		case "task":
 			var r taskRecord
 			if err = json.Unmarshal([]byte(raw), &r); err != nil {
@@ -333,21 +351,26 @@ func (s *Service) next() {
 	s.workers.Add(1)
 	go func() { defer s.workers.Done(); s.execute(ctx, copySession, token, runner, url) }()
 }
-func (s *Service) workspace(project, task string) (string, string, error) {
-	p := s.cfg.Projects[project]
+
+// workspace uses immutable host/project values and runs without the service lock.
+func workspace(ctx context.Context, p config.FactoryProject, h config.FactoryHost, task string) (string, string, error) {
+	if p.Source == "git" {
+		if e := prepareProject(ctx, p, h); e != nil {
+			return "", "", e
+		}
+	}
 	root, e := os.UserCacheDir()
 	if e != nil {
 		return "", "", e
 	}
 	dir := filepath.Join(root, "machinist", "factory", task)
-	if e = os.MkdirAll(filepath.Dir(dir), 0700); e != nil {
-		return "", "", e
-	}
 	if p.Host != "" && p.Host != "local" {
 		dir = filepath.Join(filepath.Dir(p.Path), ".machinist-worktrees", task)
+	} else if e = os.MkdirAll(filepath.Dir(dir), 0700); e != nil {
+		return "", "", e
 	}
 	branch := "codex/factory-" + task
-	if _, e = s.git(project, p.Path, "worktree", "add", "-b", branch, dir, "HEAD"); e != nil {
+	if _, e = projectGit(ctx, p, h, p.Path, "worktree", "add", "-b", branch, dir, "HEAD"); e != nil {
 		return "", "", e
 	}
 	return dir, branch, nil

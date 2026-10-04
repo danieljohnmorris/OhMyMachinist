@@ -57,7 +57,10 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 			jsonReply(w, 200, map[string]any{"task": s.tasks[old]})
 			return
 		}
-		t, e := s.create(session.ProjectID, in.Title, in.Brief, in.Pipeline)
+		turn := session.RequestID
+		t, e := s.create(session.ProjectID, in.Title, in.Brief, in.Pipeline, func() bool {
+			return s.active == session.ID && s.tokens[token] == session.ID && session.RequestID == turn && session.Status != "cancelled" && session.Status != "interrupted"
+		})
 		if e != nil {
 			fail(w, e)
 			return

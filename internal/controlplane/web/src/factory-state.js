@@ -45,3 +45,12 @@ export async function factoryRequest(path, options = {}) {
   if (!r.ok) throw Error(b.error || `Request failed (${r.status})`);
   return b;
 }
+
+export function factoryView(hash = "") {
+  if (hash.startsWith("#/runs")) return "history";
+  if (["#/workers", "#/analytics", "#/triggers", "#/workflows", "#/commands"].some((route) => hash.startsWith(route))) return "settings";
+  if (hash === "#/factory/settings") return "settings";
+  if (hash === "#/factory/add") return "add";
+  if (hash === "#/factory/board") return "board";
+  return "chat";
+}

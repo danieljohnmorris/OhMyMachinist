@@ -512,3 +512,35 @@
     padding: 24px;
   }
 }
+.factory-project-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.factory-project-heading .factory-label { padding-bottom: 0; }
+.factory-add-project { width: 36px; height: 36px; border-radius: 6px; font-size: 22px; }
+.factory-page { padding: 28px 32px; overflow: auto; min-height: 0; flex: 1; }
+.factory-page > p { color: var(--muted-foreground); max-width: 65ch; margin-bottom: 28px; }
+.factory-setup form { max-width: 560px; }
+.factory-setup fieldset { display: flex; flex-direction: column; gap: 10px; }
+.factory-setup legend { font-weight: 650; margin-bottom: 12px; }
+.factory-setup label:not(.factory-source) { font-weight: 600; margin-top: 16px; }
+.factory-setup input:not([type="radio"]), .factory-setup select { width: 100%; padding: 11px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--foreground); }
+.factory-setup input::placeholder { color: var(--muted-foreground); }
+.factory-setup .factory-source { display: flex; gap: 12px; align-items: flex-start; padding: 14px 0; cursor: pointer; }
+.factory-source input { margin-top: 4px; accent-color: var(--primary); }
+.factory-source strong, .factory-source small { display: block; }
+.factory-source small { margin-top: 4px; }
+.factory-form-actions { display: flex; align-items: center; gap: 12px; margin: 28px 0 12px; }
+.factory-history-item { border-top: 1px solid var(--border); padding: 18px 0; }
+.factory-history-item summary { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; cursor: pointer; }
+.factory-history-item summary strong { flex: 1; min-width: 150px; }
+.factory-history-item section { margin-top: 20px; padding-left: 16px; border-left: 2px solid var(--border); }
+.factory-history-item p { margin-top: 12px; overflow-wrap: anywhere; }
+.factory-history-item pre { margin: 12px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.factory-settings h2:not(:first-child) { margin-top: 32px; }
+.factory-settings section p { overflow-wrap: anywhere; }
+.factory-settings section { margin-bottom: 16px; }
+.factory-shell button:focus-visible, .factory-shell a:focus-visible, .factory-setup input:focus-visible, .factory-setup select:focus-visible, .factory-history summary:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
+@media (max-width: 800px) {
+ .factory-project-heading { margin: 0; }
+ .factory-add-project { flex-shrink: 0; }
+ .factory-page { padding: 24px 16px; }
+ .factory-form-actions { flex-wrap: wrap; }
+}

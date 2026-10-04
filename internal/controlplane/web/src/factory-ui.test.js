@@ -54,8 +54,15 @@ test("factory shows real worker permissions, transcript, and current approval ve
       body = {
         enabled: true,
         csrf_token: "csrf",
-        projects: [{ id: "p", name: "Example" }],
+        projects: [{ id: "p", name: "Example" }, {id: "remote",name:"Remote app"}],
+        hosts: [{id:"local",name:"Local"},{id:"vm",name:"Build VM"}],
       };
+    else if (url === "/api/factory/projects/remote")
+      body = {session: {id:"remote-foreman"},tasks: []};
+    else if (url.startsWith("/api/factory/sessions/remote-foreman"))
+      body = {session: {id:"remote-foreman",status:"completed"},events: [],permissions: []};
+    else if (url === "/api/v1/status")
+      body = {jobs: [{id:"old",prompt:"Previous batch task",state:"succeeded",runs: []}]};
     else if (url === "/api/factory/projects/p")
       body = { session: { id: "foreman" }, tasks: [task] };
     else if (url.startsWith("/api/factory/sessions/foreman"))
@@ -196,6 +203,32 @@ test("factory shows real worker permissions, transcript, and current approval ve
       ),
     ),
   );
+  const shell = document.querySelector(".factory-shell");
+  [...document.querySelectorAll("button")].find((b) => b.textContent === "Remote app").click();
+  await eventually(() => assert.equal(document.querySelector("h1").textContent, "Remote app"));
+  [...document.querySelectorAll("button")].find((b) => b.textContent === "Settings").click();
+  await eventually(() => assert.equal(document.querySelector("h1").textContent, "Settings"));
+  assert.equal(document.querySelector(".factory-inspector"), null);
+  [...document.querySelectorAll("button")].find((b) => b.textContent === "View history").click();
+  await eventually(() => assert.match(document.body.textContent, /Previous batch task/));
+  assert.equal(document.querySelector(".factory-shell"), shell);
+  assert.doesNotMatch(document.body.textContent, /New task|Analytics|Triggers|Back to factory/);
+  [...document.querySelectorAll("button")].find((b) => b.textContent === "Remote app").click();
+  await eventually(() => assert.equal(document.querySelector("h1").textContent, "Remote app"));
+  assert.equal(document.querySelector(".factory-shell"), shell);
+  window.location.hash = "#/runs";
+  window.dispatchEvent(new Event("hashchange"));
+  await eventually(() => assert.equal(document.querySelector("h1").textContent, "History"));
+  assert.equal(document.querySelector(".factory-shell"), shell);
+  [...document.querySelectorAll("button")].find((b) => b.getAttribute("aria-label") === "Add project").click();
+  await eventually(() => assert.ok(document.getElementById("project-host")));
+  assert.equal(document.getElementById("project-host").value, "local");
+  assert.match(document.body.textContent, /Build VM/);
+  assert.match(document.body.textContent, /Clone once/);
+  document.querySelectorAll('input[type="radio"]')[1].click();
+  await eventually(() => assert.ok(document.getElementById("project-git-url")));
+  assert.match(document.body.textContent, /Existing folders are never replaced/);
+
 });
 async function eventually(check) {
   const deadline = Date.now() + 1500;

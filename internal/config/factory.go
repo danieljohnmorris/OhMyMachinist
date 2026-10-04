@@ -25,6 +25,8 @@ type FactoryHost struct {
 	ACPCommand       []string `toml:"acp_command" json:"acp_command,omitempty"`
 }
 type FactoryProject struct {
+	Source string `toml:"source" json:"source,omitempty"`
+	GitURL string `toml:"git_url" json:"git_url,omitempty"`
 	Host   string `toml:"host" json:"host"`
 	Name   string `toml:"name" json:"name"`
 	Path   string `toml:"path" json:"path"`
@@ -129,9 +131,6 @@ func (c Config) ResolveFactory() (ResolvedFactory, error) {
 		}
 		h.ACPCommand = append([]string(nil), h.ACPCommand...)
 		r.Hosts[id] = h
-	}
-	if len(f.Projects) == 0 {
-		return fail("at least one project is required")
 	}
 	for id, p := range f.Projects {
 		if strings.TrimSpace(id) == "" || strings.TrimSpace(p.Path) == "" {

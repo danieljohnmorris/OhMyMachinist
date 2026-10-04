@@ -201,8 +201,8 @@ func TestScopedToolsCannotApproveOrOperateAnotherTask(t *testing.T) {
 		t.Fatal("foreman can fake worker result")
 	}
 	public := call(s, "GET", "status", "", "").Body.String()
-	if strings.Contains(public, "secret") || strings.Contains(public, s.cfg.Projects["project"].Path) {
-		t.Fatal("public response leaks credentials or paths")
+	if strings.Contains(public, "secret") {
+		t.Fatal("public response leaks credentials")
 	}
 	s.mu.Lock()
 	s.active = ""

@@ -8,10 +8,12 @@ import {
   stages,
 } from "./factory-state.js";
 import "./factory.css";
+import { ProjectSetup } from "./factory-setup.jsx";
+import { FactoryHistory } from "./factory-history.jsx";
+import { factoryView } from "./factory-state.js";
 export function FactoryEntry({ LegacyApp }) {
   const [status, setStatus] = useState(null),
-    [error, setError] = useState(""),
-    [hash, setHash] = useState(window.location.hash);
+    [error, setError] = useState("");
   const load = () => {
     setError("");
     factoryRequest("/status")
@@ -20,9 +22,7 @@ export function FactoryEntry({ LegacyApp }) {
   };
   useEffect(() => {
     load();
-    const fn = () => setHash(window.location.hash);
-    window.addEventListener("hashchange", fn);
-    return () => window.removeEventListener("hashchange", fn);
+
   }, []);
   if (error)
     return (
@@ -38,31 +38,14 @@ export function FactoryEntry({ LegacyApp }) {
         Opening machinist…
       </div>
     );
-  if (
-    !status.enabled ||
-    (hash.startsWith("#/") && !hash.startsWith("#/factory"))
-  )
-    return (
-      <>
-        {status.enabled ? (
-          <a className="factory-return" href="#/factory">
-            ← Back to factory
-          </a>
-        ) : (
-          <div className="factory-return">
-            Enable [factory] in configuration to use foreman chat.
-          </div>
-        )}
-        <LegacyApp />
-      </>
-    );
-  return <FactoryApp status={status} />;
+  if (!status.enabled) return <LegacyApp />;
+  return <FactoryApp status={status} onStatus={setStatus} />;
 }
-export function FactoryApp({ status }) {
-  const [projectID, setProjectID] = useState(status.projects?.[0]?.id || ""),
+export function FactoryApp({ status, onStatus }) {
+  const [projectID, setProjectID] = useState(() => status.projects?.find((p) => p.id === localStorage.getItem("machinist-project"))?.id || status.projects?.[0]?.id || ""),
     [project, setProject] = useState(null),
     [chat, setChat] = useState({ events: [] }),
-    [view, setView] = useState("chat"),
+    [view, setView] = useState(() => factoryView(window.location.hash)),
     [taskID, setTaskID] = useState(""),
     [detail, setDetail] = useState(null),
     [message, setMessage] = useState(""),
@@ -74,6 +57,24 @@ export function FactoryApp({ status }) {
     [dark, setDark] = useState(
       () => localStorage.getItem("machinist-theme") !== "light",
     );
+  function navigate(next) {
+    setView(next);
+    window.location.hash = next === "history" ? "#/runs" : `#/factory/${next}`;
+  }
+  useEffect(() => {
+    const update = () => setView(factoryView(window.location.hash));
+    window.addEventListener("hashchange", update);
+    return () => window.removeEventListener("hashchange", update);
+  }, []);
+  useEffect(() => {
+    if (projectID) localStorage.setItem("machinist-project", projectID);
+  }, [projectID]);
+  async function projectCreated(project) {
+    const nextStatus = await factoryRequest("/status");
+    onStatus(nextStatus);
+    setProjectID(project.id);
+    navigate("chat");
+  }
   const generation = useRef(0),
     requestID = useRef(null),
     refreshSequence = useRef(0),
@@ -219,7 +220,7 @@ export function FactoryApp({ status }) {
     ) {
       setMessage("");
       requestID.current = null;
-      setView("chat");
+      navigate("chat");
     }
   }
   const tasks = project?.tasks || [],
@@ -234,7 +235,7 @@ export function FactoryApp({ status }) {
         <a className="factory-brand" href="#/factory">
           machinist<small>factory</small>
         </a>
-        <p className="factory-label">Projects</p>
+        <div className="factory-project-heading"><p className="factory-label">Projects</p><button className="factory-add-project" aria-label="Add project" onClick={() => navigate("add")}>+</button></div>
         <nav aria-label="Projects">
           {status.projects?.map((p) => (
             <button
@@ -242,7 +243,7 @@ export function FactoryApp({ status }) {
               aria-current={p.id === projectID ? "page" : undefined}
               onClick={() => {
                 setProjectID(p.id);
-                setView("chat");
+                navigate("chat");
               }}
             >
               {p.name || p.id}
@@ -250,8 +251,7 @@ export function FactoryApp({ status }) {
           ))}
         </nav>
         <footer>
-          <button onClick={() => setView("settings")}>Settings</button>
-          <a href="#/runs">Execution history</a>
+          <button aria-current={view === "settings" || view === "history" ? "page" : undefined} onClick={() => navigate("settings")}>Settings</button>
           <button onClick={() => setDark(!dark)}>
             {dark ? "Dark" : "Light"} theme
           </button>
@@ -260,29 +260,13 @@ export function FactoryApp({ status }) {
       <main className="factory-main">
         <header className="factory-header">
           <div>
-            <h1>
-              {status.projects?.find((p) => p.id === projectID)?.name ||
-                "Factory"}
-            </h1>
-            <small>
-              {!connected
-                ? "Reconnecting. Work continues."
-                : session?.status?.replaceAll("_", " ") || "Local foreman"}
-            </small>
+            <h1>{view === "settings" ? "Settings" : view === "history" ? "History" : view === "add" ? "Add a project" : status.projects?.find((p) => p.id === projectID)?.name || "Factory"}</h1>
+            <small>{["settings", "history", "add"].includes(view) ? "Factory" : !connected ? "Reconnecting. Work continues." : isBusy(session) ? "Foreman is working" : ["failed", "interrupted"].includes(session?.status) ? "Foreman needs attention" : "Foreman ready"}</small>
           </div>
-          <div className="factory-tabs">
-            {["chat", "board"].map((v) => (
-              <button
-                key={v}
-                aria-pressed={view === v}
-                onClick={() => setView(v)}
-              >
-                {v === "chat"
-                  ? "Chat"
-                  : `Board${tasks.length ? " · " + tasks.length : ""}`}
-              </button>
-            ))}
-          </div>
+          {["chat", "board"].includes(view) && projectID && <div className="factory-tabs">
+            {["chat", "board"].map((v) => <button key={v} aria-pressed={view === v} onClick={() => navigate(v)}>{v === "chat" ? "Chat" : `Board${tasks.length ? " · " + tasks.length : ""}`}</button>)}
+          </div>}
+          {view === "history" && <Button variant="ghost" onClick={() => navigate("settings")}>Back to settings</Button>}
         </header>
         {error && (
           <div className="factory-error" role="alert">
@@ -292,15 +276,19 @@ export function FactoryApp({ status }) {
             </button>
           </div>
         )}
-        {view === "settings" ? (
-          <Settings status={status} />
+        {view === "add" ? (
+          <ProjectSetup status={status} onCreated={projectCreated} onCancel={() => navigate(projectID ? "chat" : "settings")} />
+        ) : view === "history" ? (
+          <FactoryHistory />
+        ) : view === "settings" ? (
+          <Settings status={status} navigate={navigate} />
         ) : !projectID ? (
           <div className="factory-empty">
             <h2>Connect your first project</h2>
             <p>
-              Add a project and repository to factory configuration. Your
-              foreman will manage work here.
+              Choose an existing repository or clone from Git. Your foreman will manage work here.
             </p>
+            <Button onClick={() => navigate("add")}>Add project</Button>
           </div>
         ) : view === "board" ? (
           <div className="factory-board">
@@ -480,7 +468,7 @@ export function FactoryApp({ status }) {
           </div>
         )}
       </main>
-      {taskID && (
+      {taskID && ["chat", "board"].includes(view) && (
         <aside className="factory-inspector" aria-label="Task detail">
           <header>
             <button
@@ -650,7 +638,7 @@ export function FactoryApp({ status }) {
                   variant="ghost"
                   onClick={() => {
                     setMessage(`About “${task.title}”: `);
-                    setView("chat");
+                    navigate("chat");
                   }}
                 >
                   Discuss with foreman
@@ -764,10 +752,14 @@ function ChatEvent({ event: e, busy, mutate }) {
     </article>
   ) : null;
 }
-function Settings({ status }) {
+function Settings({ status, navigate }) {
   return (
     <div className="factory-settings">
-      <h2>Factory configuration</h2>
+      <h2>Projects</h2>
+      <p>Each project uses one host. Workers share its checkout and get a separate workspace for each task.</p>
+      {status.projects?.map((project) => <section key={project.id}><strong>{project.name}</strong><p>{project.path}</p><small>{project.host === "local" ? "This computer" : status.hosts?.find((h) => h.id === project.host)?.name || project.host}</small></section>)}
+      <Button variant="outline" onClick={() => navigate("add")}>Add project</Button>
+      <h2>Agents and pipeline</h2>
       <p>Agents and pipelines are configuration. Changes apply to new tasks.</p>
       <h3>Agents</h3>
       {status.agents?.map((a) => (
@@ -811,7 +803,11 @@ function Settings({ status }) {
       <p>
         Host setup is operator managed. Submit and review work in the browser.
       </p>
-      <a href="#/workers">View workers →</a>
+      <h3>Execution hosts</h3>
+      {(status.hosts || [{id: "local", name: "This computer"}]).map((host) => <section key={host.id}><strong>{host.id === "local" ? "This computer" : host.name || host.id}</strong><p>{host.id === "local" ? "Workers run locally." : "Workers connect through SSH. Credentials and build tools belong to this host."}</p></section>)}
+      <h3>History</h3>
+      <p>Inspect previous batch runs without leaving the factory.</p>
+      <Button variant="outline" onClick={() => navigate("history")}>View history</Button>
     </div>
   );
 }

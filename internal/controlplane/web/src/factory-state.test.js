@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { groupTasks, displayEvents, isBusy } from "./factory-state.js";
+import { groupTasks, displayEvents, isBusy, factoryView } from "./factory-state.js";
 test("completion does not imply delivery", () => {
   const g = groupTasks([
     { id: "a", stage: "Review", status: "completed" },
@@ -34,4 +34,13 @@ test("activity updates avoid empty and repeated entries while retaining errors",
   assert.equal(events[1].status, "completed");
   assert.equal(events[2].text, "Read failed");
   assert.equal(events[3].kind, "error");
+});
+
+test("legacy links stay inside factory navigation", () => {
+  assert.equal(factoryView("#/runs"), "history");
+  assert.equal(factoryView("#/runs/old"), "history");
+  assert.equal(factoryView("#/workers"), "settings");
+  assert.equal(factoryView("#/factory/board"), "board");
+  assert.equal(factoryView("#/factory/add"), "add");
+  assert.equal(factoryView("#/factory"), "chat");
 });

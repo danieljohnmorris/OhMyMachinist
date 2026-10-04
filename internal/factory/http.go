@@ -22,14 +22,23 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request) {
 		s.stream(w, r, parts[1])
 		return
 	}
+	if path == "projects" && r.Method == "POST" {
+		s.addProject(w, r)
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if path == "status" && r.Method == "GET" {
 		projects := []map[string]any{}
 		for key, p := range s.cfg.Projects {
-			projects = append(projects, map[string]any{"id": key, "name": p.Name, "github": p.GitHub, "host": p.Host})
+			projects = append(projects, map[string]any{"id": key, "name": p.Name, "github": p.GitHub, "host": p.Host, "path": p.Path, "source": projectSource(p)})
 		}
 		sort.Slice(projects, func(i, j int) bool { return projects[i]["id"].(string) < projects[j]["id"].(string) })
+		hosts := []map[string]any{}
+		for key, h := range s.cfg.Hosts {
+			hosts = append(hosts, map[string]any{"id": key, "name": h.Name})
+		}
+		sort.Slice(hosts, func(i, j int) bool { return hosts[i]["id"].(string) < hosts[j]["id"].(string) })
 		agents := []map[string]any{}
 		for key, a := range s.cfg.Agents {
 			agents = append(agents, map[string]any{"id": key, "name": a.Name, "description": a.Description, "runtime": a.Runtime, "model": a.Model})
@@ -46,7 +55,7 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request) {
 		for _, t := range s.tasks {
 			tasks = append(tasks, t)
 		}
-		jsonReply(w, 200, map[string]any{"enabled": s.cfg.Enabled, "projects": projects, "agents": agents, "pipelines": pipelines, "tasks": tasks, "csrf_token": s.csrf})
+		jsonReply(w, 200, map[string]any{"enabled": s.cfg.Enabled, "projects": projects, "hosts": hosts, "agents": agents, "pipelines": pipelines, "tasks": tasks, "csrf_token": s.csrf})
 		return
 	}
 	if !s.cfg.Enabled {
@@ -138,6 +147,11 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request) {
 					s.cancel()
 				}
 				v.Status = "cancelled"
+				host := s.cfg.Projects[v.ProjectID].Host
+				if s.active == v.ID && !v.isForeman() && host != "" && host != "local" {
+					v.Status = "interrupted"
+					v.Error = "Confirm the previous remote process has stopped before resuming."
+				}
 				_ = s.saveSession(v)
 				s.signal()
 				jsonReply(w, 200, map[string]any{"session": v})

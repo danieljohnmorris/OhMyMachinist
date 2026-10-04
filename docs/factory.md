@@ -24,9 +24,9 @@ just build
 
 Copy the `[factory]` sections in [the example](../examples/factory.toml) into your
 Machinist config. Copy its `factory-prompts` directory beside that config. Set the
-project path to your Git repository, set `github` to its `owner/repository` if you
-want PR delivery tracking, and replace the check script with your repository's
-checks. Keep the existing `[server]` configuration. Factory scripts are fixed
+check script to your repository's checks. Add projects in the browser, or keep
+existing `[factory.projects]` entries. Set `github` to `owner/repository` when
+you want PR delivery tracking. Keep the existing `[server]` configuration. Factory scripts are fixed
 operator-configured argument arrays, never shell strings submitted from chat.
 
 ```sh
@@ -42,6 +42,29 @@ falls back to `internal/agent/runtime` under the server's working directory.
 An explicit `[factory.hosts.local] acp_command = ["/path/to/claude-agent-acp"]`
 overrides discovery. Missing runtime errors are shown in the conversation.
 Machinist never installs dependencies during an agent turn.
+
+## Add a project
+
+Choose **Add project** in the browser, then select:
+
+- **Existing folder:** an absolute Git repository root that already exists on the
+  selected host and contains at least one commit.
+- **Clone from Git:** an HTTPS or SSH Git URL and an absolute destination folder.
+  Machinist clones once, then reuses that checkout. It never replaces an existing
+  folder. An existing checkout is accepted only if its origin matches exactly.
+
+Execution defaults to this computer. Select a configured remote host to pin the
+project and its task workspaces to that machine. Remote paths are paths on that
+host. Remote credentials and build tools must already be installed there. Git
+URLs cannot contain passwords or HTTPS user credentials; use the host's normal
+Git authentication. GitHub delivery tracking is inferred from a GitHub origin;
+other Git hosts remain usable without GitHub PR tracking.
+
+Browser-added projects are saved in the existing Machinist SQLite database.
+Configured project IDs take precedence over stored entries after restart. A Git
+project with a missing checkout can clone again before creating a new task.
+Existing files, local changes, and a different origin are never overwritten.
+Each task gets its own worktree and branch, not a full clone.
 
 ## Daily use
 
