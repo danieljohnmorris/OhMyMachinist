@@ -276,7 +276,7 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 					fail(w, errors.New("planning report requires design text"))
 					return
 				}
-				rev, dirty, e := s.workspaceState(original)
+				rev, dirty, e := s.designWorkspaceState(original)
 				if e != nil {
 					fail(w, e)
 					return
@@ -403,7 +403,7 @@ func (s *Service) approve(t *Task, version int, subject string) error {
 		return errors.New("no design to approve")
 	}
 	if subject == "design" {
-		rev, dirty, e := s.workspaceState(t)
+		rev, dirty, e := s.designWorkspaceState(t)
 		if e != nil {
 			return e
 		}
@@ -453,12 +453,35 @@ func (s *Service) approve(t *Task, version int, subject string) error {
 		t.DesignApprovalVersion = version
 	}
 	s.advance(t)
-	if e := s.saveTask(t); e != nil {
-		return e
+	foreman, err := s.foreman(t.ProjectID)
+	if err != nil {
+		return err
+	}
+	copyForeman := *foreman
+	copyForeman.ReportQueue = append([]string(nil), foreman.ReportQueue...)
+	message := "Human approved " + subject + " for task " + t.ID + ". Inspect and continue the next eligible step."
+	queue := false
+	switch foreman.Status {
+	case "running", "awaiting_permission", "interrupted", "failed", "cancelled":
+		copyForeman.ReportQueue = append(copyForeman.ReportQueue, message)
+	case "queued":
+		copyForeman.Pending += "\n" + message
+	default:
+		copyForeman.Status = "queued"
+		copyForeman.Pending = message
+		copyForeman.RequestID = id("notification_")
+		queue = true
+	}
+	if err = s.commitRecords([]recordWrite{{"task", t.ID, diskTask(t)}, {"session", foreman.ID, diskSession(&copyForeman)}}, "", Event{}); err != nil {
+		return err
 	}
 	*original = *t
-	s.notify(t.ProjectID, "Human approved "+subject+" for task "+t.ID+". Inspect and continue the next eligible step.")
+	*foreman = copyForeman
+	if queue {
+		s.queue = append(s.queue, foreman.ID)
+	}
 	s.signal()
+	s.next()
 	return nil
 }
 func repairTask(t *Task, feedback string) error {

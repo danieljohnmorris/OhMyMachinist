@@ -2,6 +2,8 @@ import React, { useEffect, useRef, useState } from "react";
 import { Button } from "./components/ui/button.jsx";
 import {
   createConversationLoader,
+  taskDetailKey,
+  mergeTaskDetail,
   displayEvents,
   factoryRequest,
   groupTasks,
@@ -156,6 +158,13 @@ export function FactoryApp({ status, onStatus }) {
   useEffect(() => {
     end.current?.scrollIntoView({ block: "end" });
   }, [chat.events?.length]);
+  const selectedTask = project?.tasks?.find((task) => task.id === taskID);
+  const selectedTaskKey = taskDetailKey(selectedTask);
+  const selectedSessionIDs = JSON.stringify(
+    detail?.task?.id === taskID
+      ? (detail.sessions || []).map((session) => session.id)
+      : [],
+  );
   useEffect(() => {
     if (!taskID) {
       setDetail(null);
@@ -164,30 +173,55 @@ export function FactoryApp({ status, onStatus }) {
     let active = true;
     setDetail((current) => (current?.task?.id === taskID ? current : null));
     factoryRequest("/tasks/" + taskID)
-      .then(async (d) => {
-        const sessions = await Promise.all(
-          (d.sessions || []).map(async (session) => ({
-            ...session,
-            ...(await loadConversation(session.id)),
-          })),
-        );
-        if (active)
-          setDetail({
-            ...d,
-            sessions: sessions.map((v) => ({
-              ...v.session,
-              events: v.events,
-              permissions: v.permissions,
-            })),
-          });
+      .then((next) => {
+        if (active) setDetail((current) => mergeTaskDetail(next, current));
       })
-      .catch((e) => {
-        if (active) setError(e.message);
+      .catch((error) => {
+        if (active) setError(error.message);
       });
     return () => {
       active = false;
     };
-  }, [taskID, project?.tasks]);
+  }, [taskID, selectedTaskKey]);
+  // Streaming refreshes only session output/permissions. Git-backed details
+  // refresh when the selected task's revision or decision state changes.
+  useEffect(() => {
+    const sessionIDs = JSON.parse(selectedSessionIDs);
+    if (!taskID || !sessionIDs.length) return;
+    let active = true;
+    Promise.all(
+      sessionIDs.map(async (id) => {
+        const conversation = await loadConversation(id);
+        return {
+          ...conversation.session,
+          events: conversation.events,
+          permissions: conversation.permissions,
+        };
+      }),
+    )
+      .then((sessions) => {
+        if (active)
+          setDetail((current) =>
+            current?.task?.id === taskID
+              ? {
+                  ...current,
+                  task: {
+                    ...current.task,
+                    activity: selectedTask?.activity ?? current.task.activity,
+                    pending_permissions: selectedTask?.pending_permissions,
+                  },
+                  sessions,
+                }
+              : current,
+          );
+      })
+      .catch((error) => {
+        if (active) setError(error.message);
+      });
+    return () => {
+      active = false;
+    };
+  }, [taskID, selectedSessionIDs, project]);
   async function mutate(path, body = {}) {
     setBusy(true);
     setError("");

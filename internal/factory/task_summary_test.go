@@ -86,3 +86,27 @@ func TestTaskSummaryBoundsDisplayText(t *testing.T) {
 		}
 	}
 }
+
+func TestSummaryTracksDetailMetadataWithoutCheckOutput(t *testing.T) {
+	s, _ := fixture(t)
+	task := &Task{ID: "task", ProjectID: "project", Revision: "revision", PRURL: "https://github.com/owner/repo/pull/1", Step: 3, Checks: []Check{{StepID: "checks", Passed: false, Revision: "revision", Output: strings.Repeat("output", 200000)}}}
+	s.mu.Lock()
+	initial := s.summarize(task)
+	task.Checks[0].Passed = true
+	passed := s.summarize(task)
+	task.GitHubChecksPass = true
+	observed := s.summarize(task)
+	task.GitHubError = strings.Repeat("error", 1000)
+	failed := s.summarize(task)
+	s.mu.Unlock()
+	if initial.Step != 3 || initial.Revision != task.Revision || initial.PRURL != task.PRURL || initial.CheckState == passed.CheckState || passed.CheckState == observed.CheckState {
+		t.Fatal("detail metadata changes not visible")
+	}
+	if len(failed.GitHubError) > 520 {
+		t.Fatal("GitHub error is unbounded")
+	}
+	data, e := json.Marshal(failed)
+	if e != nil || len(data) > 2000 || strings.Contains(string(data), "outputoutput") {
+		t.Fatal("summary exposed check logs", e)
+	}
+}

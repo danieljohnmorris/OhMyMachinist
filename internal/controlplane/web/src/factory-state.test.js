@@ -1,3 +1,4 @@
+import { taskDetailKey, mergeTaskDetail } from "./factory-state.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -122,4 +123,54 @@ test("concurrent conversation refreshes serialize cursors and page new events", 
     "/sessions/one?cursor=100",
     "/sessions/one?cursor=101",
   ]);
+});
+
+test("task details ignore new task arrays and activity but track revision/check decisions", () => {
+  const task = {
+    id: "one",
+    version: 3,
+    status: "active",
+    revision: "before",
+    check_state: "passed-before",
+  };
+  const key = taskDetailKey(task);
+  assert.equal(
+    taskDetailKey({
+      ...task,
+      check_state: task.check_state,
+      activity: "Read another file",
+    }),
+    key,
+  );
+  assert.notEqual(taskDetailKey({ ...task, status: "awaiting_approval" }), key);
+  assert.notEqual(taskDetailKey({ ...task, revision: "after" }), key);
+  assert.notEqual(taskDetailKey({ ...task, check_state: "failed-after" }), key);
+});
+
+test("late task detail retains already refreshed matching worker output", () => {
+  const current = {
+    task: { id: "t" },
+    sessions: [
+      {
+        id: "worker",
+        status: "awaiting_permission",
+        events: [{ id: 2, text: "fresh" }],
+        permissions: [{ id: "p" }],
+      },
+    ],
+  };
+  const next = {
+    task: { id: "t", revision: "new" },
+    diff: "updated diff",
+    sessions: [{ id: "worker", status: "running" }, { id: "new-worker" }],
+  };
+  const merged = mergeTaskDetail(next, current);
+  assert.equal(merged.diff, "updated diff");
+  assert.equal(merged.sessions[0].events[0].text, "fresh");
+  assert.equal(merged.sessions[0].permissions[0].id, "p");
+  assert.equal(merged.sessions[1].id, "new-worker");
+  assert.deepEqual(
+    mergeTaskDetail({ ...next, task: { id: "different" } }, current).sessions,
+    next.sessions,
+  );
 });

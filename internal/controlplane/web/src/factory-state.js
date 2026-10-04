@@ -115,3 +115,38 @@ export function createConversationLoader(request = factoryRequest) {
     },
   };
 }
+
+// Activity text changes with streamed tool output. It does not invalidate a
+// Git diff; revision, checks, and human decision state do.
+export function taskDetailKey(task) {
+  if (!task) return "";
+  return JSON.stringify([
+    task.id,
+    task.version,
+    task.stage,
+    task.status,
+    task.step,
+    task.revision,
+    task.approval_subject,
+    task.design,
+    task.review,
+    task.pr_url,
+    task.github_error,
+    task.check_state,
+  ]);
+}
+
+// A slower task/diff read must not discard newer streamed session output.
+export function mergeTaskDetail(next, current) {
+  if (current?.task?.id !== next.task?.id) return next;
+  const loaded = new Map(
+    (current.sessions || []).map((session) => [session.id, session]),
+  );
+  return {
+    ...next,
+    sessions: (next.sessions || []).map((session) => {
+      const saved = loaded.get(session.id);
+      return saved?.events ? { ...session, ...saved } : session;
+    }),
+  };
+}

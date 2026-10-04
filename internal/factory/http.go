@@ -1,6 +1,7 @@
 package factory
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net/http"
@@ -22,6 +23,11 @@ type taskSummary struct {
 	PendingPermissions int    `json:"pending_permissions"`
 	Version            int    `json:"version"`
 	CreatedAt          string `json:"created_at"`
+	Step               int    `json:"step"`
+	Revision           string `json:"revision,omitempty"`
+	PRURL              string `json:"pr_url,omitempty"`
+	GitHubError        string `json:"github_error,omitempty"`
+	CheckState         string `json:"check_state"`
 }
 
 func summaryText(value string) string {
@@ -37,7 +43,12 @@ func (s *Service) summarize(t *Task) taskSummary {
 			pending++
 		}
 	}
-	return taskSummary{ID: t.ID, ProjectID: t.ProjectID, Title: summaryText(t.Title), Brief: summaryText(t.Brief), Stage: t.Stage, Status: t.Status, Activity: summaryText(t.Activity), ApprovalSubject: t.ApprovalSubject, PendingPermissions: pending, Version: t.Version, CreatedAt: t.CreatedAt}
+	checks := sha256.New()
+	fmt.Fprintf(checks, "%s:%t", t.GitHubHead, t.GitHubChecksPass)
+	for _, check := range t.Checks {
+		fmt.Fprintf(checks, "\n%q:%q:%t:%q", summaryText(check.StepID), summaryText(check.Name), check.Passed, summaryText(check.Revision))
+	}
+	return taskSummary{ID: t.ID, ProjectID: t.ProjectID, Title: summaryText(t.Title), Brief: summaryText(t.Brief), Stage: t.Stage, Status: t.Status, Activity: summaryText(t.Activity), ApprovalSubject: t.ApprovalSubject, PendingPermissions: pending, Version: t.Version, CreatedAt: t.CreatedAt, Step: t.Step, Revision: summaryText(t.Revision), PRURL: summaryText(t.PRURL), GitHubError: summaryText(t.GitHubError), CheckState: fmt.Sprintf("%x", checks.Sum(nil))}
 }
 
 func (s *Service) Handler() http.Handler { return http.HandlerFunc(s.serve) }

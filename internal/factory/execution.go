@@ -554,6 +554,12 @@ func reverseForward(rawURL string, toolsPort int) (string, error) {
 
 // Caller holds mu. Repository reads can wait on SSH, so keep state operations responsive.
 func (s *Service) workspaceState(t *Task) (string, string, error) {
+	return s.readWorkspaceState(t, false)
+}
+func (s *Service) designWorkspaceState(t *Task) (string, string, error) {
+	return s.readWorkspaceState(t, true)
+}
+func (s *Service) readWorkspaceState(t *Task, includeIgnored bool) (string, string, error) {
 	project, directory := t.ProjectID, t.Directory
 	version, step, status, revision, approved, active := t.Version, t.Step, t.Status, t.Revision, t.CodeApproved, s.active
 	owner := s.sessions[active]
@@ -565,7 +571,11 @@ func (s *Service) workspaceState(t *Task) (string, string, error) {
 	rev, err := s.git(project, directory, "rev-parse", "HEAD")
 	var dirty string
 	if err == nil {
-		dirty, err = s.git(project, directory, "status", "--porcelain")
+		args := []string{"status", "--porcelain"}
+		if includeIgnored {
+			args = append(args, "--ignored")
+		}
+		dirty, err = s.git(project, directory, args...)
 	}
 	s.mu.Lock()
 	if s.closed || s.tasks[t.ID] != t || t.ProjectID != project || t.Directory != directory || t.Version != version || t.Step != step || t.Status != status || t.Revision != revision || t.CodeApproved != approved || s.active != active || s.sessions[active] != owner || (owner != nil && (owner.Status != ownerStatus || owner.RequestID != ownerRequest)) {
