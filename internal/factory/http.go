@@ -426,7 +426,7 @@ func (s *Service) stream(w http.ResponseWriter, r *http.Request, key string) {
 		return
 	}
 	cursor, _ := strconv.ParseInt(r.Header.Get("Last-Event-ID"), 10, 64)
-	if q := r.URL.Query().Get("cursor"); q != "" {
+	if q := r.URL.Query().Get("cursor"); q != "" && r.Header.Get("Last-Event-ID") == "" {
 		cursor, _ = strconv.ParseInt(q, 10, 64)
 	}
 	w.Header().Set("Content-Type", "text/event-stream")

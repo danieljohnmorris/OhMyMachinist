@@ -41,7 +41,7 @@ func factoryTools() []factoryTool {
 	}
 	return []factoryTool{
 		tool("create_task", "Create a task in this project. Inspect existing tasks first to avoid duplicate work.", map[string]any{"title": str(), "brief": str(), "pipeline": str()}, "title", "brief"),
-		tool("inspect_tasks", "Read this project's tasks, current steps, and saved results.", map[string]any{}),
+		tool("inspect_tasks", "Read bounded task details and saved results. Use task_id to inspect a specific task when the list is truncated.", map[string]any{"task_id": str()}),
 		tool("start_step", "Start the next eligible agent or script step. Human approval cannot be skipped.", map[string]any{"task_id": str()}, "task_id"),
 		tool("send_message", "Send a user answer or correction to this task's existing worker conversation.", map[string]any{"task_id": str(), "message": str(), "request_id": str()}, "task_id", "message", "request_id"),
 		tool("cancel_task", "Request cancellation of this project's task. Preserve its workspace and history.", map[string]any{"task_id": str()}, "task_id"),

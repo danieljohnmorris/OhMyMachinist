@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Button } from "./components/ui/button.jsx";
 import {
+  createConversationLoader,
   displayEvents,
   factoryRequest,
   groupTasks,
@@ -22,7 +23,6 @@ export function FactoryEntry({ LegacyApp }) {
   };
   useEffect(() => {
     load();
-
   }, []);
   if (error)
     return (
@@ -42,7 +42,14 @@ export function FactoryEntry({ LegacyApp }) {
   return <FactoryApp status={status} onStatus={setStatus} />;
 }
 export function FactoryApp({ status, onStatus }) {
-  const [projectID, setProjectID] = useState(() => status.projects?.find((p) => p.id === localStorage.getItem("machinist-project"))?.id || status.projects?.[0]?.id || ""),
+  const [projectID, setProjectID] = useState(
+      () =>
+        status.projects?.find(
+          (p) => p.id === localStorage.getItem("machinist-project"),
+        )?.id ||
+        status.projects?.[0]?.id ||
+        "",
+    ),
     [project, setProject] = useState(null),
     [chat, setChat] = useState({ events: [] }),
     [view, setView] = useState(() => factoryView(window.location.hash)),
@@ -78,25 +85,16 @@ export function FactoryApp({ status, onStatus }) {
   const generation = useRef(0),
     requestID = useRef(null),
     refreshSequence = useRef(0),
-    end = useRef(null);
+    end = useRef(null),
+    conversationLoader = useRef(null);
+  if (!conversationLoader.current)
+    conversationLoader.current = createConversationLoader();
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
     localStorage.setItem("machinist-theme", dark ? "dark" : "light");
   }, [dark]);
-  async function loadConversation(id) {
-    let cursor = 0,
-      result = { events: [] };
-    while (true) {
-      const page = await factoryRequest(
-        "/sessions/" + id + "?cursor=" + cursor,
-      );
-      result = { ...page, events: [...result.events, ...(page.events || [])] };
-      if (!page.events?.length || page.events.length < 100) break;
-      const next = page.events.at(-1).id;
-      if (next <= cursor) break;
-      cursor = next;
-    }
-    return result;
+  function loadConversation(id) {
+    return conversationLoader.current.load(id);
   }
   async function refresh(id = projectID, gen = generation.current) {
     if (!id) return;
@@ -112,6 +110,7 @@ export function FactoryApp({ status, onStatus }) {
   }
   useEffect(() => {
     const gen = ++generation.current;
+    conversationLoader.current.reset();
     setProject(null);
     setChat({ events: [] });
     setTaskID("");
@@ -124,7 +123,10 @@ export function FactoryApp({ status, onStatus }) {
     if (!chat.session?.id) return;
     const gen = generation.current;
     const source = new EventSource(
-      "/api/factory/sessions/" + chat.session.id + "/events",
+      "/api/factory/sessions/" +
+        chat.session.id +
+        "/events?cursor=" +
+        (chat.events?.at(-1)?.id || 0),
     );
     const update = () =>
       refresh(projectID, gen).catch((e) => setError(e.message));
@@ -235,7 +237,16 @@ export function FactoryApp({ status, onStatus }) {
         <a className="factory-brand" href="#/factory">
           machinist<small>factory</small>
         </a>
-        <div className="factory-project-heading"><p className="factory-label">Projects</p><button className="factory-add-project" aria-label="Add project" onClick={() => navigate("add")}>+</button></div>
+        <div className="factory-project-heading">
+          <p className="factory-label">Projects</p>
+          <button
+            className="factory-add-project"
+            aria-label="Add project"
+            onClick={() => navigate("add")}
+          >
+            +
+          </button>
+        </div>
         <nav aria-label="Projects">
           {status.projects?.map((p) => (
             <button
@@ -251,7 +262,14 @@ export function FactoryApp({ status, onStatus }) {
           ))}
         </nav>
         <footer>
-          <button aria-current={view === "settings" || view === "history" ? "page" : undefined} onClick={() => navigate("settings")}>Settings</button>
+          <button
+            aria-current={
+              view === "settings" || view === "history" ? "page" : undefined
+            }
+            onClick={() => navigate("settings")}
+          >
+            Settings
+          </button>
           <button onClick={() => setDark(!dark)}>
             {dark ? "Dark" : "Light"} theme
           </button>
@@ -260,13 +278,48 @@ export function FactoryApp({ status, onStatus }) {
       <main className="factory-main">
         <header className="factory-header">
           <div>
-            <h1>{view === "settings" ? "Settings" : view === "history" ? "History" : view === "add" ? "Add a project" : status.projects?.find((p) => p.id === projectID)?.name || "Factory"}</h1>
-            <small>{["settings", "history", "add"].includes(view) ? "Factory" : !connected ? "Reconnecting. Work continues." : isBusy(session) ? "Foreman is working" : ["failed", "interrupted"].includes(session?.status) ? "Foreman needs attention" : "Foreman ready"}</small>
+            <h1>
+              {view === "settings"
+                ? "Settings"
+                : view === "history"
+                  ? "History"
+                  : view === "add"
+                    ? "Add a project"
+                    : status.projects?.find((p) => p.id === projectID)?.name ||
+                      "Factory"}
+            </h1>
+            <small>
+              {["settings", "history", "add"].includes(view)
+                ? "Factory"
+                : !connected
+                  ? "Reconnecting. Work continues."
+                  : isBusy(session)
+                    ? "Foreman is working"
+                    : ["failed", "interrupted"].includes(session?.status)
+                      ? "Foreman needs attention"
+                      : "Foreman ready"}
+            </small>
           </div>
-          {["chat", "board"].includes(view) && projectID && <div className="factory-tabs">
-            {["chat", "board"].map((v) => <button key={v} aria-pressed={view === v} onClick={() => navigate(v)}>{v === "chat" ? "Chat" : `Board${tasks.length ? " · " + tasks.length : ""}`}</button>)}
-          </div>}
-          {view === "history" && <Button variant="ghost" onClick={() => navigate("settings")}>Back to settings</Button>}
+          {["chat", "board"].includes(view) && projectID && (
+            <div className="factory-tabs">
+              {["chat", "board"].map((v) => (
+                <button
+                  key={v}
+                  aria-pressed={view === v}
+                  onClick={() => navigate(v)}
+                >
+                  {v === "chat"
+                    ? "Chat"
+                    : `Board${tasks.length ? " · " + tasks.length : ""}`}
+                </button>
+              ))}
+            </div>
+          )}
+          {view === "history" && (
+            <Button variant="ghost" onClick={() => navigate("settings")}>
+              Back to settings
+            </Button>
+          )}
         </header>
         {error && (
           <div className="factory-error" role="alert">
@@ -277,7 +330,11 @@ export function FactoryApp({ status, onStatus }) {
           </div>
         )}
         {view === "add" ? (
-          <ProjectSetup status={status} onCreated={projectCreated} onCancel={() => navigate(projectID ? "chat" : "settings")} />
+          <ProjectSetup
+            status={status}
+            onCreated={projectCreated}
+            onCancel={() => navigate(projectID ? "chat" : "settings")}
+          />
         ) : view === "history" ? (
           <FactoryHistory />
         ) : view === "settings" ? (
@@ -286,7 +343,8 @@ export function FactoryApp({ status, onStatus }) {
           <div className="factory-empty">
             <h2>Connect your first project</h2>
             <p>
-              Choose an existing repository or clone from Git. Your foreman will manage work here.
+              Choose an existing repository or clone from Git. Your foreman will
+              manage work here.
             </p>
             <Button onClick={() => navigate("add")}>Add project</Button>
           </div>
@@ -517,14 +575,21 @@ export function FactoryApp({ status, onStatus }) {
               {detail.diff && (
                 <section>
                   <h3>Changes</h3>
-                  {detail.diff_truncated && <p role="alert">This change is too large to show in full. Review the complete diff before approving delivery.</p>}
+                  {detail.diff_truncated && (
+                    <p role="alert">
+                      This change is too large to show in full. Review the
+                      complete diff before approving delivery.
+                    </p>
+                  )}
                   <pre className="factory-diff">{detail.diff}</pre>
                 </section>
               )}
               {detail.files?.length > 0 && (
                 <section>
                   <h3>Files</h3>
-                  {detail.files_truncated && <p role="alert">Only part of the file list is shown.</p>}
+                  {detail.files_truncated && (
+                    <p role="alert">Only part of the file list is shown.</p>
+                  )}
                   {detail.files.map((f) => (
                     <p key={f.path || f}>{f.path || f}</p>
                   ))}
@@ -758,9 +823,25 @@ function Settings({ status, navigate }) {
   return (
     <div className="factory-settings">
       <h2>Projects</h2>
-      <p>Each project uses one host. Workers share its checkout and get a separate workspace for each task.</p>
-      {status.projects?.map((project) => <section key={project.id}><strong>{project.name}</strong><p>{project.path}</p><small>{project.host === "local" ? "This computer" : status.hosts?.find((h) => h.id === project.host)?.name || project.host}</small></section>)}
-      <Button variant="outline" onClick={() => navigate("add")}>Add project</Button>
+      <p>
+        Each project uses one host. Workers share its checkout and get a
+        separate workspace for each task.
+      </p>
+      {status.projects?.map((project) => (
+        <section key={project.id}>
+          <strong>{project.name}</strong>
+          <p>{project.path}</p>
+          <small>
+            {project.host === "local"
+              ? "This computer"
+              : status.hosts?.find((h) => h.id === project.host)?.name ||
+                project.host}
+          </small>
+        </section>
+      ))}
+      <Button variant="outline" onClick={() => navigate("add")}>
+        Add project
+      </Button>
       <h2>Agents and pipeline</h2>
       <p>Agents and pipelines are configuration. Changes apply to new tasks.</p>
       <h3>Agents</h3>
@@ -806,10 +887,25 @@ function Settings({ status, navigate }) {
         Host setup is operator managed. Submit and review work in the browser.
       </p>
       <h3>Execution hosts</h3>
-      {(status.hosts || [{id: "local", name: "This computer"}]).map((host) => <section key={host.id}><strong>{host.id === "local" ? "This computer" : host.name || host.id}</strong><p>{host.id === "local" ? "Workers run locally." : "Workers connect through SSH. Credentials and build tools belong to this host."}</p></section>)}
+      {(status.hosts || [{ id: "local", name: "This computer" }]).map(
+        (host) => (
+          <section key={host.id}>
+            <strong>
+              {host.id === "local" ? "This computer" : host.name || host.id}
+            </strong>
+            <p>
+              {host.id === "local"
+                ? "Workers run locally."
+                : "Workers connect through SSH. Credentials and build tools belong to this host."}
+            </p>
+          </section>
+        ),
+      )}
       <h3>History</h3>
       <p>Inspect previous batch runs without leaving the factory.</p>
-      <Button variant="outline" onClick={() => navigate("history")}>View history</Button>
+      <Button variant="outline" onClick={() => navigate("history")}>
+        View history
+      </Button>
     </div>
   );
 }

@@ -1,6 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { groupTasks, displayEvents, isBusy, factoryView } from "./factory-state.js";
+import {
+  groupTasks,
+  displayEvents,
+  isBusy,
+  factoryView,
+  createConversationLoader,
+} from "./factory-state.js";
 test("completion does not imply delivery", () => {
   const g = groupTasks([
     { id: "a", stage: "Review", status: "completed" },
@@ -43,4 +49,77 @@ test("legacy links stay inside factory navigation", () => {
   assert.equal(factoryView("#/factory/board"), "board");
   assert.equal(factoryView("#/factory/add"), "add");
   assert.equal(factoryView("#/factory"), "chat");
+});
+
+test("conversation refresh fetches only new events and updates permission metadata", async () => {
+  const calls = [];
+  const loader = createConversationLoader(async (path) => {
+    calls.push(path);
+    return calls.length === 1
+      ? {
+          session: { id: "one", status: "running" },
+          events: [{ id: 1, text: "first" }],
+          permissions: [],
+        }
+      : {
+          session: { id: "one", status: "awaiting_permission" },
+          events: [
+            { id: 1, text: "duplicate" },
+            { id: 2, text: "second" },
+          ],
+          permissions: [{ id: "permission" }],
+        };
+  });
+  await loader.load("one");
+  const next = await loader.load("one");
+  assert.deepEqual(calls, ["/sessions/one?cursor=0", "/sessions/one?cursor=1"]);
+  assert.deepEqual(
+    next.events.map((e) => e.text),
+    ["first", "second"],
+  );
+  assert.equal(next.permissions[0].id, "permission");
+});
+
+test("conversation cursors are session scoped and reset on project change", async () => {
+  const calls = [];
+  const loader = createConversationLoader(async (path) => {
+    calls.push(path);
+    return { events: [{ id: 4 }] };
+  });
+  await loader.load("one");
+  await loader.load("two");
+  await loader.load("one");
+  loader.reset();
+  await loader.load("one");
+  assert.deepEqual(calls, [
+    "/sessions/one?cursor=0",
+    "/sessions/two?cursor=0",
+    "/sessions/one?cursor=4",
+    "/sessions/one?cursor=0",
+  ]);
+});
+
+test("concurrent conversation refreshes serialize cursors and page new events", async () => {
+  const calls = [];
+  const loader = createConversationLoader(async (path) => {
+    calls.push(path);
+    return {
+      events: path.endsWith("cursor=0")
+        ? Array.from({ length: 100 }, (_, i) => ({ id: i + 1 }))
+        : path.endsWith("cursor=100")
+          ? [{ id: 101 }]
+          : [],
+    };
+  });
+  const [first, second] = await Promise.all([
+    loader.load("one"),
+    loader.load("one"),
+  ]);
+  assert.equal(first.events.length, 101);
+  assert.equal(second.events.length, 101);
+  assert.deepEqual(calls, [
+    "/sessions/one?cursor=0",
+    "/sessions/one?cursor=100",
+    "/sessions/one?cursor=101",
+  ]);
 });

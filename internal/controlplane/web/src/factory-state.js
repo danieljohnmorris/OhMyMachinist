@@ -48,9 +48,70 @@ export async function factoryRequest(path, options = {}) {
 
 export function factoryView(hash = "") {
   if (hash.startsWith("#/runs")) return "history";
-  if (["#/workers", "#/analytics", "#/triggers", "#/workflows", "#/commands"].some((route) => hash.startsWith(route))) return "settings";
+  if (
+    [
+      "#/workers",
+      "#/analytics",
+      "#/triggers",
+      "#/workflows",
+      "#/commands",
+    ].some((route) => hash.startsWith(route))
+  )
+    return "settings";
   if (hash === "#/factory/settings") return "settings";
   if (hash === "#/factory/add") return "add";
   if (hash === "#/factory/board") return "board";
   return "chat";
+}
+
+// Keep one cursor per session. Serialize reads so overlapping stream updates
+// cannot append the same events twice or overwrite newer session metadata.
+export function createConversationLoader(request = factoryRequest) {
+  let sessions = new Map();
+  return {
+    reset() {
+      sessions = new Map();
+    },
+    load(id) {
+      const cache = sessions;
+      let entry = cache.get(id);
+      if (!entry) {
+        entry = {
+          cursor: 0,
+          conversation: { events: [] },
+          pending: Promise.resolve(),
+        };
+        cache.set(id, entry);
+      }
+      const next = entry.pending
+        .catch(() => {})
+        .then(async () => {
+          let cursor = entry.cursor;
+          let conversation = entry.conversation;
+          while (true) {
+            const page = await request(
+              `/sessions/${encodeURIComponent(id)}?cursor=${cursor}`,
+            );
+            const events = (page.events || []).filter(
+              (event) => event.id > cursor,
+            );
+            conversation = {
+              ...page,
+              events: [...conversation.events, ...events],
+            };
+            const nextCursor = events.at(-1)?.id || cursor;
+            if (nextCursor === cursor || (page.events || []).length < 100) {
+              cursor = nextCursor;
+              break;
+            }
+            cursor = nextCursor;
+          }
+          entry.cursor = cursor;
+          entry.conversation = conversation;
+          return conversation;
+        });
+      entry.pending = next;
+      return next;
+    },
+  };
 }

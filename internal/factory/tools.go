@@ -39,13 +39,7 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 	}
 	switch name {
 	case "inspect_tasks":
-		tasks := []*Task{}
-		for _, t := range s.tasks {
-			if t.ProjectID == session.ProjectID && (session.isForeman() || session.TaskID == t.ID) {
-				tasks = append(tasks, t)
-			}
-		}
-		jsonReply(w, 200, map[string]any{"tasks": tasks})
+		jsonReply(w, 200, s.inspectTasks(session, in.TaskID))
 		return
 	case "create_task":
 		if !session.isForeman() {
@@ -264,12 +258,15 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 			fail(w, errors.New("PR must belong to configured project repository"))
 			return
 		}
+		original := t
+		copyTask := *t
+		t = &copyTask
 		step := t.Steps[t.Step]
 		switch in.Outcome {
 		case "blocked":
 			t.Activity = "Blocked: " + in.Summary
 		case "changes":
-			if e := s.repair(t, in.Summary); e != nil {
+			if e := repairTask(t, in.Summary); e != nil {
 				fail(w, e)
 				return
 			}
@@ -282,7 +279,7 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 				t.Design = in.Design
 				t.Version++
 			} else if strings.EqualFold(step.Stage, "build") {
-				rev, dirty, e := s.workspaceState(t)
+				rev, dirty, e := s.workspaceState(original)
 				if e != nil {
 					fail(w, e)
 					return
@@ -321,6 +318,10 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 			fail(w, e)
 			return
 		}
+		originalForeman := foreman
+		copyForeman := *foreman
+		copyForeman.ReportQueue = append([]string(nil), foreman.ReportQueue...)
+		foreman = &copyForeman
 		notification := fmt.Sprintf("Worker report for task %s: %s (%s). Inspect the task and continue its eligible pipeline step, or ask for the pending human decision.", t.ID, in.Summary, in.Outcome)
 		queue := false
 		if foreman.Status == "queued" {
@@ -333,9 +334,27 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 			foreman.RequestID = id("report_")
 			queue = true
 		}
-		if e = s.commitRecords([]recordWrite{{"task", t.ID, diskTask(t)}, {"session", foreman.ID, diskSession(foreman)}, {"request", key, t.ID}}, session.ID, Event{Kind: "report", Text: in.Summary, Title: in.Outcome}); e != nil {
+		records := []recordWrite{{"task", t.ID, diskTask(t)}, {"session", foreman.ID, diskSession(foreman)}, {"request", key, t.ID}}
+		updates := map[*Session]Session{}
+		if in.Outcome == "changes" {
+			for _, worker := range s.sessions {
+				if worker.TaskID == t.ID && worker.Step == t.Step {
+					copyWorker := *worker
+					copyWorker.Delivery = false
+					copyWorker.Pending = in.Summary
+					updates[worker] = copyWorker
+					records = append(records, recordWrite{"session", worker.ID, diskSession(&copyWorker)})
+				}
+			}
+		}
+		if e = s.commitRecords(records, session.ID, Event{Kind: "report", Text: in.Summary, Title: in.Outcome}); e != nil {
 			fail(w, e)
 			return
+		}
+		*original = *t
+		*originalForeman = *foreman
+		for worker, update := range updates {
+			*worker = update
 		}
 		session.Reported = true
 		s.requests[key] = t.ID
@@ -411,7 +430,7 @@ func (s *Service) approve(t *Task, version int, subject string) error {
 	s.signal()
 	return nil
 }
-func (s *Service) repair(t *Task, feedback string) error {
+func repairTask(t *Task, feedback string) error {
 	if strings.EqualFold(t.Stage, "design") {
 		return errors.New("design must complete human approval before implementation repair")
 	}
@@ -442,8 +461,14 @@ func (s *Service) repair(t *Task, feedback string) error {
 		t.Status = "failed"
 		t.Activity = "Repair limit reached. Review the task before continuing."
 	}
+	return nil
+}
+func (s *Service) repair(t *Task, feedback string) error {
+	if err := repairTask(t, feedback); err != nil {
+		return err
+	}
 	for _, v := range s.sessions {
-		if v.TaskID == t.ID && v.Step == target {
+		if v.TaskID == t.ID && v.Step == t.Step {
 			v.Delivery = false
 			v.Pending = feedback
 			_ = s.saveSession(v)
