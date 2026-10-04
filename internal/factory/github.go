@@ -65,6 +65,9 @@ func (s *Service) applyPR(t *Task, pr githubPR) error {
 	if s.taskBusy(t.ID) {
 		return errors.New("task has active or interrupted ownership; recover it before applying pull request changes")
 	}
+	original := t
+	copyTask := *t
+	t = &copyTask
 	t.ObservedAt = now()
 	oldHead := t.GitHubHead
 	t.GitHubHead = pr.HeadRefOID
@@ -86,12 +89,21 @@ func (s *Service) applyPR(t *Task, pr githubPR) error {
 		t.Review = ""
 		t.Activity = "Pull request changed. Submit the new revision for review."
 		if oldHead != pr.HeadRefOID {
-			if e := s.repair(t, "Pull request HEAD changed to "+pr.HeadRefOID+". Inspect the task workspace, reconcile this revision and rerun checks and review."); e != nil {
+			if e := repairTask(t, "Pull request HEAD changed to "+pr.HeadRefOID+". Inspect the task workspace, reconcile this revision and rerun checks and review."); e != nil {
 				return e
 			}
-			s.notify(t.ProjectID, "Pull request changed for task "+t.ID+". Inspect task and send the builder the revision feedback.")
+			updates := map[*Session]Session{}
+			for _, worker := range s.sessions {
+				if worker.TaskID == t.ID && worker.Step == t.Step {
+					update := *worker
+					update.Delivery = false
+					update.Pending = "Pull request HEAD changed to " + pr.HeadRefOID + ". Inspect the task workspace, reconcile this revision and rerun checks and review."
+					updates[worker] = update
+				}
+			}
+			return s.commitTransition(original, t, "Pull request changed for task "+t.ID+". Inspect task and send the builder the revision feedback.", updates)
 		}
-		return s.saveTask(t)
+		return s.publishPR(original, t)
 	}
 	if pr.State == "MERGED" && pr.MergedAt != nil && t.CodeApproved == t.Revision && t.Step >= len(t.Steps) && t.GitHubChecksPass {
 		t.Stage = "Done"
@@ -102,7 +114,7 @@ func (s *Service) applyPR(t *Task, pr githubPR) error {
 	} else {
 		t.Activity = "Waiting for merge"
 	}
-	return s.saveTask(t)
+	return s.publishPR(original, t)
 }
 
 // Observe checks only linked unfinished pull requests. It never starts coding,
@@ -169,4 +181,12 @@ func (s *Service) readPRSnapshot(ctx context.Context, t *Task, raw string) (gith
 		return githubPR{}, errStalePR
 	}
 	return pr, err
+}
+
+func (s *Service) publishPR(original, updated *Task) error {
+	if err := s.saveTask(updated); err != nil {
+		return err
+	}
+	*original = *updated
+	return nil
 }

@@ -184,16 +184,21 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request) {
 		if len(parts) == 3 && r.Method == "POST" {
 			switch parts[2] {
 			case "cancel":
+				copySession := *v
+				copySession.Status = "cancelled"
+				host := s.cfg.Projects[v.ProjectID].Host
+				if s.active == v.ID && !v.isForeman() && host != "" && host != "local" {
+					copySession.Status = "interrupted"
+					copySession.Error = "Confirm the previous remote process has stopped before resuming."
+				}
+				if err := s.saveSession(&copySession); err != nil {
+					fail(w, err)
+					return
+				}
+				*v = copySession
 				if s.active == v.ID && s.cancel != nil {
 					s.cancel()
 				}
-				v.Status = "cancelled"
-				host := s.cfg.Projects[v.ProjectID].Host
-				if s.active == v.ID && !v.isForeman() && host != "" && host != "local" {
-					v.Status = "interrupted"
-					v.Error = "Confirm the previous remote process has stopped before resuming."
-				}
-				_ = s.saveSession(v)
 				s.signal()
 				jsonReply(w, 200, map[string]any{"session": v})
 				return
@@ -406,19 +411,10 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request) {
 				jsonReply(w, 200, map[string]any{"task": t})
 				return
 			case "cancel":
-				t.Status = "cancelled"
-				t.Activity = "Cancelled"
-				for _, v := range s.sessions {
-					if v.TaskID == t.ID && (v.Status == "running" || v.Status == "queued" || v.Status == "awaiting_permission") {
-						v.Status = "cancelled"
-						_ = s.saveSession(v)
-						if s.active == v.ID && s.cancel != nil {
-							s.cancel()
-						}
-					}
+				if err := s.cancelTask(t); err != nil {
+					fail(w, err)
+					return
 				}
-				_ = s.saveTask(t)
-				s.signal()
 				jsonReply(w, 200, map[string]any{"task": t})
 				return
 			}

@@ -174,16 +174,10 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 			http.Error(w, "Task outside conversation scope", 403)
 			return
 		}
-		t.Status = "cancelled"
-		t.Activity = "Cancelled"
-		for _, v := range s.sessions {
-			if v.TaskID == t.ID && v.Status == "queued" {
-				v.Status = "cancelled"
-				_ = s.saveSession(v)
-			}
+		if err := s.cancelTask(t); err != nil {
+			fail(w, err)
+			return
 		}
-		_ = s.saveTask(t)
-		s.signal()
 		jsonReply(w, 200, map[string]any{"task": t})
 		return
 	case "link_pr":
@@ -623,5 +617,47 @@ func (s *Service) deliveryReady(t *Task) error {
 	if rev != t.CodeApproved || dirty != "" {
 		return errors.New("workspace differs from the approved revision; rebuild and review it first")
 	}
+	return nil
+}
+
+// Cancellation is durable before process signalling or queue removal.
+func (s *Service) cancelTask(t *Task) error {
+	copyTask := *t
+	copyTask.Status = "cancelled"
+	copyTask.Activity = "Cancelled"
+	records := []recordWrite{{"task", t.ID, diskTask(&copyTask)}}
+	updates := map[*Session]Session{}
+	for _, worker := range s.sessions {
+		if worker.TaskID != t.ID || (worker.Status != "running" && worker.Status != "queued" && worker.Status != "awaiting_permission") {
+			continue
+		}
+		update := *worker
+		update.Status = "cancelled"
+		host := s.cfg.Projects[worker.ProjectID].Host
+		if s.active == worker.ID && !worker.isForeman() && host != "" && host != "local" {
+			update.Status = "interrupted"
+			update.Error = "Confirm the previous remote process has stopped before resuming."
+		}
+		updates[worker] = update
+		records = append(records, recordWrite{"session", worker.ID, diskSession(&update)})
+	}
+	if err := s.commitRecords(records, "", Event{}); err != nil {
+		return err
+	}
+	*t = copyTask
+	for worker, update := range updates {
+		*worker = update
+	}
+	queue := s.queue[:0]
+	for _, key := range s.queue {
+		if worker := s.sessions[key]; worker == nil || worker.TaskID != t.ID {
+			queue = append(queue, key)
+		}
+	}
+	s.queue = queue
+	if worker := s.sessions[s.active]; worker != nil && worker.TaskID == t.ID && s.cancel != nil {
+		s.cancel()
+	}
+	s.signal()
 	return nil
 }
