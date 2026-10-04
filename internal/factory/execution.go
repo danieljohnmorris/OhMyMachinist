@@ -128,7 +128,8 @@ func (s *Service) execute(ctx context.Context, v Session, token string, runner R
 			timeout = profile.Timeout
 			system = profile.Prompt
 		}
-		prompt = fmt.Sprintf("Task %s: %s\nBrief: %s\nDesign: %s\nFeedback: %s\nCurrent step: %s (%s)\nUse the connected machinist MCP server, not a terminal CLI. When complete call mcp__machinist__report with task_id=%s, a unique report_id, summary, outcome=complete and design text for Design. Commit implementation before reporting. Do not alter Machinist configuration or spawn other agents yourself. Never merge or publish without human authority.", t.ID, t.Title, t.Brief, t.Design, t.Activity+"\n"+v.Pending, step.Name, step.Stage, t.ID)
+		prompt = fmt.Sprintf("Task %s: %s\nBrief: %s\nDesign: %s\nFeedback: %s\nCurrent step: %s (%s)\nUse the connected machinist MCP server, not a terminal CLI. When complete call mcp__machinist__report with task_id=%s, a unique report_id, summary, outcome=complete and design text for Design. Do not alter Machinist configuration or spawn other agents yourself. Never merge or publish without human authority.", t.ID, t.Title, t.Brief, t.Design, t.Activity+"\n"+v.Pending, step.Name, step.Stage, t.ID)
+		prompt += "\n" + stageInstructions(step.Stage)
 		if v.Delivery {
 			prompt = "Human approved delivery of commit " + t.CodeApproved + " for task " + t.ID + ". First inspect whether this branch already has a pull request to avoid duplicate publication. Publish only this approved branch as a pull request to " + s.cfg.Projects[t.ProjectID].GitHub + ". Do not edit code or merge. Call mcp__machinist__link_pr with task_id=" + t.ID + " and pr_url once published. Feedback: " + v.Pending
 		}
@@ -569,4 +570,16 @@ func (s *Service) workspaceState(t *Task) (string, string, error) {
 		return "", "", errors.New("task changed while reading workspace; reload before continuing")
 	}
 	return rev, dirty, err
+}
+
+// Stage instructions preserve the human design gate and limit commits to builds.
+func stageInstructions(stage string) string {
+	switch {
+	case strings.EqualFold(stage, "design"):
+		return "Planning only: inspect the repository and return the proposed design in your report. Do not change workspace files or create commits. Wait for human design approval before implementation."
+	case strings.EqualFold(stage, "build"):
+		return "Implement the human-approved design. Commit implementation before reporting."
+	default:
+		return "Inspect and report this stage's results. Do not change workspace files or create commits."
+	}
 }

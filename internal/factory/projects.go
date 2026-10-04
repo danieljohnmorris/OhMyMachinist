@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
@@ -217,9 +218,20 @@ func projectGit(ctx context.Context, p config.FactoryProject, h config.FactoryHo
 	return strings.TrimSpace(string(b)), nil
 }
 func prepareProject(ctx context.Context, p config.FactoryProject, h config.FactoryHost) error {
-	exists, err := projectCommand(ctx, p, h, "sh", "-c", `if [ -e "$1" ] || [ -L "$1" ]; then printf present; else printf missing; fi`, "machinist", p.Path)
-	if err != nil {
-		return err
+	exists := "missing"
+	var err error
+	if p.Host == "local" {
+		// Lstat preserves existing broken symlinks rather than cloning over them.
+		if _, err = os.Lstat(p.Path); err == nil {
+			exists = "present"
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+	} else {
+		exists, err = projectCommand(ctx, p, h, "sh", "-c", `if [ -e "$1" ] || [ -L "$1" ]; then printf present; else printf missing; fi`, "machinist", p.Path)
+		if err != nil {
+			return err
+		}
 	}
 	if p.Source == "git" {
 		if exists == "missing" {
@@ -243,7 +255,20 @@ func prepareProject(ctx context.Context, p config.FactoryProject, h config.Facto
 		return errors.New("choose a Git repository folder")
 	}
 	// Reject nested folders. Resolve symlinks on the execution host before comparing.
-	canonical, err := projectCommand(ctx, p, h, "sh", "-c", `cd "$1" && pwd -P`, "machinist", p.Path)
+	var canonical string
+	if p.Host == "local" {
+		info, e := os.Stat(p.Path)
+		if e != nil {
+			return e
+		}
+		if !info.IsDir() {
+			return errors.New("choose a Git repository folder")
+		}
+		canonical, err = filepath.EvalSymlinks(p.Path)
+		top = filepath.Clean(top)
+	} else {
+		canonical, err = projectCommand(ctx, p, h, "sh", "-c", `cd "$1" && pwd -P`, "machinist", p.Path)
+	}
 	if err != nil {
 		return err
 	}

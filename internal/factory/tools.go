@@ -536,6 +536,9 @@ func (s *Service) deliveryReady(t *Task) error {
 	if t == nil || t.Status == "done" || t.Status == "cancelled" || t.CodeApproved == "" || t.CodeApproved != t.Revision || t.Step < len(t.Steps) {
 		return errors.New("human approval of the exact completed pipeline revision is required before publishing")
 	}
+	if s.cfg.Projects[t.ProjectID].GitHub == "" {
+		return errors.New("this project has no GitHub repository configured; the approved change remains in Review")
+	}
 	if e := s.validateTask(t); e != nil {
 		return e
 	}
