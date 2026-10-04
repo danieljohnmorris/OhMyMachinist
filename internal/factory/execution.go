@@ -47,11 +47,17 @@ func (s *Service) git(project, dir string, args ...string) (string, error) {
 func (s *Service) gitLimited(project, dir string, limit int, args ...string) (string, bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	return s.gitLimitedContext(ctx, project, dir, limit, false, args...)
+}
+func (s *Service) gitLimitedContext(ctx context.Context, project, dir string, limit int, allowDifferences bool, args ...string) (string, bool, error) {
 	cmd := s.command(ctx, project, dir, append([]string{"git"}, args...))
 	out, stderr := &boundedBuffer{limit: limit}, &boundedBuffer{limit: 64 << 10}
 	cmd.Stdout, cmd.Stderr = out, stderr
 	if err := cmd.Run(); err != nil {
-		return "", false, fmt.Errorf("git: %s (%w)", stderr.String(), err)
+		var exit *exec.ExitError
+		if !allowDifferences || !errors.As(err, &exit) || exit.ExitCode() != 1 || (len(out.data) == 0 && !out.truncated) {
+			return "", false, fmt.Errorf("git: %s (%w)", stderr.String(), err)
+		}
 	}
 	return string(out.data), out.truncated, nil
 }

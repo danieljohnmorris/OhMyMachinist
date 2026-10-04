@@ -318,35 +318,15 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request) {
 			project, directory, base := t.ProjectID, t.Directory, t.BaseRevision
 			version, status := t.Version, t.Status
 			s.mu.Unlock()
-			diff, diffTruncated, diffErr := s.gitLimited(project, directory, 1<<20, "diff", base)
-			if diffTruncated {
-				diff += "\n[Output truncated: diff exceeds 1 MiB. Inspect the full change in the repository before approval.]"
-			}
-			files, filesTruncated, filesErr := s.gitLimited(project, directory, 64<<10, "diff", "--name-only", "-z", base)
-			if filesTruncated {
-				if end := strings.LastIndex(files, "\x00"); end >= 0 {
-					files = files[:end+1]
-				} else {
-					files = ""
-				}
-			}
+			diff, diffTruncated, fileNames, filesTruncated, reviewErr := s.reviewChanges(project, directory, base)
 			s.mu.Lock()
 			if s.closed || s.tasks[t.ID] != t || t.Version != version || t.Status != status || t.BaseRevision != base || t.Directory != directory {
 				fail(w, errors.New("task changed while reading changes; reload before continuing"))
 				return
 			}
-			if diffErr != nil {
-				fail(w, diffErr)
+			if reviewErr != nil {
+				fail(w, reviewErr)
 				return
-			}
-			if filesErr != nil {
-				fail(w, filesErr)
-				return
-			}
-
-			fileNames := []string{}
-			if files != "" {
-				fileNames = strings.Split(strings.TrimSuffix(files, "\x00"), "\x00")
 			}
 			jsonReply(w, 200, map[string]any{"task": t, "sessions": sessions, "diff": diff, "diff_truncated": diffTruncated, "files": fileNames, "files_truncated": filesTruncated, "checks": t.Checks})
 			return
