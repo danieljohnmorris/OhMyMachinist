@@ -322,10 +322,10 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request) {
 			if diffTruncated {
 				diff += "\n[Output truncated: diff exceeds 1 MiB. Inspect the full change in the repository before approval.]"
 			}
-			files, filesTruncated, filesErr := s.gitLimited(project, directory, 64<<10, "diff", "--name-only", base)
+			files, filesTruncated, filesErr := s.gitLimited(project, directory, 64<<10, "diff", "--name-only", "-z", base)
 			if filesTruncated {
-				if end := strings.LastIndex(files, "\n"); end >= 0 {
-					files = files[:end]
+				if end := strings.LastIndex(files, "\x00"); end >= 0 {
+					files = files[:end+1]
 				} else {
 					files = ""
 				}
@@ -344,7 +344,11 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			jsonReply(w, 200, map[string]any{"task": t, "sessions": sessions, "diff": diff, "diff_truncated": diffTruncated, "files": strings.Fields(files), "files_truncated": filesTruncated, "checks": t.Checks})
+			fileNames := []string{}
+			if files != "" {
+				fileNames = strings.Split(strings.TrimSuffix(files, "\x00"), "\x00")
+			}
+			jsonReply(w, 200, map[string]any{"task": t, "sessions": sessions, "diff": diff, "diff_truncated": diffTruncated, "files": fileNames, "files_truncated": filesTruncated, "checks": t.Checks})
 			return
 		}
 		if len(parts) == 3 && r.Method == "POST" {

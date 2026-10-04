@@ -134,7 +134,7 @@ func TestTaskDetailBoundsFilenameOutput(t *testing.T) {
 		t.Fatal(e)
 	}
 	bin := t.TempDir()
-	script := "#!/bin/sh\nif [ \"$1\" = diff ] && [ \"$2\" = --name-only ]; then awk 'BEGIN { for (i=0;i<10000;i++) printf \"generated_filename_%05d.txt\\n\", i }'; exit; fi\nexec " + shellQuote(git) + " \"$@\"\n"
+	script := "#!/bin/sh\nif [ \"$1\" = diff ] && [ \"$2\" = --name-only ]; then awk 'BEGIN { for (i=0;i<10000;i++) printf \"generated_filename_%05d.txt\\0\", i }'; exit; fi\nexec " + shellQuote(git) + " \"$@\"\n"
 	if e = os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0700); e != nil {
 		t.Fatal(e)
 	}
