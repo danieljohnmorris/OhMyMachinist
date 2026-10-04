@@ -1,6 +1,8 @@
 package factory
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -46,13 +48,18 @@ func (s *Service) tool(w http.ResponseWriter, r *http.Request, name string) {
 			http.Error(w, "Foreman only", 403)
 			return
 		}
-		key := "create:" + session.ID + ":" + session.RequestID + ":" + in.Title
+		pipeline := in.Pipeline
+		if pipeline == "" {
+			pipeline = s.cfg.DefaultPipeline
+		}
+		args, _ := json.Marshal([]string{in.Title, in.Brief, pipeline})
+		key := fmt.Sprintf("create:%s:%s:%x", session.ID, session.RequestID, sha256.Sum256(args))
 		if old := s.requests[key]; old != "" {
 			jsonReply(w, 200, map[string]any{"task": s.tasks[old]})
 			return
 		}
 		turn := session.RequestID
-		t, e := s.createWithRequest(session.ProjectID, in.Title, in.Brief, in.Pipeline, key, func() bool {
+		t, e := s.createWithRequest(session.ProjectID, in.Title, in.Brief, pipeline, key, func() bool {
 			return s.active == session.ID && s.tokens[token] == session.ID && session.RequestID == turn && session.Status != "cancelled" && session.Status != "interrupted"
 		})
 		if e != nil {

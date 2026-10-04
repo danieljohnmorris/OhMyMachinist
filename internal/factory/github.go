@@ -6,10 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/owainlewis/machinist/internal/config"
 )
 
 func validPR(raw, repo string) bool {
@@ -48,10 +49,10 @@ type githubPR struct {
 	StatusCheckRollup []struct{ Status, Conclusion, State string }
 }
 
-func readPR(parent context.Context, raw string) (githubPR, error) {
+func readPR(parent context.Context, p config.FactoryProject, h config.FactoryHost, raw string) (githubPR, error) {
 	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 	defer cancel()
-	out, e := exec.CommandContext(ctx, "gh", "pr", "view", raw, "--json", "state,mergedAt,headRefOid,statusCheckRollup").Output()
+	out, e := hostCommand(ctx, p, h, "", []string{"gh", "pr", "view", raw, "--json", "state,mergedAt,headRefOid,statusCheckRollup"}).Output()
 	if e != nil {
 		return githubPR{}, fmt.Errorf("could not read GitHub: %w", e)
 	}
@@ -174,8 +175,9 @@ var errStalePR = errors.New("task changed while reading GitHub; reload before co
 // The caller holds mu. Keep network waits outside it, then reject stale results.
 func (s *Service) readPRSnapshot(ctx context.Context, t *Task, raw string) (githubPR, error) {
 	id, version, step, status, revision, linked := t.ID, t.Version, t.Step, t.Status, t.Revision, t.PRURL
+	p, h := t.ProjectSnapshot, t.HostSnapshot
 	s.mu.Unlock()
-	pr, err := readPR(ctx, raw)
+	pr, err := readPR(ctx, p, h, raw)
 	s.mu.Lock()
 	if s.closed || s.tasks[id] != t || t.Version != version || t.Step != step || t.Status != status || t.Revision != revision || t.PRURL != linked {
 		return githubPR{}, errStalePR
