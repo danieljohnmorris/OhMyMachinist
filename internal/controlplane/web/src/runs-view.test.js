@@ -6,11 +6,12 @@ import { createServer } from "vite";
 
 const jobs = [
   { id: "job_failed", state: "failed", prompt: "Failed fixture", repository: "example/repo", command: "codex", created_at: "2026-01-01T00:00:00Z", runs: [{ id: "run_failed", state: "failed", command: "codex" }] },
+  { id: "job_running", state: "running", prompt: "Running fixture", repository: "example/repo", command: "codex", created_at: "2026-01-01T00:00:00Z", runs: [{ id: "run_running", state: "running", command: "codex", worker_name: "laptop", started_at: "2026-01-01T00:00:00Z" }] },
   { id: "job_succeeded", state: "succeeded", prompt: "Succeeded fixture", repository: "example/repo", command: "codex", created_at: "2026-01-01T00:00:00Z", runs: [{ id: "run_succeeded", state: "succeeded", command: "codex" }] },
 ];
 
-test("runs default to board view and share filters when switching views", async (context) => {
-  const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost/#/runs" });
+test("home, task list, board, search and task detail work against live status", async (context) => {
+  const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost/#/home" });
   const priorGlobals = new Map();
   for (const name of ["window", "document", "navigator", "localStorage", "Event", "MouseEvent"]) {
     priorGlobals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
@@ -62,28 +63,36 @@ test("runs default to board view and share filters when switching views", async 
   });
 
   mountedRoot = (await server.ssrLoadModule("/src/main.jsx")).appRoot;
-  await eventually(() => assert.match(document.body.textContent, /Failed fixture/));
 
-  assert.equal(button("Board").getAttribute("aria-pressed"), "true");
-  assert.ok(document.querySelector('a[href="#/runs/job_failed"]'), "board links to task");
-  assert.equal(button("List").getAttribute("aria-pressed"), "false");
+  // Home lists what needs you, with a spinner on running work.
+  await eventually(() => assert.match(document.body.textContent, /Failed fixture/));
+  const needsYou = document.querySelector('section[aria-label="Needs you"]');
+  assert.match(needsYou.textContent, /Failed fixture/);
+  assert.doesNotMatch(needsYou.textContent, /Succeeded fixture/);
+  assert.ok(document.querySelector('section[aria-label="In progress"] .spinner'), "running tasks spin");
+  assert.ok(document.querySelector('form[aria-label="New task"] textarea'), "home has the task composer");
+
+  window.location.hash = "#/tasks";
+  await eventually(() => assert.equal(button("List").getAttribute("aria-pressed"), "true"));
+  assert.ok(document.querySelector('a[href="#/tasks/job_failed"]'), "list links to task");
+  for (const group of ["Failed", "Running", "Done"]) assert.ok(document.querySelector(`section[aria-label="${group}"]`), `${group} group shown`);
 
   button("Board").click();
   await eventually(() => assert.equal(button("Board").getAttribute("aria-pressed"), "true"));
-  assert.match(document.body.textContent, /Waiting to start/);
+  assert.ok(document.querySelector("#board-needs"), "board has a Needs you column");
+  assert.match(document.querySelector('section[aria-labelledby="board-needs"]').textContent, /Failed fixture/);
 
-  button("Failed").click();
-  await eventually(() => assert.doesNotMatch(document.body.textContent, /Succeeded fixture/));
-  assert.match(document.body.textContent, /Failed fixture/);
+  const search = document.querySelector('input[aria-label="Search tasks"]');
+  setInput(search, "succeeded");
+  await eventually(() => assert.doesNotMatch(document.body.textContent, /Failed fixture/));
+  assert.match(document.body.textContent, /Succeeded fixture/);
 
   button("List").click();
   await eventually(() => assert.equal(button("List").getAttribute("aria-pressed"), "true"));
-  assert.equal(button("Failed").getAttribute("aria-pressed"), "true");
-  assert.ok(document.querySelector('a[href="#/runs/job_failed"]'), "list links to task");
-  assert.match(document.body.textContent, /Failed fixture/);
-  assert.doesNotMatch(document.body.textContent, /Succeeded fixture/);
+  assert.match(document.body.textContent, /Succeeded fixture/);
+  assert.doesNotMatch(document.body.textContent, /Failed fixture/);
 
-  window.location.hash = "#/runs/job_detail";
+  window.location.hash = "#/tasks/job_detail";
   await eventually(() => assert.match(document.body.textContent, /Task with files/));
   await eventually(() => assert.ok(document.querySelector('[aria-label="View result.md"]')));
   assert.equal(artifactRequests, 1, "metadata fetched once across all panels and attempts");
@@ -111,6 +120,11 @@ test("runs default to board view and share filters when switching views", async 
   await eventually(() => assert.equal([...document.querySelectorAll("button")].find(el => el.textContent === "Cancel task"), undefined));
 
 });
+
+function setInput(input, value) {
+  Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set.call(input, value);
+  input.dispatchEvent(new window.Event("input", { bubbles: true }));
+}
 
 function button(label) {
   const match = [...document.querySelectorAll("button")].find((element) => element.textContent.includes(label));
