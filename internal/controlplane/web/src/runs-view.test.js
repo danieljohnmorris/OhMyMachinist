@@ -11,9 +11,9 @@ const jobs = [
 ];
 
 test("home, task list, board, search and task detail work against live status", async (context) => {
-  const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost/#/home" });
+  const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost/#/home", pretendToBeVisual: true });
   const priorGlobals = new Map();
-  for (const name of ["window", "document", "navigator", "localStorage", "Event", "MouseEvent"]) {
+  for (const name of ["window", "document", "navigator", "localStorage", "Event", "MouseEvent", "KeyboardEvent", "FocusEvent", "PointerEvent", "Node", "Element", "HTMLElement", "HTMLInputElement", "HTMLButtonElement", "ShadowRoot", "DocumentFragment", "MutationObserver", "getComputedStyle", "requestAnimationFrame", "cancelAnimationFrame"]) {
     priorGlobals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
     Object.defineProperty(globalThis, name, { configurable: true, writable: true, value: dom.window[name] });
   }
@@ -71,6 +71,21 @@ test("home, task list, board, search and task detail work against live status", 
   assert.doesNotMatch(needsYou.textContent, /Succeeded fixture/);
   assert.ok(document.querySelector('section[aria-label="In progress"] .spinner'), "running tasks spin");
   assert.ok(document.querySelector('form[aria-label="New task"] textarea'), "home has the task composer");
+
+  assert.ok(document.querySelector('form[aria-label="New task"] [aria-label="Repository"]'), "composer uses the shared select");
+
+  window.location.hash = "#/settings";
+  await eventually(() => assert.ok(button("Add repository")));
+  button("Add repository").click();
+  const dialog = await eventually(() => { const found = document.querySelector('[role="dialog"]'); assert.ok(found, "repository dialog opens"); return found; });
+  assert.match(dialog.textContent, /\[repositories\.my-project\]/, "dialog shows the worker.toml block to paste");
+  assert.doesNotMatch(document.querySelector("main").textContent, /Average task time/, "settings no longer shows usage metrics");
+  assert.ok(dialog.querySelector('[aria-label="Close"]'), "dialog can be closed");
+
+  // Leaving the page unmounts the dialog (jsdom never finishes its exit transition).
+  window.location.hash = "#/usage";
+  await eventually(() => assert.match(document.querySelector("main").textContent, /Average task time/));
+  await eventually(() => assert.equal(document.querySelector('[role="dialog"]'), null));
 
   window.location.hash = "#/tasks";
   await eventually(() => assert.equal(button("List").getAttribute("aria-pressed"), "true"));
@@ -140,7 +155,7 @@ function button(label) {
 
 async function eventually(assertion) {
   for (let attempt = 0; attempt < 50; attempt += 1) {
-    try { assertion(); return; } catch (error) {
+    try { return assertion(); } catch (error) {
       if (attempt === 49) throw error;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }

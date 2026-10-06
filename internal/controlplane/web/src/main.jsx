@@ -2,14 +2,16 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "@fontsource-variable/inter";
 import "@fontsource-variable/jetbrains-mono";
-import { CircleCheckBig, Clock3, House, LayoutGrid, List, Plus, Search, Server, Settings } from "lucide-react";
+import { ChartNoAxesColumn, CircleCheckBig, Clock3, House, LayoutGrid, List, Plus, Search, Server, Settings } from "lucide-react";
 import { TaskDetail } from "./task-detail.jsx";
 import { friendlyName, relativeTime, shortId } from "./task-display.jsx";
+import { UsagePage } from "@/analytics";
 import { WorkersPage } from "@/catalog";
 import { SettingsPage } from "@/settings";
 import { AutomationsPage } from "@/triggers";
 import { Button } from "@/components/ui/button";
 import { ErrorBanner, QuietState, TopBar } from "@/components/ui/page-heading";
+import { Select } from "@/components/ui/select";
 import { Spinner, StatusIcon } from "@/components/ui/status-icon";
 import { cn } from "@/lib/utils";
 import { routeFromHash, taskHref } from "@/routes";
@@ -123,7 +125,6 @@ function App() {
   }
 
   async function deleteJob(job) {
-    if (!window.confirm(`Delete task ${shortId(job.id)} and all of its stored run data?`)) return;
     setDeletingJob(job.id);
     setTaskActionError("");
     try {
@@ -149,6 +150,7 @@ function App() {
     ["tasks", "Tasks", CircleCheckBig, <span className="nav-count">{openCount || ""}</span>],
     ["automations", "Automations", Clock3, null],
     ["workers", "Workers", Server, null],
+    ["usage", "Usage", ChartNoAxesColumn, null, "desktop-only"],
     ["settings", "Settings", Settings, null, "mobile-only"],
   ];
   const current = view === "task" ? "tasks" : view;
@@ -171,6 +173,7 @@ function App() {
           : view === "tasks" ? <TasksPage jobs={jobs} workers={status.workers} loaded={statusLoaded} error={statusError} onNew={openComposer} />
           : view === "automations" ? <AutomationsPage triggers={status.triggers || []} jobs={jobs} loaded={statusLoaded} error={statusError} />
           : view === "workers" ? <WorkersPage workers={status.workers} jobs={jobs} loaded={statusLoaded} error={statusError} />
+          : view === "usage" ? <UsagePage jobs={jobs} loaded={statusLoaded} error={statusError} />
           : view === "settings" ? <SettingsPage status={status} loaded={statusLoaded} error={statusError} dark={dark} setDark={setDark} />
           : <HomePage status={status} loaded={statusLoaded} error={statusError} submit={submit} composerRef={composerRef} />}
       </main>
@@ -266,14 +269,8 @@ function Composer({ status, submit, inputRef }) {
         <label><span className="field-label">Model</span><input className="field-control" value={model} onChange={(event) => setModel(event.target.value)} maxLength={128} placeholder="Agent default" /></label>
       </div>}
       <div className="flex flex-wrap items-center gap-1.5 px-2.5 py-2">
-        <select className="compact-select" aria-label="Repository" value={repo} onChange={(event) => setRepository(event.target.value)}>
-          {!repositories.length && <option value="">No repositories</option>}
-          {repositories.map((name) => <option key={name} value={name}>{name}</option>)}
-        </select>
-        <select className="compact-select" aria-label={isWorkflow ? "Workflow" : "Command"} value={chosen} onChange={(event) => setSelection(event.target.value)}>
-          {!choices.length && <option value="">No agents configured</option>}
-          {choices.map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}
-        </select>
+        <Select label="Repository" value={repo} onValueChange={setRepository} items={repositories.map((name) => ({ value: name, label: name }))} placeholder="No repositories" disabled={!repositories.length} />
+        <Select label={isWorkflow ? "Workflow" : "Agent"} value={chosen} onValueChange={setSelection} items={choices} placeholder="No agents configured" disabled={!choices.length} />
         <Button type="button" variant="ghost" size="sm" aria-pressed={options} onClick={() => setOptions((value) => !value)}>Options</Button>
         <span className="flex-1" />
         <Button type="submit" disabled={!ready}>{submitting ? <><Spinner label="Starting" />Starting</> : <>Start task<span className="kbd border-background/30 text-background/70">⌘↵</span></>}</Button>

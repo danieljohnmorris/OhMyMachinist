@@ -69,6 +69,7 @@
 @layer base {
   * { border-color: var(--border); }
   html { background: var(--background); }
+  #root { isolation: isolate; }
   body { margin: 0; min-width: 320px; min-height: 100vh; background: var(--background); color: var(--foreground); font-family: var(--font-sans); font-size: 0.8125rem; line-height: 1.45; -webkit-font-smoothing: antialiased; font-feature-settings: "cv11", "ss01"; }
   button, input, textarea, select { font: inherit; color: inherit; }
   button { cursor: pointer; }

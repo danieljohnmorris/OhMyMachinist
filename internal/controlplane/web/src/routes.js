@@ -1,6 +1,6 @@
-const pages = new Set(["home", "tasks", "automations", "workers", "settings"]);
+const pages = new Set(["home", "tasks", "automations", "workers", "usage", "settings"]);
 // Older links keep working after the redesign.
-const aliases = { runs: "tasks", triggers: "automations", analytics: "settings", workflows: "settings", commands: "settings" };
+const aliases = { runs: "tasks", triggers: "automations", analytics: "usage", workflows: "settings", commands: "settings" };
 
 export function routeFromHash(hash) {
   const value = hash.replace(/^#\/?/, "");

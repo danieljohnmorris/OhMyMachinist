@@ -9,7 +9,7 @@ test("routeFromHash recognizes task detail routes, including old run links", () 
 });
 
 test("old page links land on their new pages", () => {
-  for (const [hash, view] of [["#/runs", "tasks"], ["#/triggers", "automations"], ["#/analytics", "settings"], ["#/workflows", "settings"], ["#/commands", "settings"]]) {
+  for (const [hash, view] of [["#/runs", "tasks"], ["#/triggers", "automations"], ["#/analytics", "usage"], ["#/workflows", "settings"], ["#/commands", "settings"]]) {
     assert.deepEqual(routeFromHash(hash), { view, jobID: "" });
   }
 });

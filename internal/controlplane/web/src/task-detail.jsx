@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { ExternalLink, GitPullRequest } from "lucide-react";
 import { Tabs } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
+import { Modal } from "@/components/ui/dialog";
 import { Markdown } from "@/components/ui/markdown";
 import { QuietState } from "@/components/ui/page-heading";
 import { Spinner, StatusIcon } from "@/components/ui/status-icon";
@@ -14,6 +15,7 @@ import { State, friendlyName, formatTimestamp, relativeTime, shortId, stateLabel
 
 export function TaskDetail({ csrfToken, job, workers = [], loaded, error, deleting, onDelete, onWorkflowAction }) {
   const artifacts = useTaskArtifacts(job, csrfToken);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const breadcrumb = <header className="top-bar"><a href="#/tasks" className="text-muted-foreground hover:text-foreground">Tasks</a><span className="text-faint">/</span><h1 className="top-bar-title font-mono text-xs text-muted-foreground">{job ? shortId(job.id) : ""}</h1></header>;
   if (!job)
     return <>{breadcrumb}<div className="pane-scroll">{!loaded ? <QuietState title="Loading task" loading role="status" /> : <QuietState title="Task not found" description="It may have been deleted." />}{error && <p role="alert" className="px-4 text-center text-danger">{error}</p>}</div></>;
@@ -83,12 +85,15 @@ export function TaskDetail({ csrfToken, job, workers = [], loaded, error, deleti
                 <RunMetric label="Created" value={formatTimestamp(job.created_at)} />
                 <RunMetric label="Updated" value={formatTimestamp(job.updated_at)} />
               </dl>
-              <Button variant="outline" disabled={!terminal || deleting} onClick={() => onDelete(job)}>{deleting ? "Deleting…" : "Delete task"}</Button>
+              <Button variant="outline" disabled={!terminal || deleting} onClick={() => setConfirmDelete(true)}>{deleting ? <><Spinner />Deleting</> : "Delete task"}</Button>
+              {!terminal && <p className="mt-2 text-xs text-faint">Finished tasks can be deleted.</p>}
             </section>
           </div> },
         ]} />
       </div>
     </div>
+    <Modal open={confirmDelete} onOpenChange={setConfirmDelete} title="Delete this task?" description={`${shortId(job.id)} and all of its stored run data and files will be removed. This cannot be undone.`}
+      footer={<><Button variant="ghost" onClick={() => setConfirmDelete(false)}>Keep task</Button><Button className="border-danger bg-danger text-white" onClick={() => { setConfirmDelete(false); onDelete(job); }}>Delete task</Button></>} />
   </>;
 }
 
