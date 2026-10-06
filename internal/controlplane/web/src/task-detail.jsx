@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { ExternalLink, GitPullRequest } from "lucide-react";
 import { Tabs } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
+import { Markdown } from "@/components/ui/markdown";
 import { QuietState } from "@/components/ui/page-heading";
 import { Spinner, StatusIcon } from "@/components/ui/status-icon";
 import { cn } from "@/lib/utils";
@@ -58,7 +59,7 @@ export function TaskDetail({ csrfToken, job, workers = [], loaded, error, deleti
             <h3 className="font-medium">{resultTitle(job, result)}</h3>
             {job.state === "running" && <p className="flex items-center gap-2 text-muted-foreground"><Spinner label="Working" />The agent is working. Results appear here when it finishes.</p>}
             {job.state === "queued" && <p className="flex items-center gap-2 text-muted-foreground"><StatusIcon state="queued" />{reason.text}.</p>}
-            {result?.summary && <p className="whitespace-pre-wrap leading-6 text-muted-foreground">{result.summary}</p>}
+            {result?.summary && <Markdown>{result.summary}</Markdown>}
             {result?.error && result.error !== result.summary && <pre role="alert" className="log-block text-danger">{result.error}</pre>}
             {result && job.task && <Artifacts key={result.id} artifacts={artifacts} runID={result.id} csrfToken={csrfToken} />}
           </section> },
@@ -66,7 +67,7 @@ export function TaskDetail({ csrfToken, job, workers = [], loaded, error, deleti
           ...(history.length ? [{ id: "history", label: "History", content: <ol className="space-y-5">
             {history.map((item) => <li key={item.id} className="space-y-2 border-l border-border-strong pl-4">
               <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-medium">{item.outcome === "changes_requested" ? "Changes requested" : friendlyName(item.command)}</h3><State value={item.outcome === "complete" ? "succeeded" : item.outcome || item.state} /></div>
-              {item.summary && <p className="whitespace-pre-wrap leading-6 text-muted-foreground">{item.summary}</p>}
+              {item.summary && <Markdown>{item.summary}</Markdown>}
               {item.error && item.error !== item.summary && <p className="text-danger">{item.error}</p>}
               {job.task && <Artifacts artifacts={artifacts} runID={item.id} csrfToken={csrfToken} />}
               <ExecutionDetails run={item} />
@@ -74,7 +75,7 @@ export function TaskDetail({ csrfToken, job, workers = [], loaded, error, deleti
           </ol> }] : []),
           { id: "instructions", label: "Instructions", content: <pre className="whitespace-pre-wrap break-words font-sans leading-6">{job.task ? job.task.spec || "Use the linked source for requirements." : job.prompt}</pre> },
           { id: "details", label: "Details", content: <div className="space-y-6">
-            {result?.revision && <section><h3 className="mb-2 font-medium">Requested changes</h3><p className="whitespace-pre-wrap">{result.revision.feedback}</p></section>}
+            {result?.revision && <section><h3 className="mb-2 font-medium">Requested changes</h3><Markdown>{result.revision.feedback}</Markdown></section>}
             {result && <ExecutionDetails run={result} />}
             <section className="border-t border-border pt-4">
               <dl className="mb-4 grid gap-3 sm:grid-cols-3">

@@ -122,6 +122,21 @@ export function humanize(name) {
   return String(name || "").replaceAll("_", " ").replaceAll("-", " ").replace(/^./, (c) => c.toUpperCase());
 }
 
-function firstLine(value) {
-  return typeof value === "string" ? value.trim().split("\n")[0].slice(0, 200) : "";
+// firstLine returns the first readable sentence of agent text as plain text,
+// skipping code fences, blank lines and markdown markers.
+export function firstLine(value) {
+  if (typeof value !== "string") return "";
+  let fenced = false;
+  for (const raw of value.split("\n")) {
+    const line = raw.trim();
+    if (line.startsWith("```")) { fenced = !fenced; continue; }
+    if (fenced || !line || /^(-{3,}|\*{3,}|_{3,})$/.test(line)) continue;
+    const text = line
+      .replace(/^(#{1,6}\s+|>\s*|[-*+]\s+|\d+\.\s+)/, "")
+      .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+      .replace(/(\*\*|__|\*|_|`)/g, "")
+      .trim();
+    if (text) return text.slice(0, 200);
+  }
+  return "";
 }

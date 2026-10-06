@@ -25,7 +25,7 @@ test("home, task list, board, search and task detail work against live status", 
     created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:01:00Z",
     runs: [
       { id: "plan", command: "plan", state: "succeeded", outcome: "complete", summary: "Planned" },
-      { id: "build", command: "build", state: "succeeded", outcome: "complete", summary: "Built", executor: "test-executor", model: "test-model", worker_name: "test-worker", duration_millis: 1000, exit_code: 0 },
+      { id: "build", command: "build", state: "succeeded", outcome: "complete", summary: "**Built** the `feature`\n\n- tests pass\n\n<script>window.injected = true</script>", executor: "test-executor", model: "test-model", worker_name: "test-worker", duration_millis: 1000, exit_code: 0 },
     ],
   };
   const interruptedJob = { ...detailJob, id: "job_interrupted", state: "interrupted", workflow: { name: "build", steps: ["build"], current_step: 0 }, runs: [{ id: "interrupted", command: "build", state: "interrupted" }] };
@@ -95,6 +95,12 @@ test("home, task list, board, search and task detail work against live status", 
   window.location.hash = "#/tasks/job_detail";
   await eventually(() => assert.match(document.body.textContent, /Task with files/));
   await eventually(() => assert.ok(document.querySelector('[aria-label="View result.md"]')));
+  const summary = document.querySelector('section[aria-label="Current result"] .markdown');
+  assert.equal(summary.querySelector("strong")?.textContent, "Built", "summary markdown is rendered");
+  assert.equal(summary.querySelector("code")?.textContent, "feature");
+  assert.equal(summary.querySelector("li")?.textContent, "tests pass");
+  assert.match(summary.textContent, /<script>window\.injected = true<\/script>/, "raw HTML stays visible as text");
+  assert.equal(document.querySelectorAll("script").length, 0, "agent HTML is never rendered as markup");
   assert.equal(artifactRequests, 1, "metadata fetched once across all panels and attempts");
   const tab = name => [...document.querySelectorAll('[role="tab"]')].find(el => el.textContent === name);
   tab("Details").click();

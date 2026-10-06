@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { boardColumnForState, githubIssueReference, groupJobs, groupJobsByBoardColumn, jobDisplayTitle, needsAttention, pullRequestURL, searchJobs, statusGroup, taskReason } from "./runs-board.js";
+import { boardColumnForState, firstLine, githubIssueReference, groupJobs, groupJobsByBoardColumn, jobDisplayTitle, needsAttention, pullRequestURL, searchJobs, statusGroup, taskReason } from "./runs-board.js";
 
 const states = ["queued", "running", "awaiting_approval", "blocked", "interrupted", "failed", "timed_out", "succeeded", "cancelled", "unexpected_state"];
 
@@ -57,4 +57,12 @@ test("GitHub issue titles are preferred over prompts and hashes", () => {
   assert.equal(jobDisplayTitle(job), "Make cards readable");
   assert.equal(githubIssueReference(job), "#7");
   assert.equal(jobDisplayTitle({ id: "job_12345678", prompt: "Run an audit" }), "Run an audit");
+});
+
+test("reasons are plain text even when agents write markdown", () => {
+  assert.equal(firstLine("```\nMem0 Active | noise\n```\n\n`FOREMAN phase=planning`\n\nmore"), "FOREMAN phase=planning");
+  assert.equal(firstLine("## **Done:** see [PR 7](https://github.com/o/r/pull/7)"), "Done: see PR 7");
+  assert.equal(firstLine("- first item\n- second"), "first item");
+  assert.equal(firstLine("---\n\n> quoted"), "quoted");
+  assert.equal(firstLine(undefined), "");
 });
