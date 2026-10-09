@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/owainlewis/machinist/internal/config"
-	"github.com/owainlewis/machinist/internal/issues"
 	"github.com/owainlewis/machinist/internal/protocol"
 )
 

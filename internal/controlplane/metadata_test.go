@@ -10,7 +10,7 @@ import (
 
 func TestWorkflowStepMetadataIsStoredOnJob(t *testing.T) {
 	store := openTestStore(t, t.TempDir()+"/db")
-	jobID, err := store.createLegacyWorkflowJob(t.Context(), "issue URL", "machinist", "deliver", []config.WorkflowStep{{Command: testAgent("build", "issue URL")}})
+	_, err := store.createLegacyWorkflowJob(t.Context(), "issue URL", "machinist", "deliver", []config.WorkflowStep{{Command: testAgent("build", "issue URL")}})
 	if err != nil {
 		t.Fatal(err)
 	}

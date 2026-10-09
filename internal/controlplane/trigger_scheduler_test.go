@@ -35,10 +35,12 @@ func TestIssueTriggerCreatesSubjectDeduplicatedJobs(t *testing.T) {
 	}}
 	trigger := config.ResolvedTrigger{
 		Identity: "issue/platform", Family: "issue", Name: "platform", Repository: "machinist",
-		ConfigSignature: "signature", Label: "factory", SourceKind: "linear", SourceProject: "Platform",
+		Signature: "signature", Label: "factory", SourceKind: "linear", SourceProject: "Platform",
 		Command: testAgent("build", "{{machinist.prompt}}"),
 	}
-	if err := store.SyncTriggers(t.Context(), []config.ResolvedTrigger{trigger}); err != nil {
+	if err := store.SyncTriggers(t.Context(), []TriggerDefinition{{
+		Identity: trigger.Identity, Family: trigger.Family, ConfigSignature: trigger.Signature,
+	}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := server.processIssueTrigger(t.Context(), trigger, mustTriggerGeneration(t, store, trigger.Identity)); err != nil {

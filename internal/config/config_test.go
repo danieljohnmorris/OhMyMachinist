@@ -7,8 +7,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/owainlewis/machinist/internal/issues"
 )
 
 func TestLoadWorkerResolvesRelativePathsFromConfig(t *testing.T) {
@@ -157,13 +155,13 @@ project_id = "00000000-0000-0000-0000-000000000000"
 [issue_sources.linear.platform]
 project = "Platform"
 `)
-	config, err := LoadConfig(path)
+	definition, err := LoadDefinitions(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.IssueSources.Label != "factory" || config.IssueSources.Plane["platform"].ProjectID == "" ||
-		config.IssueSources.Linear["platform"].Project != "Platform" {
-		t.Fatalf("issue sources = %#v", config.IssueSources)
+	if definition.IssueSources.Label != "factory" || definition.IssueSources.Plane["platform"].ProjectID == "" ||
+		definition.IssueSources.Linear["platform"].Project != "Platform" {
+		t.Fatalf("issue sources = %#v", definition.IssueSources)
 	}
 }
 

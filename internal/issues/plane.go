@@ -45,13 +45,13 @@ func (p *PlaneClient) FetchIssue(ctx context.Context, key string) (Issue, error)
 		return Issue{}, err
 	}
 	var response struct {
-		ID          string         `json:"id"`
-		Name        string         `json:"name"`
-		Description string         `json:"description"`
-		URL         string         `json:"url"`
-		Labels      []planeLabel   `json:"labels"`
+		ID          string       `json:"id"`
+		Name        string       `json:"name"`
+		Description string       `json:"description"`
+		URL         string       `json:"url"`
+		Labels      []planeLabel `json:"labels"`
 	}
-	if err := p.request(ctx, http.MethodGet, p.endpoint("issues", key, "/"), nil, &response); err != nil {
+	if err := p.request(ctx, http.MethodGet, p.endpoint("issues/", key, "/"), nil, &response); err != nil {
 		return Issue{}, err
 	}
 	return Issue{
@@ -78,7 +78,7 @@ func (p *PlaneClient) IssuesWithLabel(ctx context.Context, label string) ([]Issu
 			Labels      []planeLabel `json:"labels"`
 		} `json:"results"`
 	}
-	if err := p.request(ctx, http.MethodGet, p.endpoint("issues", "/"), []byte(query.Encode()), &response, withContentType("application/x-www-form-urlencoded")); err != nil {
+	if err := p.request(ctx, http.MethodGet, p.endpoint("issues/?", query.Encode()), nil, &response); err != nil {
 		return nil, err
 	}
 	issues := make([]Issue, 0, len(response.Results))
@@ -99,7 +99,7 @@ func (p *PlaneClient) PostComment(ctx context.Context, key, body string) error {
 		return err
 	}
 	payload, _ := json.Marshal(map[string]any{"issue": key, "comment_html": body})
-	return p.request(ctx, http.MethodPost, p.endpoint("issues", key, "comments/"), payload, nil)
+	return p.request(ctx, http.MethodPost, p.endpoint("issues/", key, "/comments/"), payload, nil)
 }
 
 func (p *PlaneClient) SetState(ctx context.Context, key, state string) error {
@@ -110,12 +110,10 @@ func (p *PlaneClient) SetState(ctx context.Context, key, state string) error {
 		return err
 	}
 	payload, _ := json.Marshal(map[string]string{"state": state})
-	return p.request(ctx, http.MethodPatch, p.endpoint("issues", key, "/"), payload, nil)
+	return p.request(ctx, http.MethodPatch, p.endpoint("issues/", key, "/"), payload, nil)
 }
 
-func (p *PlaneClient) IssueURL(key string) string {
-	return p.endpoint("issues", key, "/")
-}
+func (p *PlaneClient) IssueURL(key string) string { return p.endpoint("issues/", key, "/") }
 
 func (p *PlaneClient) endpoint(parts ...string) string {
 	base := strings.TrimRight(p.config.URL, "/")
@@ -128,13 +126,7 @@ func (p *PlaneClient) endpoint(parts ...string) string {
 	return base
 }
 
-type requestOption func(*http.Request)
-
-func withContentType(contentType string) requestOption {
-	return func(request *http.Request) { request.Header.Set("Content-Type", contentType) }
-}
-
-func (p *PlaneClient) request(ctx context.Context, method, endpoint string, body []byte, output any, options ...requestOption) error {
+func (p *PlaneClient) request(ctx context.Context, method, endpoint string, body []byte, output any) error {
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewReader(body)
@@ -147,9 +139,6 @@ func (p *PlaneClient) request(ctx context.Context, method, endpoint string, body
 	request.Header.Set("X-API-Key", p.config.APIKey)
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
-	}
-	for _, option := range options {
-		option(request)
 	}
 	response, err := p.client.Do(request)
 	if err != nil {
