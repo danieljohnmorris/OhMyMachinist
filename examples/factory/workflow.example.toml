@@ -1,0 +1,38 @@
+# Replace /absolute/path/to/examples and repository paths before use.
+[commands.factory_code]
+executor = "script"
+timeout = "120m"
+prompt = "{{machinist.prompt}}"
+command = ["/absolute/path/to/examples/factory/delivery.sh", "code"]
+
+[commands.factory_commit]
+executor = "script"
+timeout = "15m"
+prompt = "{{machinist.prompt}}"
+command = ["/absolute/path/to/examples/factory/delivery.sh", "commit"]
+
+[commands.factory_pull_request]
+executor = "script"
+timeout = "15m"
+prompt = "{{machinist.prompt}}"
+command = ["/absolute/path/to/examples/factory/delivery.sh", "pull-request"]
+
+[commands.factory_review]
+executor = "codex"
+timeout = "60m"
+prompt_file = "/absolute/path/to/examples/factory/review-prompt.md"
+
+[commands.factory_preview]
+executor = "script"
+timeout = "10m"
+prompt = "{{machinist.prompt}}"
+command = ["/absolute/path/to/examples/factory/delivery.sh", "preview"]
+
+[commands.factory_comment]
+executor = "script"
+timeout = "5m"
+prompt = "{{machinist.prompt}}"
+command = ["/absolute/path/to/examples/factory/delivery.sh", "comment"]
+
+[workflows.factory]
+steps = ["factory_code", "factory_commit", "factory_pull_request", "factory_review", "factory_preview", "factory_comment"]

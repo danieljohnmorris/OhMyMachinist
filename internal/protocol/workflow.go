@@ -9,9 +9,10 @@ import (
 )
 
 type StepResult struct {
-	ApprovalRequired bool   `json:"approval_required,omitempty"`
-	Outcome          string `json:"outcome"`
-	Summary          string `json:"summary"`
+	ApprovalRequired bool           `json:"approval_required,omitempty"`
+	Outcome          string         `json:"outcome"`
+	Summary          string         `json:"summary"`
+	Metadata         map[string]any `json:"metadata,omitempty"`
 }
 
 func ParseStepResult(body []byte) (*StepResult, error) {

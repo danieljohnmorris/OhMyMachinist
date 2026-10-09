@@ -12,8 +12,56 @@ import (
 	"time"
 
 	"github.com/owainlewis/machinist/internal/config"
+	"github.com/owainlewis/machinist/internal/issues"
 	"github.com/owainlewis/machinist/internal/protocol"
 )
+
+type fakeIssuePoller struct {
+	issues []issues.Issue
+	err    error
+}
+
+func (f fakeIssuePoller) Poll(context.Context, string) ([]issues.Issue, error) {
+	return f.issues, f.err
+}
+
+func TestIssueTriggerCreatesSubjectDeduplicatedJobs(t *testing.T) {
+	store := openTestStore(t, t.TempDir()+"/db")
+	server := &Server{store: store, now: time.Now, issueSources: map[string]issuePoller{
+		"issue/platform": fakeIssuePoller{issues: []issues.Issue{{
+			Key: "ABC-12", Title: "Add archive page", Description: "Build it.",
+			URL: "https://linear.example.app/ABC-12", Labels: []string{"factory"}, TeamID: "team",
+		}}},
+	}}
+	trigger := config.ResolvedTrigger{
+		Identity: "issue/platform", Family: "issue", Name: "platform", Repository: "machinist",
+		ConfigSignature: "signature", Label: "factory", SourceKind: "linear", SourceProject: "Platform",
+		Command: testAgent("build", "{{machinist.prompt}}"),
+	}
+	if err := store.SyncTriggers(t.Context(), []config.ResolvedTrigger{trigger}); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.processIssueTrigger(t.Context(), trigger, mustTriggerGeneration(t, store, trigger.Identity)); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Jobs) != 1 || snapshot.Jobs[0].Task == nil || snapshot.Jobs[0].Task.Title != "ABC-12: Add archive page" {
+		t.Fatalf("snapshot = %#v", snapshot)
+	}
+	if err := server.processIssueTrigger(t.Context(), trigger, mustTriggerGeneration(t, store, trigger.Identity)); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Jobs) != 1 {
+		t.Fatalf("duplicate jobs = %#v", snapshot.Jobs)
+	}
+}
 
 type fakeGitHubTriggerClient struct {
 	candidates       []GitHubCandidate

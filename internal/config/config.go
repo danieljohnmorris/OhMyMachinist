@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/owainlewis/machinist/internal/issues"
 	"github.com/owainlewis/machinist/internal/triggers"
 	"github.com/pelletier/go-toml/v2"
 )
@@ -73,6 +74,7 @@ type Config struct {
 	Server    Server              `toml:"server"`
 	Commands  map[string]Command  `toml:"commands"`
 	GitHub    GitHub              `toml:"github"`
+	IssueSources issues.Config   `toml:"issue_sources"`
 	Triggers  TriggerDefinitions  `toml:"triggers"`
 	path      string
 }
@@ -83,6 +85,7 @@ type GitHub struct {
 
 type TriggerDefinitions struct {
 	GitHub   map[string]GitHubTrigger   `toml:"github"`
+	Issue    map[string]IssueTrigger    `toml:"issue"`
 	Interval map[string]IntervalTrigger `toml:"interval"`
 	Cron     map[string]CronTrigger     `toml:"cron"`
 }
@@ -96,6 +99,14 @@ type GitHubTrigger struct {
 	TriggerSelection
 	Every string `toml:"every"`
 	Label string `toml:"label"`
+}
+
+type IssueTrigger struct {
+	TriggerSelection
+	Every      string `toml:"every"`
+	Source     string `toml:"source"`
+	Project    string `toml:"project"`
+	Repository string `toml:"repository"`
 }
 
 type IntervalTrigger struct {
@@ -120,6 +131,8 @@ type ResolvedTrigger struct {
 	Repository         string
 	GitHubRepository   string
 	GitHubRepositories map[string]string
+	SourceKind         string
+	SourceProject      string
 	Every              time.Duration
 	Schedule           string
 	Timezone           string

@@ -73,3 +73,31 @@ an ordered `steps` list for stages tracked by Machinist, or use one script comma
 when the script should own its internal process. See [the task workflow guide](task-guide.md)
 and [workflow configuration](workflows.md). Pre-command databases are
 recreated once because this release intentionally consolidates the schema before active use.
+
+## Issue sources
+
+Issue sources are configured on the server and use environment credentials. A
+missing label defaults to `factory`. Project keys map to worker repository
+names:
+
+```toml
+[issue_sources]
+label = "factory"
+
+[issue_sources.plane.my-project]
+project_id = "00000000-0000-0000-0000-000000000000"
+
+[issue_sources.linear.my-project]
+project = "Example Project"
+
+[issue_sources.triggers.my-project]
+every = "5m"
+source = "plane"
+repository = "my-project"
+command = "task-to-pr"
+```
+
+Set `source = "linear"` for a Linear trigger. For Plane, set `PLANE_URL`,
+`PLANE_WORKSPACE`, and `PLANE_API_KEY`; for Linear, set `LINEAR_API_KEY`. Poll
+jobs are deduplicated by issue URL or key while active. Webhooks must be
+verified with the `issues.WebhookHandler` helper before parsing.

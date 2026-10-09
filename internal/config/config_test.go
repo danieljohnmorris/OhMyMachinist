@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/owainlewis/machinist/internal/issues"
 )
 
 func TestLoadWorkerResolvesRelativePathsFromConfig(t *testing.T) {
@@ -141,6 +143,27 @@ prompt_file = "plan.md"
 	}
 	if token, err := server.WorkerToken(); err != nil || token != "secret" {
 		t.Fatalf("token = %q, %v", token, err)
+	}
+}
+
+func TestLoadConfigParsesIssueSources(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeTestFile(t, path, `[issue_sources]
+label = "factory"
+
+[issue_sources.plane.platform]
+project_id = "00000000-0000-0000-0000-000000000000"
+
+[issue_sources.linear.platform]
+project = "Platform"
+`)
+	config, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.IssueSources.Label != "factory" || config.IssueSources.Plane["platform"].ProjectID == "" ||
+		config.IssueSources.Linear["platform"].Project != "Platform" {
+		t.Fatalf("issue sources = %#v", config.IssueSources)
 	}
 }
 

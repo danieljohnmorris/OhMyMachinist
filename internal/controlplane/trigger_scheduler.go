@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/owainlewis/machinist/internal/config"
+	"github.com/owainlewis/machinist/internal/issues"
+	"github.com/owainlewis/machinist/internal/protocol"
 )
 
 const queuedGitHubLabel = "machinist:queued"
@@ -48,7 +50,65 @@ func (s *Server) processManagedTrigger(ctx context.Context, trigger config.Resol
 	if trigger.Family == "github" {
 		return s.processGitHubTrigger(ctx, trigger, status.ConfigGeneration)
 	}
+	if trigger.Family == "issue" {
+		return s.processIssueTrigger(ctx, trigger, status.ConfigGeneration)
+	}
 	return s.processFixedTrigger(ctx, trigger, status.ConfigGeneration, *status.NextDueAt, status.PendingOccurrenceAt, now)
+}
+
+func (s *Server) processIssueTrigger(ctx context.Context, trigger config.ResolvedTrigger, generation string) error {
+	var failures []error
+	admitted := 0
+	source := s.issueSources[trigger.Identity]
+	if source == nil {
+		failures = append(failures, fmt.Errorf("issue source %q is unavailable", trigger.Identity))
+	} else {
+		foundIssues, err := source.Poll(ctx, trigger.Label)
+		if err != nil {
+			failures = append(failures, err)
+		}
+		for _, issue := range foundIssues {
+			if !slices.ContainsFunc(issue.Labels, func(label string) bool { return strings.EqualFold(label, trigger.Label) }) {
+				continue
+			}
+			task := protocol.Task{Title: issues.Title(issue.Key, issue.Title), SourceURL: issue.URL, Spec: issue.Description}
+			if err := task.Validate(); err != nil {
+				failures = append(failures, err)
+				continue
+			}
+			prompt := issue.URL
+			if issue.Description != "" {
+				prompt = issue.Description
+			}
+			command, renderErr := config.RenderPrompt(trigger.Command, prompt)
+			if renderErr != nil {
+				failures = append(failures, renderErr)
+				continue
+			}
+			command.Model = trigger.Model
+			subject := issue.URL
+			if subject == "" {
+				subject = issue.Key
+			}
+			_, created, admissionErr := s.store.CreateTriggeredJob(ctx, TriggerAdmission{
+				Identity: trigger.Identity, Family: trigger.Family, ConfigSignature: trigger.Signature,
+				ConfigGeneration: generation, OccurrenceKey: subject, Subject: subject, ScheduledAt: s.now().UTC(),
+				Prompt: prompt, Repository: trigger.Repository, SelectionName: trigger.SelectionName,
+				Command: command, Task: &task,
+			})
+			if admissionErr != nil {
+				failures = append(failures, fmt.Errorf("%s: %w", issue.Key, admissionErr))
+				continue
+			}
+			if created {
+				admitted++
+			}
+		}
+	}
+	triggerErr := errors.Join(failures...)
+	recordErr := s.store.RecordTriggerAttempt(ctx, trigger.Identity, generation, admitted, triggerErr)
+	nextErr := s.store.SetTriggerNextDue(ctx, trigger.Identity, generation, s.now().UTC().Add(trigger.Every))
+	return errors.Join(triggerErr, recordErr, nextErr)
 }
 
 func (s *Server) processFixedTrigger(ctx context.Context, trigger config.ResolvedTrigger, generation string, firstDue time.Time, pending *time.Time, now time.Time) error {
