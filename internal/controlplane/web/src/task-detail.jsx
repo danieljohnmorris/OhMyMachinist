@@ -73,6 +73,63 @@ export function TaskDetail({
             {error}
           </p>
         )}
+        {job.metadata && (
+          <Card className="space-y-4 p-5" aria-label="Job metadata">
+            <h2 className="text-lg font-semibold">Metadata</h2>
+            <dl className="grid gap-4 text-sm sm:grid-cols-2">
+              {[
+                ["Issue", job.metadata.issue_url],
+                ["Branch", job.metadata.branch],
+                ["Pull request", job.metadata.pr_url],
+                ["Preview", job.metadata.preview_url],
+                ["Review verdict", job.metadata.review_verdict],
+                ["Review summary", job.metadata.review_summary],
+                ["Status", stateLabel(job.state)],
+                ["Created", formatTimestamp(job.created_at)],
+                ["Updated", formatTimestamp(job.updated_at)],
+              ]
+                .filter(([, value]) => value)
+                .map(([label, value]) => (
+                  <div key={label} className="min-w-0">
+                    <dt className="text-xs uppercase tracking-wide text-muted-foreground">{label}</dt>
+                    <dd className="mt-1 break-words">
+                      {value.startsWith("http://") || value.startsWith("https://") ? (
+                        <a className="text-primary underline" href={value} target="_blank" rel="noreferrer">
+                          {value}
+                        </a>
+                      ) : (
+                        value
+                      )}
+                    </dd>
+                  </div>
+                ))}
+            </dl>
+            {job.metadata.screenshots?.length > 0 && (
+              <div>
+                <h3 className="text-sm font-medium">Screenshots</h3>
+                <ul className="mt-3 flex flex-wrap gap-3">
+                  {job.metadata.screenshots.map((screenshot, index) => {
+                    const source = screenshot.artifact_id
+                      ? `/api/v1/artifacts/${encodeURIComponent(screenshot.artifact_id)}/content`
+                      : screenshot.url || screenshot.thumbnail_url;
+                    if (!source) return null;
+                    return (
+                      <li key={index}>
+                        <a className="block border border-border" href={source} target="_blank" rel="noreferrer">
+                          {screenshot.thumbnail_url || screenshot.artifact_id ? (
+                            <img className="h-24 w-auto" src={screenshot.thumbnail_url || source} alt={screenshot.label || "Job screenshot"} />
+                          ) : (
+                            <span className="block p-3 text-sm">{screenshot.label || source}</span>
+                          )}
+                        </a>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            )}
+          </Card>
+        )}
       </header>
       {stages.length > 1 && (
         <ol

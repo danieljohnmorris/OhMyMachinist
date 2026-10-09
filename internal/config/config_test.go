@@ -144,6 +144,27 @@ prompt_file = "plan.md"
 	}
 }
 
+func TestLoadConfigParsesIssueSources(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	writeTestFile(t, path, `[issue_sources]
+label = "factory"
+
+[issue_sources.plane.platform]
+project_id = "00000000-0000-0000-0000-000000000000"
+
+[issue_sources.linear.platform]
+project = "Platform"
+`)
+	definition, err := LoadDefinitions(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if definition.IssueSources.Label != "factory" || definition.IssueSources.Plane["platform"].ProjectID == "" ||
+		definition.IssueSources.Linear["platform"].Project != "Platform" {
+		t.Fatalf("issue sources = %#v", definition.IssueSources)
+	}
+}
+
 func TestLoadConfigRejectsRemovedConfigurationWithMigrationGuidance(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	writeTestFile(t, path, "[pipelines.quality]\nagents=[\"review\"]\n")
