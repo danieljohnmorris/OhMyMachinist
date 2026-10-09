@@ -265,7 +265,7 @@ function RunCard({ job }) {
   const title = jobDisplayTitle(job);
   const run = currentRun(job);
   return <Card className="overflow-hidden"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="block min-w-0 space-y-3 p-4 transition hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50" aria-label={`Open task ${title}`}>
-    <p className="line-clamp-2 text-sm font-medium leading-5">{title}</p>
+    <p className="break-words text-sm font-medium leading-5">{title}</p>
     <p className="text-xs text-muted-foreground">{job.repository} · {friendlyName(run?.command || job.command)}</p>
     <State value={job.state} />
   </a></Card>;
@@ -274,7 +274,7 @@ function RunCard({ job }) {
 function RunRow({ job }) {
   const title=jobDisplayTitle(job);
   const run=currentRun(job);
-  return <article className="border-b border-border last:border-b-0"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="flex items-center justify-between gap-4 px-5 py-4 hover:bg-muted/35" aria-label={`Open task ${title}`}><div className="min-w-0"><p className="truncate text-sm font-medium">{title}</p><p className="mt-1 text-xs text-muted-foreground">{job.repository} · {friendlyName(run?.command || job.command)}</p></div><div className="flex shrink-0 flex-col items-end gap-1"><State value={job.state} /><time className="text-xs text-muted-foreground" dateTime={job.created_at}>{relativeTime(job.created_at)}</time></div></a></article>;
+  return <article className="border-b border-border last:border-b-0"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="flex items-center justify-between gap-4 px-5 py-4 hover:bg-muted/35" aria-label={`Open task ${title}`}><div className="min-w-0"><p className="break-words text-sm font-medium">{title}</p><p className="mt-1 text-xs text-muted-foreground">{job.repository} · {friendlyName(run?.command || job.command)}</p></div><div className="flex shrink-0 flex-col items-end gap-1"><State value={job.state} /><time className="text-xs text-muted-foreground" dateTime={job.created_at}>{relativeTime(job.created_at)}</time></div></a></article>;
 }
 
 function EmptyRuns({ filtered, openComposer }) {
