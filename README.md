@@ -81,6 +81,32 @@ Start with [your first task workflow](docs/task-guide.md): create a task from an
 
 ## Go deeper
 
+<a id="ohmymachinist"></a>
+
+## OhMyMachinist
+
+This fork adds two generic issue sources and delivery metadata:
+
+- **Plane and Linear adapters.** Both can poll a configured label and submit a source-neutral issue. Plane uses `PLANE_URL`, `PLANE_WORKSPACE`, and `PLANE_API_KEY`; Linear uses `LINEAR_API_KEY`. Configure project-to-repository mappings and poll cadence in `config.toml`. HMAC-verified webhook intake is available as a library helper.
+- **Job metadata.** Workflow steps may set `metadata` in their JSON step result. The job page shows optional issue, branch, pull request, preview, review verdict/summary, screenshots, status, and timestamps. Job titles use `KEY: Title`, and job lists expose the full title in a tooltip when clipped.
+- **Generic delivery example.** `examples/factory/delivery.sh` has a dry-run mode and separate code/review stages. It never merges or deploys.
+
+To follow upstream while keeping this fork:
+
+```sh
+git fetch upstream
+git merge upstream/main
+```
+
+Configure sources with placeholder values, then replace only the local values:
+
+```sh
+export PLANE_URL=https://plane.example.com
+export PLANE_WORKSPACE=
+export PLANE_API_KEY=
+export LINEAR_API_KEY=
+```
+
 | Guide | What it covers |
 | --- | --- |
 | [Documentation](docs/README.md) | Choose the right setup and operations guide |

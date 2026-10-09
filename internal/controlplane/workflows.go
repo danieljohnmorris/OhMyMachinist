@@ -153,6 +153,9 @@ func completeWorkflow(ctx context.Context, tx *sql.Tx, job, run string, c protoc
 			if err == nil {
 				state, summary = step.Outcome, step.Summary
 				approvalRequired = step.ApprovalRequired
+				if metadataErr := saveJobMetadata(ctx, tx, job, step.Metadata); metadataErr != nil {
+					return true, metadataErr
+				}
 			}
 		}
 		if err != nil {

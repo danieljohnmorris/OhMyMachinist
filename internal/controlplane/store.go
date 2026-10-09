@@ -46,6 +46,7 @@ type Store struct {
 type Job struct {
 	Task             *protocol.Task    `json:"task,omitempty"`
 	Workflow         *WorkflowProgress `json:"workflow,omitempty"`
+	Metadata         *JobMetadata      `json:"metadata,omitempty"`
 	ID               string            `json:"id"`
 	Prompt           string            `json:"prompt"`
 	Repository       string            `json:"repository"`
@@ -119,6 +120,7 @@ type TriggerAdmission struct {
 	Repository        string
 	SelectionName     string
 	Command           config.ResolvedCommand
+	Task              *protocol.Task
 	GitHubRepository  string
 	GitHubIssueNumber int
 	GitHubIssueTitle  string
@@ -245,7 +247,7 @@ CREATE INDEX IF NOT EXISTS github_trigger_requests_reconciliation ON github_trig
 			return fmt.Errorf("upgrade workflow schema: %w", err)
 		}
 	}
-	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+"PRAGMA user_version=5;")
+	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+jobMetadataSchema+"PRAGMA user_version=5;")
 	return err
 }
 
@@ -519,6 +521,16 @@ WHERE github_trigger_requests.state='pending'`, admission.Identity, admission.Oc
 	now := s.now().UTC().Format(time.RFC3339Nano)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO jobs(id,prompt,repository,command,trigger_identity,trigger_config_signature,trigger_generation_id,occurrence_key,trigger_subject,github_issue_title,fixed_trigger,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'queued',?,?)`, jobID, admission.Prompt, admission.Repository, admission.SelectionName, admission.Identity, admission.ConfigSignature, admission.ConfigGeneration, admission.OccurrenceKey, admission.Subject, admission.GitHubIssueTitle, fixed, now, now); err != nil {
 		return "", false, fmt.Errorf("insert triggered job: %w", err)
+	}
+	if admission.Task != nil {
+		task := *admission.Task
+		raw, err := json.Marshal(task)
+		if err != nil {
+			return "", false, fmt.Errorf("encode triggered task: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO task_inputs(job_id,task) VALUES(?,?)`, jobID, string(raw)); err != nil {
+			return "", false, fmt.Errorf("insert triggered task: %w", err)
+		}
 	}
 	if admission.Family == "github" {
 		if _, err := tx.ExecContext(ctx, `UPDATE github_trigger_requests SET state='admitted',job_id=?,needs_reconciliation=1,updated_at=? WHERE trigger_identity=? AND occurrence_key=?`, jobID, now, admission.Identity, admission.OccurrenceKey); err != nil {
@@ -1202,6 +1214,9 @@ FROM jobs j LEFT JOIN runs r ON r.job_id=j.id LEFT JOIN workers w ON w.instance_
 	}
 	if err := s.loadWorkflowProgress(ctx, jobs); err != nil {
 		return nil, err
+	}
+	if err := loadJobMetadata(ctx, s.db, jobs); err != nil {
+		return nil, fmt.Errorf("read job metadata: %w", err)
 	}
 	return jobs, nil
 }

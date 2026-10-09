@@ -11,5 +11,8 @@
 The [workflow examples](workflows/README.md) compare this prompt-driven style with a
 workflow written as a script.
 
+The [factory delivery example](factory/README.md) shows code, draft PR, adversarial
+review, optional screenshots, and source-issue comment stages without merge or deploy.
+
 The [GitHub comment intake example](github-actions/README.md) turns a new, authorized
 `@machinist` issue comment into a `machinist:requested` label for a managed GitHub trigger.

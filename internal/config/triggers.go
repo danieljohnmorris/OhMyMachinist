@@ -85,8 +85,12 @@ func (c Config) ResolveTriggers() ([]ResolvedTrigger, error) {
 	if err != nil {
 		return nil, err
 	}
-	result := make([]ResolvedTrigger, 0, len(c.Triggers.GitHub)+len(c.Triggers.Interval)+len(c.Triggers.Cron))
+	result := make([]ResolvedTrigger, 0, len(c.Triggers.GitHub)+len(c.Triggers.Issue)+len(c.Triggers.Interval)+len(c.Triggers.Cron))
 	seenLabels := make(map[string]string, len(c.Triggers.GitHub))
+	issueLabel := strings.TrimSpace(c.IssueSources.Label)
+	if issueLabel == "" {
+		issueLabel = "factory"
+	}
 
 	for _, name := range sortedMapKeys(c.Triggers.GitHub) {
 		identity, err := triggerIdentity("github", name)
@@ -155,6 +159,44 @@ func (c Config) ResolveTriggers() ([]ResolvedTrigger, error) {
 		resolved := ResolvedTrigger{
 			Identity: identity, Family: "interval", Name: name, Repository: repository, GitHubRepository: slug,
 			Every: every, SelectionName: selection, Model: strings.TrimSpace(definition.Model), Prompt: prompt, Command: command,
+		}
+		if result, err = appendTrigger(result, resolved); err != nil {
+			return nil, err
+		}
+	}
+
+	for _, name := range sortedMapKeys(c.Triggers.Issue) {
+		identity, err := triggerIdentity("issue", name)
+		if err != nil {
+			return nil, err
+		}
+		definition := c.Triggers.Issue[name]
+		every, err := triggerDuration(identity, "every", definition.Every, minTriggerEvery, maxGitHubEvery)
+		if err != nil {
+			return nil, err
+		}
+		source := strings.TrimSpace(definition.Source)
+		if source != "plane" && source != "linear" {
+			return nil, fmt.Errorf("trigger %q source must be plane or linear", identity)
+		}
+		if _, ok := c.IssueSources.Plane[definition.Repository]; source == "plane" && !ok {
+			return nil, fmt.Errorf("trigger %q references missing issue_sources.plane.%s", identity, definition.Repository)
+		}
+		if _, ok := c.IssueSources.Linear[definition.Repository]; source == "linear" && !ok {
+			return nil, fmt.Errorf("trigger %q references missing issue_sources.linear.%s", identity, definition.Repository)
+		}
+		project := strings.TrimSpace(definition.Project)
+		if source == "plane" {
+			project = c.IssueSources.Plane[definition.Repository].ProjectID
+		}
+		selection, command, err := c.resolveTriggerSelection(identity, definition.TriggerSelection, "")
+		if err != nil {
+			return nil, err
+		}
+		resolved := ResolvedTrigger{
+			Identity: identity, Family: "issue", Name: name, Repository: definition.Repository,
+			Every: every, Label: issueLabel, SourceKind: source, SourceProject: project,
+			SelectionName: selection, Model: strings.TrimSpace(definition.Model), Command: command,
 		}
 		if result, err = appendTrigger(result, resolved); err != nil {
 			return nil, err
