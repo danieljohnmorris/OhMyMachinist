@@ -391,6 +391,44 @@ func TestSubmitQueuesAgentWithConfiguredBearerToken(t *testing.T) {
 	}
 }
 
+func TestSubmitCommandSendsTitleWithPrompt(t *testing.T) {
+	var gotRequest submitJobRequest
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api/v1/catalog":
+			writeTestJSON(response, map[string]any{
+				"commands": []string{"build-pr"}, "repositories": []string{"mobile"},
+			})
+		case "/api/v1/jobs":
+			if err := json.NewDecoder(request.Body).Decode(&gotRequest); err != nil {
+				http.Error(response, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeTestJSON(response, map[string]string{"id": "job_titled"})
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+	workerConfig := writeSubmitWorkerConfig(t, server.URL, "secret")
+
+	var stdout, stderr bytes.Buffer
+	exitCode := Execute(t.Context(), []string{
+		"submit", "--command=build-pr", "--repo=mobile",
+		`--title=OMM-1: Local build step timings and ETAs`,
+		"--prompt=p.md", "--config=" + workerConfig,
+	}, strings.NewReader(""), &stdout, &stderr, "test")
+	if exitCode != 0 || stdout.String() != "job_titled\n" {
+		t.Fatalf("exit code = %d, stdout = %q, stderr = %q", exitCode, stdout.String(), stderr.String())
+	}
+	if gotRequest != (submitJobRequest{
+		Title:  "OMM-1: Local build step timings and ETAs",
+		Prompt: "p.md", Repository: "mobile", Command: "build-pr",
+	}) {
+		t.Fatalf("submission = %#v", gotRequest)
+	}
+}
+
 func TestSubmitUsesCatalogWhenStatusHistoryIsLarge(t *testing.T) {
 	var catalogRequested bool
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {

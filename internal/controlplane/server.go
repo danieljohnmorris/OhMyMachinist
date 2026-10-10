@@ -134,7 +134,7 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 	server := &Server{
 		store: store, definitionPath: definitionPath, triggers: managedTriggers,
 		github: NewGitHubCLI("gh", 30*time.Second), now: time.Now,
-		issueSources: issueSources,
+		issueSources:   issueSources,
 		schedulerEvery: 30 * time.Second, shutdownTimeout: 5 * time.Second,
 		schedulerError:    func(err error) { log.Printf("scheduler: %v", err) },
 		maxConcurrentJobs: maxConcurrentJobs, workerToken: workerToken, csrfToken: csrfToken,
@@ -415,7 +415,7 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 			writeError(response, http.StatusBadRequest, err)
 			return
 		}
-		if input.Prompt != "" && (input.SourceURL != "" || input.Spec != "" || input.Title != "") {
+		if input.Prompt != "" && (input.SourceURL != "" || input.Spec != "") {
 			writeError(response, http.StatusBadRequest, errors.New("use spec instead of prompt for a task"))
 			return
 		}
@@ -441,8 +441,8 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 		writeJSON(response, http.StatusCreated, map[string]string{"id": id})
 		return
 	}
-	if input.Title != "" || input.SourceURL != "" || input.Spec != "" {
-		writeError(response, 400, errors.New("task fields require a workflow"))
+	if input.SourceURL != "" || input.Spec != "" {
+		writeError(response, 400, errors.New("source_url and spec require a workflow"))
 		return
 	}
 	if strings.TrimSpace(input.Command) == "" {
@@ -460,7 +460,7 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 	command.Model = input.Model
-	jobID, err := s.store.CreateJob(request.Context(), input.Prompt, input.Repository, input.Command, command)
+	jobID, err := s.store.CreateJobWithOptions(request.Context(), input.Prompt, input.Repository, input.Command, command, CreateJobOptions{Title: input.Title})
 	if err != nil {
 		writeError(response, http.StatusInternalServerError, err)
 		return

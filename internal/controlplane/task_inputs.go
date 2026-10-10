@@ -23,7 +23,7 @@ func (s *Store) CreateTaskJob(ctx context.Context, task protocol.Task, repositor
 	if err := task.Validate(); err != nil {
 		return "", err
 	}
-	return s.createWorkflowJob(ctx, task.Brief(), repository, name, steps, &task)
+	return s.createWorkflowJob(ctx, task.Brief(), repository, name, steps, &task, task.Title)
 }
 
 // Snapshots both the brief and exact upstream artifact identities before dispatch.
