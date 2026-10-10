@@ -422,7 +422,7 @@ func TestSubmitCommandSendsTitleWithPrompt(t *testing.T) {
 		t.Fatalf("exit code = %d, stdout = %q, stderr = %q", exitCode, stdout.String(), stderr.String())
 	}
 	if gotRequest != (submitJobRequest{
-		Title: "OMM-1: Local build step timings and ETAs",
+		Title:  "OMM-1: Local build step timings and ETAs",
 		Prompt: "p.md", Repository: "mobile", Command: "build-pr",
 	}) {
 		t.Fatalf("submission = %#v", gotRequest)
