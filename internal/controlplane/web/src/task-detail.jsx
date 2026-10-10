@@ -6,6 +6,7 @@ import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { Artifacts, useTaskArtifacts } from "./artifacts.jsx";
 import { taskPresentation } from "./task-presentation.js";
+import { linkifyText } from "./linkify.js";
 import { jobDisplayTitle } from "./runs-board.js";
 import { formatDurationMillis, formatTokenUsage } from "./run-metrics.js";
 import {
@@ -41,7 +42,7 @@ export function TaskDetail({
   const { result, history, stages } = taskPresentation(job);
   const reviewing = job.state === "awaiting_approval";
   return (
-    <div className="mx-auto max-w-[1000px] space-y-7 p-4 sm:p-6 lg:p-8">
+    <div className="mx-auto max-w-[1200px] space-y-7 p-4 sm:p-6 lg:p-8">
       <header className="space-y-4">
         <Button asChild variant="ghost" size="sm" className="-ml-3">
           <a href="#/runs">
@@ -93,13 +94,7 @@ export function TaskDetail({
                   <div key={label} className="min-w-0">
                     <dt className="text-xs uppercase tracking-wide text-muted-foreground">{label}</dt>
                     <dd className="mt-1 break-words">
-                      {value.startsWith("http://") || value.startsWith("https://") ? (
-                        <a className="text-primary underline" href={value} target="_blank" rel="noreferrer">
-                          {value}
-                        </a>
-                      ) : (
-                        value
-                      )}
+                      {linkifyText(value)}
                     </dd>
                   </div>
                 ))}
@@ -175,176 +170,176 @@ export function TaskDetail({
           ))}
         </ol>
       )}
-      <Tabs
-        key={job.id}
-        label="Task sections"
-        items={[
-          {
-            id: "result",
-            label: "Result",
-            content: (
-              <Card
-                className="space-y-5 p-5 sm:p-6"
-                aria-label="Current result"
+      <div
+        className="grid items-start gap-6 lg:grid-cols-[minmax(0,380px)_minmax(0,1fr)]"
+        aria-label="Task sections"
+      >
+        <section aria-label="Instructions" className="lg:order-2">
+          <h2 className="mb-3 text-lg font-semibold">Instructions</h2>
+          <pre className="whitespace-pre-wrap break-words font-sans leading-6">
+            {linkifyText(
+              job.task
+                ? job.task.spec || "Use the linked source for requirements."
+                : job.prompt,
+            )}
+          </pre>
+        </section>
+        <div className="space-y-5 lg:order-1">
+          <Card
+            className="space-y-5 p-5 sm:p-6"
+            aria-label="Current result"
+          >
+            <h2 className="text-lg font-semibold">
+              {resultTitle(job, result)}
+            </h2>
+            {result?.summary && (
+              <p className="whitespace-pre-wrap break-words text-sm leading-6 text-muted-foreground">
+                {linkifyText(result.summary)}
+              </p>
+            )}
+            {result?.error && result.error !== result.summary && (
+              <p
+                role="alert"
+                className="whitespace-pre-wrap break-words text-sm text-danger"
               >
-                <h2 className="text-lg font-semibold">
-                  {resultTitle(job, result)}
-                </h2>
-                {result?.summary && (
-                  <p className="line-clamp-3 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">
-                    {result.summary}
-                  </p>
-                )}
-                {result?.error && result.error !== result.summary && (
-                  <p
-                    role="alert"
-                    className="whitespace-pre-wrap break-words text-sm text-danger"
-                  >
-                    {result.error}
-                  </p>
-                )}
-                {result && job.task && (
-                  <Artifacts
-                    key={result.id}
-                    artifacts={artifacts}
-                    runID={result.id}
-                    csrfToken={csrfToken}
-                  />
-                )}
-                {job.workflow && (
-                  <TaskActions
-                    key={`${job.id}:${latest?.id}:${job.state}`}
-                    job={job}
-                    result={result}
-                    onAction={onWorkflowAction}
-                  />
-                )}
-              </Card>
-            ),
-          },
-          ...(job.task && lastCompleted
-            ? [
-                {
-                  id: "files",
-                  label: "Files",
-                  content: (
-                    <Artifacts
-                      artifacts={artifacts}
-                      runID={lastCompleted.id}
-                      csrfToken={csrfToken}
-                    />
-                  ),
-                },
-              ]
-            : []),
-          ...(history.length
-            ? [
-                {
-                  id: "history",
-                  label: "History",
-                  content: (
-                    <ol className="space-y-4">
-                      {history.map((run) => (
-                        <li
-                          key={run.id}
-                          className="space-y-3 border-l-2 border-border pl-4"
-                        >
-                          <div className="flex flex-wrap items-center justify-between gap-2">
-                            <h3 className="font-medium">
-                              {run.outcome === "changes_requested"
-                                ? "Changes requested"
-                                : friendlyName(run.command)}
-                            </h3>
-                            <State
-                              value={
-                                run.outcome === "complete"
-                                  ? "succeeded"
-                                  : run.outcome || run.state
-                              }
-                            />
-                          </div>
-                          {run.summary && (
-                            <p className="whitespace-pre-wrap leading-6">
-                              {run.summary}
-                            </p>
-                          )}
-                          {run.error && run.error !== run.summary && (
-                            <p className="text-danger">{run.error}</p>
-                          )}
-                          {job.task && (
-                            <Artifacts
-                              artifacts={artifacts}
-                              runID={run.id}
-                              csrfToken={csrfToken}
-                            />
-                          )}
-                          <ExecutionDetails run={run} />
-                        </li>
-                      ))}
-                    </ol>
-                  ),
-                },
-              ]
-            : []),
-          {
-            id: "instructions",
-            label: "Instructions",
-            content: (
-              <pre className="whitespace-pre-wrap break-words font-sans leading-6">
-                {job.task
-                  ? job.task.spec || "Use the linked source for requirements."
-                  : job.prompt}
-              </pre>
-            ),
-          },
-          {
-            id: "details",
-            label: "Details",
-            content: (
-              <div className="space-y-6 text-sm">
-                {result?.revision && (
-                  <section>
-                    <h2 className="mb-2 font-medium">Requested changes</h2>
-                    <p className="whitespace-pre-wrap">
-                      {result.revision.feedback}
-                    </p>
-                  </section>
-                )}
-                {result?.summary && (
-                  <section>
-                    <h2 className="mb-2 font-medium">Full summary</h2>
-                    <p className="whitespace-pre-wrap leading-6">
-                      {result.summary}
-                    </p>
-                  </section>
-                )}
-                {result && <ExecutionDetails run={result} />}
-                <section className="border-t border-border pt-4">
-                  <dl className="my-4 grid gap-3 sm:grid-cols-3">
-                    <RunMetric label="Task ID" value={job.id} />
-                    <RunMetric label="Repository" value={job.repository} />
-                    <RunMetric
-                      label="Created"
-                      value={formatTimestamp(job.created_at)}
-                    />
-                    <RunMetric
-                      label="Updated"
-                      value={formatTimestamp(job.updated_at)}
-                    />
-                  </dl>
-                  <Button
-                    variant="outline"
-                    disabled={!terminal || deleting}
-                    onClick={() => onDelete(job)}
-                  >
-                    {deleting ? "Deleting…" : "Delete task"}
-                  </Button>
-                </section>
-              </div>
-            ),
-          },
-        ]}
-      />
+                {linkifyText(result.error)}
+              </p>
+            )}
+            {result && job.task && (
+              <Artifacts
+                key={result.id}
+                artifacts={artifacts}
+                runID={result.id}
+                csrfToken={csrfToken}
+              />
+            )}
+            {job.workflow && (
+              <TaskActions
+                key={`${job.id}:${latest?.id}:${job.state}`}
+                job={job}
+                result={result}
+                onAction={onWorkflowAction}
+              />
+            )}
+          </Card>
+          <div
+            className="space-y-6 rounded-sm border border-border bg-surface p-5 text-sm sm:p-6"
+            aria-label="Task details"
+          >
+            <h2 className="text-lg font-semibold">Details</h2>
+            {result?.revision && (
+              <section>
+                <h2 className="mb-2 font-medium">Requested changes</h2>
+                <p className="whitespace-pre-wrap break-words">
+                  {linkifyText(result.revision.feedback)}
+                </p>
+              </section>
+            )}
+            {result?.summary && (
+              <section>
+                <h2 className="mb-2 font-medium">Full summary</h2>
+                <p className="whitespace-pre-wrap break-words leading-6">
+                  {linkifyText(result.summary)}
+                </p>
+              </section>
+            )}
+            {result && <ExecutionDetails run={result} />}
+            <section className="border-t border-border pt-4">
+              <dl className="my-4 grid gap-3 sm:grid-cols-2">
+                <RunMetric label="Task ID" value={job.id} />
+                <RunMetric label="Repository" value={job.repository} />
+                <RunMetric
+                  label="Created"
+                  value={formatTimestamp(job.created_at)}
+                />
+                <RunMetric
+                  label="Updated"
+                  value={formatTimestamp(job.updated_at)}
+                />
+              </dl>
+              <Button
+                variant="outline"
+                disabled={!terminal || deleting}
+                onClick={() => onDelete(job)}
+              >
+                {deleting ? "Deleting…" : "Delete task"}
+              </Button>
+            </section>
+          </div>
+        </div>
+      </div>
+      {(job.task && lastCompleted) || history.length > 0 ? (
+        <Tabs
+          key={job.id}
+          label="Task artifacts and history"
+          items={[
+            ...(job.task && lastCompleted
+              ? [
+                  {
+                    id: "files",
+                    label: "Files",
+                    content: (
+                      <Artifacts
+                        artifacts={artifacts}
+                        runID={lastCompleted.id}
+                        csrfToken={csrfToken}
+                      />
+                    ),
+                  },
+                ]
+              : []),
+            ...(history.length
+              ? [
+                  {
+                    id: "history",
+                    label: "History",
+                    content: (
+                      <ol className="space-y-4">
+                        {history.map((run) => (
+                          <li
+                            key={run.id}
+                            className="space-y-3 border-l-2 border-border pl-4"
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <h3 className="font-medium">
+                                {run.outcome === "changes_requested"
+                                  ? "Changes requested"
+                                  : friendlyName(run.command)}
+                              </h3>
+                              <State
+                                value={
+                                  run.outcome === "complete"
+                                    ? "succeeded"
+                                    : run.outcome || run.state
+                                }
+                              />
+                            </div>
+                            {run.summary && (
+                              <p className="whitespace-pre-wrap break-words leading-6">
+                                {linkifyText(run.summary)}
+                              </p>
+                            )}
+                            {run.error && run.error !== run.summary && (
+                              <p className="text-danger">{linkifyText(run.error)}</p>
+                            )}
+                            {job.task && (
+                              <Artifacts
+                                artifacts={artifacts}
+                                runID={run.id}
+                                csrfToken={csrfToken}
+                              />
+                            )}
+                            <ExecutionDetails run={run} />
+                          </li>
+                        ))}
+                      </ol>
+                    ),
+                  },
+                ]
+              : []),
+          ]}
+        />
+      ) : null}
     </div>
   );
 }
