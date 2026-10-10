@@ -35,10 +35,12 @@ func TestIssueTriggerCreatesSubjectDeduplicatedJobs(t *testing.T) {
 	}}
 	trigger := config.ResolvedTrigger{
 		Identity: "issue/platform", Family: "issue", Name: "platform", Repository: "machinist",
-		ConfigSignature: "signature", Label: "factory", SourceKind: "linear", SourceProject: "Platform",
+		Label: "factory", SourceKind: "linear", SourceProject: "Platform",
 		Command: testAgent("build", "{{machinist.prompt}}"),
 	}
-	if err := store.SyncTriggers(t.Context(), []config.ResolvedTrigger{trigger}); err != nil {
+	trigger.Signature = "signature"
+	definition := TriggerDefinition{Identity: trigger.Identity, Family: trigger.Family, ConfigSignature: trigger.Signature}
+	if err := store.SyncTriggers(t.Context(), []TriggerDefinition{definition}); err != nil {
 		t.Fatal(err)
 	}
 	if err := server.processIssueTrigger(t.Context(), trigger, mustTriggerGeneration(t, store, trigger.Identity)); err != nil {
@@ -48,7 +50,8 @@ func TestIssueTriggerCreatesSubjectDeduplicatedJobs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Jobs) != 1 || snapshot.Jobs[0].Task == nil || snapshot.Jobs[0].Task.Title != "ABC-12: Add archive page" {
+	if len(snapshot.Jobs) != 1 || snapshot.Jobs[0].Task == nil || snapshot.Jobs[0].Task.Title != "ABC-12: Add archive page" ||
+		snapshot.Jobs[0].Title != "ABC-12: Add archive page" {
 		t.Fatalf("snapshot = %#v", snapshot)
 	}
 	if err := server.processIssueTrigger(t.Context(), trigger, mustTriggerGeneration(t, store, trigger.Identity)); err != nil {

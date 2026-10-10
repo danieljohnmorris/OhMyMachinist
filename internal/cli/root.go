@@ -160,7 +160,7 @@ func newSubmitCommand(options *commandOptions) *cobra.Command {
 		Short: "Queue work for a managed Machinist Worker",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			if title != "" || sourceURL != "" || spec != "" {
+			if sourceURL != "" || spec != "" {
 				if workflowName == "" || prompt != "" {
 					return errors.New("task fields require --workflow and cannot be combined with --prompt")
 				}
@@ -169,7 +169,7 @@ func newSubmitCommand(options *commandOptions) *cobra.Command {
 			if strings.TrimSpace(prompt) == "" {
 				return errors.New("provide --spec or --source-url for a workflow, or --prompt for a command")
 			}
-			return submitSelection(command.Context(), options, commandName, prompt, model, repository, workflowName)
+			return submitSelection(command.Context(), options, commandName, prompt, model, repository, title, workflowName)
 		},
 	}
 	submit.Flags().StringVar(&workflowName, "workflow", "", "workflow name from the control plane")
@@ -186,12 +186,12 @@ func newSubmitCommand(options *commandOptions) *cobra.Command {
 	return submit
 }
 
-func submitSelection(ctx context.Context, options *commandOptions, commandName, prompt, model, repository string, workflows ...string) error {
+func submitSelection(ctx context.Context, options *commandOptions, commandName, prompt, model, repository, title string, workflows ...string) error {
 	workflow := ""
 	if len(workflows) > 0 {
 		workflow = workflows[0]
 	}
-	return submitRequestToServer(ctx, options, submitJobRequest{Workflow: workflow, Prompt: prompt, Repository: repository, Command: commandName, Model: model})
+	return submitRequestToServer(ctx, options, submitJobRequest{Workflow: workflow, Prompt: prompt, Repository: repository, Command: commandName, Model: model, Title: title})
 }
 func submitRequestToServer(ctx context.Context, options *commandOptions, request submitJobRequest) error {
 	repository, workflow, commandName := request.Repository, request.Workflow, request.Command

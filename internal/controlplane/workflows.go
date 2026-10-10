@@ -53,7 +53,7 @@ type WorkflowProgress struct {
 	CurrentStep int      `json:"current_step"`
 }
 
-func (s *Store) createWorkflowJob(ctx context.Context, prompt, repository, name string, steps []config.WorkflowStep, task *protocol.Task) (string, error) {
+func (s *Store) createWorkflowJob(ctx context.Context, prompt, repository, name string, steps []config.WorkflowStep, task *protocol.Task, title string) (string, error) {
 	if len(steps) == 0 {
 		return "", errors.New("workflow requires steps")
 	}
@@ -71,7 +71,7 @@ func (s *Store) createWorkflowJob(ctx context.Context, prompt, repository, name 
 	}
 	defer tx.Rollback()
 	now := s.now().UTC().Format(time.RFC3339Nano)
-	if _, err = tx.ExecContext(ctx, `INSERT INTO jobs(id,prompt,repository,command,state,created_at,updated_at) VALUES(?,?,?,?,'queued',?,?)`, id, prompt, repository, name, now, now); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO jobs(id,title,prompt,repository,command,state,created_at,updated_at) VALUES(?,?,?,?,?,'queued',?,?)`, id, title, prompt, repository, name, now, now); err != nil {
 		return "", err
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO workflow_jobs(job_id,name,plan) VALUES(?,?,?)`, id, name, string(plan)); err != nil {

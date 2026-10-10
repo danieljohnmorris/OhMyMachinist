@@ -48,6 +48,7 @@ type Job struct {
 	Workflow         *WorkflowProgress `json:"workflow,omitempty"`
 	Metadata         *JobMetadata      `json:"metadata,omitempty"`
 	ID               string            `json:"id"`
+	Title            string            `json:"title,omitempty"`
 	Prompt           string            `json:"prompt"`
 	Repository       string            `json:"repository"`
 	GitHubIssueTitle string            `json:"github_issue_title,omitempty"`
@@ -114,6 +115,7 @@ type TriggerAdmission struct {
 	ConfigGeneration  string
 	OccurrenceKey     string
 	Subject           string
+	Title             string
 	ScheduledAt       time.Time
 	NextDueAt         time.Time
 	Prompt            string
@@ -164,6 +166,10 @@ type RunOutput struct {
 	Events string
 }
 
+type CreateJobOptions struct {
+	Title string
+}
+
 func OpenStore(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create database directory: %w", err)
@@ -193,7 +199,7 @@ func OpenStore(path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) initialize(ctx context.Context) error {
-	const schemaVersion = 5
+	const schemaVersion = 6
 	var version int
 	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		return fmt.Errorf("read database schema version: %w", err)
@@ -218,6 +224,7 @@ DROP TABLE IF EXISTS runs; DROP TABLE IF EXISTS jobs; PRAGMA foreign_keys=ON;`);
 PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
 CREATE TABLE IF NOT EXISTS jobs (
  id TEXT PRIMARY KEY, prompt TEXT NOT NULL, repository TEXT NOT NULL, command TEXT NOT NULL,
+ title TEXT NOT NULL DEFAULT '',
  trigger_identity TEXT NOT NULL DEFAULT '', trigger_config_signature TEXT NOT NULL DEFAULT '',
  trigger_generation_id TEXT NOT NULL DEFAULT '', occurrence_key TEXT NOT NULL DEFAULT '',
  trigger_subject TEXT NOT NULL DEFAULT '', github_issue_title TEXT NOT NULL DEFAULT '',
@@ -247,7 +254,24 @@ CREATE INDEX IF NOT EXISTS github_trigger_requests_reconciliation ON github_trig
 			return fmt.Errorf("upgrade workflow schema: %w", err)
 		}
 	}
-	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+jobMetadataSchema+"PRAGMA user_version=5;")
+	if version < 6 {
+		if err := s.addJobTitle(ctx); err != nil {
+			return fmt.Errorf("upgrade database schema to version 6: %w", err)
+		}
+	}
+	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+jobMetadataSchema+"PRAGMA user_version=6;")
+	return err
+}
+
+func (s *Store) addJobTitle(ctx context.Context) error {
+	var columns int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name='title'`).Scan(&columns); err != nil {
+		return err
+	}
+	if columns > 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN title TEXT NOT NULL DEFAULT ''`)
 	return err
 }
 
@@ -306,6 +330,10 @@ func (s *Store) drainScheduledJobs(ctx context.Context, tx *sql.Tx) error {
 }
 
 func (s *Store) CreateJob(ctx context.Context, prompt, repository, name string, command config.ResolvedCommand) (string, error) {
+	return s.CreateJobWithOptions(ctx, prompt, repository, name, command, CreateJobOptions{})
+}
+
+func (s *Store) CreateJobWithOptions(ctx context.Context, prompt, repository, name string, command config.ResolvedCommand, options CreateJobOptions) (string, error) {
 	if command.Name == "" {
 		return "", errors.New("job must contain one command")
 	}
@@ -319,7 +347,7 @@ func (s *Store) CreateJob(ctx context.Context, prompt, repository, name string, 
 		return "", err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO jobs(id,prompt,repository,command,state,created_at,updated_at) VALUES(?,?,?,?,'queued',?,?)`, jobID, prompt, repository, name, now, now); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO jobs(id,title,prompt,repository,command,state,created_at,updated_at) VALUES(?,?,?,?,?,'queued',?,?)`, jobID, options.Title, prompt, repository, name, now, now); err != nil {
 		return "", fmt.Errorf("insert job: %w", err)
 	}
 	runID, err := randomID("run", 12)
@@ -521,6 +549,9 @@ WHERE github_trigger_requests.state='pending'`, admission.Identity, admission.Oc
 	now := s.now().UTC().Format(time.RFC3339Nano)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO jobs(id,prompt,repository,command,trigger_identity,trigger_config_signature,trigger_generation_id,occurrence_key,trigger_subject,github_issue_title,fixed_trigger,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'queued',?,?)`, jobID, admission.Prompt, admission.Repository, admission.SelectionName, admission.Identity, admission.ConfigSignature, admission.ConfigGeneration, admission.OccurrenceKey, admission.Subject, admission.GitHubIssueTitle, fixed, now, now); err != nil {
 		return "", false, fmt.Errorf("insert triggered job: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET title=? WHERE id=?`, admission.Title, jobID); err != nil {
+		return "", false, fmt.Errorf("insert triggered job title: %w", err)
 	}
 	if admission.Task != nil {
 		task := *admission.Task
@@ -1173,7 +1204,7 @@ func (s *Store) RunOutput(ctx context.Context, runID string) (RunOutput, error) 
 }
 
 func (s *Store) listJobs(ctx context.Context) ([]Job, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT j.id,j.prompt,j.repository,j.github_issue_title,j.command,j.trigger_identity,j.occurrence_key,j.trigger_subject,j.state,j.created_at,j.updated_at,
+	rows, err := s.db.QueryContext(ctx, `SELECT j.id,j.title,j.prompt,j.repository,j.github_issue_title,j.command,j.trigger_identity,j.occurrence_key,j.trigger_subject,j.state,j.created_at,j.updated_at,
 COALESCE(r.id,''),COALESCE(r.command,''),COALESCE(r.executor,''),COALESCE(r.model,''),COALESCE(r.state,''),COALESCE(NULLIF(r.worker_name,''),w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,''),r.duration_millis,r.token_usage,a.step,COALESCE(a.outcome,''),COALESCE(NULLIF(a.summary,''),CASE WHEN json_valid(r.result) THEN json_extract(r.result,'$.final_message') END,'')
 FROM jobs j LEFT JOIN runs r ON r.job_id=j.id LEFT JOIN workers w ON w.instance_id=r.worker_instance LEFT JOIN workflow_attempts a ON a.run_id=r.id ORDER BY j.created_at DESC,j.id,r.rowid`)
 	if err != nil {
@@ -1185,7 +1216,7 @@ FROM jobs j LEFT JOIN runs r ON r.job_id=j.id LEFT JOIN workers w ON w.instance_
 		job := Job{Runs: []Run{}}
 		var run Run
 		var created, updated, started, completed string
-		if err := rows.Scan(&job.ID, &job.Prompt, &job.Repository, &job.GitHubIssueTitle, &job.Command, &job.TriggerID, &job.OccurrenceKey, &job.TriggerSubject, &job.State, &created, &updated,
+		if err := rows.Scan(&job.ID, &job.Title, &job.Prompt, &job.Repository, &job.GitHubIssueTitle, &job.Command, &job.TriggerID, &job.OccurrenceKey, &job.TriggerSubject, &job.State, &created, &updated,
 			&run.ID, &run.Command, &run.Executor, &run.Model, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &started, &completed, &run.DurationMillis, &run.TokenUsage, &run.Step, &run.Outcome, &run.Summary); err != nil {
 			return nil, err
 		}
