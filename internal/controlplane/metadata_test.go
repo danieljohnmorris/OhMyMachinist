@@ -45,3 +45,32 @@ func TestWorkflowStepMetadataIsStoredOnJob(t *testing.T) {
 		t.Fatalf("metadata = %#v", metadata)
 	}
 }
+
+func TestCreateTaskJobStoresExplicitAndInferredProjects(t *testing.T) {
+	store := openTestStore(t, t.TempDir()+"/db")
+	steps := []config.WorkflowStep{{Command: testAgent("build", "requirements")}}
+	explicitID, err := store.CreateTaskJob(t.Context(), protocol.Task{Title: "Fix thing", Spec: "requirements"}, "machinist", "deliver", "OMM", steps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inferredID, err := store.CreateTaskJob(t.Context(), protocol.Task{Title: "BLOG-2: Post", Spec: "requirements"}, "machinist", "deliver", "", steps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateTaskJob(t.Context(), protocol.Task{Title: "Bad thing", Spec: "requirements"}, "machinist", "deliver", "bad-key", steps); err == nil {
+		t.Fatal("invalid project was accepted")
+	}
+	snapshot, err := store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects := map[string]string{}
+	for _, job := range snapshot.Jobs {
+		if job.Metadata != nil && job.Metadata.Project != "" {
+			projects[job.ID] = job.Metadata.Project
+		}
+	}
+	if projects[explicitID] != "OMM" || projects[inferredID] != "BLOG" {
+		t.Fatalf("projects = %#v, explicit = %s, inferred = %s", projects, explicitID, inferredID)
+	}
+}

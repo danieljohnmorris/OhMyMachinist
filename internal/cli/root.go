@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -147,6 +148,7 @@ type submitJobRequest struct {
 	Repository string `json:"repository"`
 	Command    string `json:"command"`
 	Model      string `json:"model,omitempty"`
+	Project    string `json:"project,omitempty"`
 }
 
 type submitJobResponse struct {
@@ -154,22 +156,25 @@ type submitJobResponse struct {
 }
 
 func newSubmitCommand(options *commandOptions) *cobra.Command {
-	var commandName, workflowName, prompt, model, repository, title, sourceURL, spec string
+	var commandName, workflowName, prompt, model, repository, title, sourceURL, spec, project string
 	submit := &cobra.Command{
 		Use:   "submit",
 		Short: "Queue work for a managed Machinist Worker",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			if sourceURL != "" || spec != "" {
+			if err := validateProject(project); err != nil {
+				return err
+			}
+			if sourceURL != "" || spec != "" || (title != "" && workflowName != "") {
 				if workflowName == "" || prompt != "" {
 					return errors.New("task fields require --workflow and cannot be combined with --prompt")
 				}
-				return submitRequestToServer(command.Context(), options, submitJobRequest{Workflow: workflowName, Repository: repository, Model: model, Title: title, SourceURL: sourceURL, Spec: spec})
+				return submitRequestToServer(command.Context(), options, submitJobRequest{Workflow: workflowName, Repository: repository, Model: model, Project: project, Title: title, SourceURL: sourceURL, Spec: spec})
 			}
 			if strings.TrimSpace(prompt) == "" {
 				return errors.New("provide --spec or --source-url for a workflow, or --prompt for a command")
 			}
-			return submitSelection(command.Context(), options, commandName, prompt, model, repository, title, workflowName)
+			return submitSelection(command.Context(), options, commandName, prompt, model, repository, title, project, workflowName)
 		},
 	}
 	submit.Flags().StringVar(&workflowName, "workflow", "", "workflow name from the control plane")
@@ -182,16 +187,26 @@ func newSubmitCommand(options *commandOptions) *cobra.Command {
 	submit.Flags().StringVar(&title, "title", "", "task title")
 	submit.Flags().StringVar(&sourceURL, "source-url", "", "original issue or task URL")
 	submit.Flags().StringVar(&spec, "spec", "", "task requirements")
+	submit.Flags().StringVar(&project, "project", "", "project key for the board (uppercase [A-Z][A-Z0-9]{1,9})")
 	_ = submit.MarkFlagRequired("repo")
 	return submit
 }
 
-func submitSelection(ctx context.Context, options *commandOptions, commandName, prompt, model, repository, title string, workflows ...string) error {
+func validateProject(project string) error {
+	if project == "" || projectKeyPattern.MatchString(project) {
+		return nil
+	}
+	return fmt.Errorf("project must match [A-Z][A-Z0-9]{1,9}; got %q", project)
+}
+
+var projectKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,9}$`)
+
+func submitSelection(ctx context.Context, options *commandOptions, commandName, prompt, model, repository, title, project string, workflows ...string) error {
 	workflow := ""
 	if len(workflows) > 0 {
 		workflow = workflows[0]
 	}
-	return submitRequestToServer(ctx, options, submitJobRequest{Workflow: workflow, Prompt: prompt, Repository: repository, Command: commandName, Model: model, Title: title})
+	return submitRequestToServer(ctx, options, submitJobRequest{Workflow: workflow, Prompt: prompt, Repository: repository, Command: commandName, Model: model, Title: title, Project: project})
 }
 func submitRequestToServer(ctx context.Context, options *commandOptions, request submitJobRequest) error {
 	repository, workflow, commandName := request.Repository, request.Workflow, request.Command

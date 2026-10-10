@@ -53,7 +53,7 @@ type WorkflowProgress struct {
 	CurrentStep int      `json:"current_step"`
 }
 
-func (s *Store) createWorkflowJob(ctx context.Context, prompt, repository, name string, steps []config.WorkflowStep, task *protocol.Task, title string) (string, error) {
+func (s *Store) createWorkflowJob(ctx context.Context, prompt, repository, name, project string, steps []config.WorkflowStep, task *protocol.Task, title string) (string, error) {
 	if len(steps) == 0 {
 		return "", errors.New("workflow requires steps")
 	}
@@ -76,6 +76,11 @@ func (s *Store) createWorkflowJob(ctx context.Context, prompt, repository, name 
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO workflow_jobs(job_id,name,plan) VALUES(?,?,?)`, id, name, string(plan)); err != nil {
 		return "", err
+	}
+	if project != "" {
+		if err = saveJobMetadata(ctx, tx, id, map[string]any{"project": project}); err != nil {
+			return "", err
+		}
 	}
 	if task != nil {
 		raw, _ := json.Marshal(task)

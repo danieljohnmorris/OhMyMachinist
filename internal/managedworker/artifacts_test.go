@@ -101,7 +101,7 @@ printf '{"outcome":"complete","summary":"Built"}' > "$MACHINIST_STEP_RESULT_PATH
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := store.CreateTaskJob(t.Context(), protocol.Task{Title: "Artifact handoff", Spec: "requirements with literal {{stage.output_dir}}"}, "repo", "deliver", steps)
+	id, err := store.CreateTaskJob(t.Context(), protocol.Task{Title: "Artifact handoff", Spec: "requirements with literal {{stage.output_dir}}"}, "repo", "deliver", "", steps)
 	if err != nil {
 		t.Fatal(err)
 	}

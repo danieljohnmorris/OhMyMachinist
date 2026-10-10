@@ -13,6 +13,7 @@ import { PageHeading } from "@/components/ui/page-heading";
 import { cn } from "@/lib/utils";
 import { routeFromHash } from "@/routes";
 import { boardColumns, currentRun, filterJobs, groupJobsByBoardColumn, jobCounts, jobDisplayTitle } from "@/runs-board";
+import { groupJobsByProject } from "@/project";
 import { createStatusLoader } from "@/status-loader";
 import { TriggersPage } from "@/triggers";
 import "./styles.css";
@@ -35,6 +36,7 @@ function App() {
   const [composerOpen, setComposerOpen] = useState(false);
   const [filter, setFilter] = useState("all");
   const [runsView, setRunsView] = useState("board");
+  const [boardLayout, setBoardLayout] = useState(() => localStorage.getItem("machinist-board-layout") === "projects" ? "projects" : "all");
   const [dark, setDark] = useState(() => localStorage.getItem("machinist-theme") !== "light");
   const [route, setRoute] = useState(() => routeFromHash(window.location.hash));
   const view = route.view;
@@ -65,6 +67,10 @@ function App() {
     document.documentElement.classList.toggle("dark", dark);
     localStorage.setItem("machinist-theme", dark ? "dark" : "light");
   }, [dark]);
+
+  useEffect(() => {
+    localStorage.setItem("machinist-board-layout", boardLayout);
+  }, [boardLayout]);
 
   useEffect(() => {
     const updateView = () => {
@@ -210,10 +216,14 @@ function App() {
                   <Button variant="ghost" size="sm" className={cn("h-7 border-transparent px-2.5 text-xs!", runsView === "board" && "bg-surface text-foreground shadow-xs")} aria-pressed={runsView === "board"} onClick={() => setRunsView("board")}><LayoutDashboard className="size-3.5" />Board</Button>
                   <Button variant="ghost" size="sm" className={cn("h-7 border-transparent px-2.5 text-xs!", runsView === "table" && "bg-surface text-foreground shadow-xs")} aria-pressed={runsView === "table"} onClick={() => setRunsView("table")}><Table2 className="size-3.5" />List</Button>
                 </div>
+                <div className="inline-flex rounded-lg bg-muted/60 p-1" role="group" aria-label="Board layout">
+                  <Button variant="ghost" size="sm" className={cn("h-7 border-transparent px-2.5 text-xs!", boardLayout === "all" && "bg-surface text-foreground shadow-xs")} aria-pressed={boardLayout === "all"} onClick={() => setBoardLayout("all")}>All</Button>
+                  <Button variant="ghost" size="sm" className={cn("h-7 border-transparent px-2.5 text-xs!", boardLayout === "projects" && "bg-surface text-foreground shadow-xs")} aria-pressed={boardLayout === "projects"} onClick={() => setBoardLayout("projects")}>By project</Button>
+                </div>
               </div>
             </div>
 
-            {runsView === "board" ? <RunBoard jobs={visibleJobs} /> : <Card className="overflow-hidden">
+            {runsView === "board" ? (boardLayout === "projects" ? <ProjectRunBoard jobs={visibleJobs} /> : <RunBoard jobs={visibleJobs} />) : <Card className="overflow-hidden">
               {visibleJobs.length ? visibleJobs.map((job) => <RunRow key={job.id} job={job} />) : <EmptyRuns filtered={filter !== "all"} openComposer={() => setComposerOpen(true)} />}
             </Card>}
           </section>
@@ -249,16 +259,38 @@ function RunComposer({ title,setTitle,sourceURL,setSourceURL,choices,repositorie
 function RunBoard({ jobs }) {
   const groupedJobs = groupJobsByBoardColumn(jobs);
   return <div className="grid min-w-0 gap-4 md:grid-cols-2 xl:grid-cols-4">
-    {boardColumns.map((column) => <section key={column.id} className="run-column min-w-0 border border-border bg-muted/20" aria-labelledby={`board-${column.id}`}>
-      <header className="flex items-center justify-between gap-3 border-b border-border px-3 py-2.5">
-        <div className="min-w-0"><h2 id={`board-${column.id}`} className="text-sm font-semibold">{column.title}</h2><p className="break-words text-xs text-muted-foreground">{column.description}</p></div>
-        <Badge className="shrink-0 border-border bg-surface text-muted-foreground" aria-label={`${groupedJobs[column.id].length} visible ${column.title.toLowerCase()} runs`}>{groupedJobs[column.id].length}</Badge>
-      </header>
-      <div className="grid min-w-0 gap-2 p-2">
-        {groupedJobs[column.id].length ? groupedJobs[column.id].map((job) => <RunCard key={job.id} job={job} />) : <p className="px-2 py-8 text-center text-xs text-muted-foreground">No runs</p>}
-      </div>
-    </section>)}
+    {boardColumns.map((column) => <RunColumn key={column.id} column={column} jobs={groupedJobs[column.id]} idPrefix="board" />)}
   </div>;
+}
+
+function ProjectRunBoard({ jobs }) {
+  const projectGroups = groupJobsByProject(jobs);
+  return <div className="grid min-w-0 gap-6">
+    {projectGroups.map(([project, projectJobs]) => {
+      const groupedJobs = groupJobsByBoardColumn(projectJobs);
+      return <section key={project} className="min-w-0" aria-labelledby={`project-${project}`}>
+        <header className="mb-2 flex items-center justify-between gap-3">
+          <h2 id={`project-${project}`} className="text-base font-semibold">{project}</h2>
+          <Badge className="shrink-0 border-border bg-surface text-muted-foreground" aria-label={`${projectJobs.length} visible ${project} runs`}>{projectJobs.length}</Badge>
+        </header>
+        <div className="grid min-w-0 gap-4 md:grid-cols-2 xl:grid-cols-4">
+          {boardColumns.map((column) => <RunColumn key={column.id} column={column} jobs={groupedJobs[column.id]} idPrefix={`project-${project}`} />)}
+        </div>
+      </section>;
+    })}
+  </div>;
+}
+
+function RunColumn({ column, jobs, idPrefix }) {
+  return <section className="run-column min-w-0 border border-border bg-muted/20" aria-labelledby={`${idPrefix}-${column.id}`}>
+    <header className="flex items-center justify-between gap-3 border-b border-border px-3 py-2.5">
+      <div className="min-w-0"><h2 id={`${idPrefix}-${column.id}`} className="text-sm font-semibold">{column.title}</h2><p className="break-words text-xs text-muted-foreground">{column.description}</p></div>
+      <Badge className="shrink-0 border-border bg-surface text-muted-foreground" aria-label={`${jobs.length} visible ${column.title.toLowerCase()} runs`}>{jobs.length}</Badge>
+    </header>
+    <div className="grid min-w-0 gap-2 p-2">
+      {jobs.length ? jobs.map((job) => <RunCard key={job.id} job={job} />) : <p className="px-2 py-8 text-center text-xs text-muted-foreground">No runs</p>}
+    </div>
+  </section>;
 }
 
 function RunCard({ job }) {
