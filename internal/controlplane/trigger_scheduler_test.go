@@ -50,7 +50,8 @@ func TestIssueTriggerCreatesSubjectDeduplicatedJobs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Jobs) != 1 || snapshot.Jobs[0].Task == nil || snapshot.Jobs[0].Task.Title != "ABC-12: Add archive page" {
+	if len(snapshot.Jobs) != 1 || snapshot.Jobs[0].Task == nil || snapshot.Jobs[0].Task.Title != "ABC-12: Add archive page" ||
+		snapshot.Jobs[0].Title != "ABC-12: Add archive page" {
 		t.Fatalf("snapshot = %#v", snapshot)
 	}
 	if err := server.processIssueTrigger(t.Context(), trigger, mustTriggerGeneration(t, store, trigger.Identity)); err != nil {

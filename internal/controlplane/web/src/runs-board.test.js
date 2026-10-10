@@ -40,3 +40,13 @@ test("GitHub issue titles are preferred over prompts and hashes", () => {
   assert.equal(githubIssueReference(job), "#7");
   assert.equal(jobDisplayTitle({ id: "job_12345678", prompt: "Run an audit" }), "Run an audit");
 });
+
+test("stored job titles are preferred over task titles and coder prompts", () => {
+  const job = {
+    id: "job_12345678",
+    title: "OMM-1: Local build step timings and ETAs",
+    task: { title: "Wrong task title", spec: "You are the CODER in a spec-driven software factory." },
+    prompt: "You are the CODER in a spec-driven software factory.",
+  };
+  assert.equal(jobDisplayTitle(job), "OMM-1: Local build step timings and ETAs");
+});

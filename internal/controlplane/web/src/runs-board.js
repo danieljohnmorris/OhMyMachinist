@@ -50,8 +50,9 @@ export function currentRun(job) {
 }
 
 export function jobDisplayTitle(job) {
+  const storedTitle = typeof job.title === "string" ? job.title.trim() : "";
   const title = typeof job.github_issue_title === "string" ? job.github_issue_title.trim() : "";
-  return job.task?.title || title || job.task?.spec || job.task?.source_url || job.prompt || job.id;
+  return storedTitle || job.task?.title || title || job.task?.spec || job.task?.source_url || job.prompt || job.id;
 }
 
 export function githubIssueReference(job) {

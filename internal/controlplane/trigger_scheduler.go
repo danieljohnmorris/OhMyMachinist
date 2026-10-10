@@ -71,7 +71,8 @@ func (s *Server) processIssueTrigger(ctx context.Context, trigger config.Resolve
 			if !slices.ContainsFunc(issue.Labels, func(label string) bool { return strings.EqualFold(label, trigger.Label) }) {
 				continue
 			}
-			task := protocol.Task{Title: issues.Title(issue.Key, issue.Title), SourceURL: issue.URL, Spec: issue.Description}
+			title := issues.Title(issue.Key, issue.Title)
+			task := protocol.Task{Title: title, SourceURL: issue.URL, Spec: issue.Description}
 			if err := task.Validate(); err != nil {
 				failures = append(failures, err)
 				continue
@@ -92,7 +93,7 @@ func (s *Server) processIssueTrigger(ctx context.Context, trigger config.Resolve
 			}
 			_, created, admissionErr := s.store.CreateTriggeredJob(ctx, TriggerAdmission{
 				Identity: trigger.Identity, Family: trigger.Family, ConfigSignature: trigger.Signature,
-				ConfigGeneration: generation, OccurrenceKey: subject, Subject: subject, ScheduledAt: s.now().UTC(),
+				ConfigGeneration: generation, OccurrenceKey: subject, Subject: subject, Title: title, ScheduledAt: s.now().UTC(),
 				Prompt: prompt, Repository: trigger.Repository, SelectionName: trigger.SelectionName,
 				Command: command, Task: &task,
 			})

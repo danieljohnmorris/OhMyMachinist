@@ -102,6 +102,56 @@ func TestServerMarksStaleWorkerDisconnected(t *testing.T) {
 	}
 }
 
+func TestSubmitStoresCommandTitleWithPrompt(t *testing.T) {
+	directory := t.TempDir()
+	promptPath := filepath.Join(directory, "plan.md")
+	if err := os.WriteFile(promptPath, []byte("Plan this request:\n{{machinist.prompt}}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	definitionPath := filepath.Join(directory, "config.toml")
+	if err := os.WriteFile(definitionPath, []byte("[server]\nworker_token_file = \"worker.token\"\n\n[commands.plan]\nexecutor = \"test\"\nprompt_file = \"plan.md\"\ntimeout = \"1m\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := openTestStore(t, filepath.Join(directory, "machinist.db"))
+	if _, err := store.db.ExecContext(t.Context(), `INSERT INTO known_repositories(repository) VALUES('machinist')`); err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(store, definitionPath, "secret", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := server.Handler()
+
+	createdBody := strings.NewReader(`{"command":"plan","prompt":"You are the CODER in a spec-driven software factory.","repository":"machinist","title":"OMM-1: Local build step timings and ETAs"}`)
+	created := httptest.NewRequest(http.MethodPost, "/api/v1/jobs", createdBody)
+	created.Host = "127.0.0.1:7331"
+	created.Header.Set("Origin", "http://127.0.0.1:7331")
+	created.Header.Set("X-Machinist-CSRF", server.csrfToken)
+	createdResponse := httptest.NewRecorder()
+	handler.ServeHTTP(createdResponse, created)
+	if createdResponse.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, body = %s", createdResponse.Code, createdResponse.Body.String())
+	}
+
+	statusRequest := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
+	statusRequest.Host = "127.0.0.1:7331"
+	statusRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(statusRecorder, statusRequest)
+	if statusRecorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", statusRecorder.Code, statusRecorder.Body.String())
+	}
+	var status statusResponse
+	if err := json.Unmarshal(statusRecorder.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if len(status.Jobs) != 1 || status.Jobs[0].Title != "OMM-1: Local build step timings and ETAs" {
+		t.Fatalf("jobs = %#v", status.Jobs)
+	}
+	if status.Jobs[0].Prompt != "You are the CODER in a spec-driven software factory." {
+		t.Fatalf("prompt = %#v", status.Jobs[0].Prompt)
+	}
+}
+
 func TestServerDeletesOnlyTerminalJobsWithSubmissionAuthorization(t *testing.T) {
 	server, webServer := newTestHTTPServer(t)
 	defer webServer.Close()
