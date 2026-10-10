@@ -67,6 +67,7 @@ type submitRequest struct {
 	Repository string `json:"repository"`
 	Command    string `json:"command"`
 	Model      string `json:"model"`
+	Project    string `json:"project"`
 }
 
 type commandDefinitionResponse struct {
@@ -405,6 +406,12 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusBadRequest, errors.New("model must be at most 128 characters on one line"))
 		return
 	}
+	input.Project = strings.TrimSpace(input.Project)
+	project, projectErr := ResolveProjectKey(input.Project, input.Title)
+	if projectErr != nil {
+		writeError(response, http.StatusBadRequest, projectErr)
+		return
+	}
 	if input.Workflow != "" {
 		if input.Command != "" {
 			writeError(response, http.StatusBadRequest, errors.New("choose either workflow or command"))
@@ -433,7 +440,7 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 			writeError(response, http.StatusBadRequest, err)
 			return
 		}
-		id, err := s.store.CreateTaskJob(request.Context(), task, input.Repository, input.Workflow, steps)
+		id, err := s.store.CreateTaskJob(request.Context(), task, input.Repository, input.Workflow, project, steps)
 		if err != nil {
 			writeError(response, http.StatusInternalServerError, err)
 			return
@@ -460,7 +467,7 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 	command.Model = input.Model
-	jobID, err := s.store.CreateJobWithOptions(request.Context(), input.Prompt, input.Repository, input.Command, command, CreateJobOptions{Title: input.Title})
+	jobID, err := s.store.CreateJobWithOptions(request.Context(), input.Prompt, input.Repository, input.Command, command, CreateJobOptions{Title: input.Title, Project: project})
 	if err != nil {
 		writeError(response, http.StatusInternalServerError, err)
 		return

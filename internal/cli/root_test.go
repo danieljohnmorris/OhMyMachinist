@@ -19,6 +19,26 @@ import (
 	"github.com/owainlewis/machinist/internal/config"
 )
 
+func TestValidateProject(t *testing.T) {
+	for _, test := range []struct {
+		project string
+		want    string
+	}{
+		{project: "OMM"},
+		{project: "SPARK"},
+		{project: ""},
+		{project: "bad-key", want: `project must match [A-Z][A-Z0-9]{1,9}; got "bad-key"`},
+	} {
+		err := validateProject(test.project)
+		if test.want == "" && err != nil {
+			t.Fatalf("project %q: %v", test.project, err)
+		}
+		if test.want != "" && (err == nil || err.Error() != test.want) {
+			t.Fatalf("project %q: error = %v, want %q", test.project, err, test.want)
+		}
+	}
+}
+
 func TestInitInstallsCompleteEditableDefaults(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -888,4 +908,43 @@ func newCLIRepository(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return root
+}
+
+func TestSubmitValidatesAndSendsProjectKey(t *testing.T) {
+	var gotRequest submitJobRequest
+	postCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api/v1/catalog":
+			writeTestJSON(response, map[string]any{
+				"workflows": []string{"deliver"}, "repositories": []string{"machinist"},
+			})
+		case "/api/v1/jobs":
+			postCount += 1
+			if err := json.NewDecoder(request.Body).Decode(&gotRequest); err != nil {
+				http.Error(response, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeTestJSON(response, map[string]string{"id": "job_project"})
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+	workerConfig := writeSubmitWorkerConfig(t, server.URL, "secret")
+	var stdout, stderr bytes.Buffer
+	exitCode := Execute(t.Context(), []string{
+		"submit", "--workflow=deliver", "--title=Fix thing", "--project=OMM", "--repo=machinist",
+		"--config=" + workerConfig,
+	}, strings.NewReader(""), &stdout, &stderr, "test")
+	if exitCode != 0 || gotRequest.Project != "OMM" {
+		t.Fatalf("exit code = %d, stderr = %q, request = %#v", exitCode, stderr.String(), gotRequest)
+	}
+	exitCode = Execute(t.Context(), []string{
+		"submit", "--workflow=deliver", "--title=Fix thing", "--project=bad-key", "--repo=machinist",
+		"--config=" + workerConfig,
+	}, strings.NewReader(""), &bytes.Buffer{}, &stderr, "test")
+	if exitCode == 0 || postCount != 1 || !strings.Contains(stderr.String(), `project must match [A-Z][A-Z0-9]{1,9}`) {
+		t.Fatalf("invalid project exit code = %d, posts = %d, stderr = %q", exitCode, postCount, stderr.String())
+	}
 }

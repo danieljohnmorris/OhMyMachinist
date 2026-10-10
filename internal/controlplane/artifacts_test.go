@@ -16,7 +16,7 @@ import (
 
 func artifactTask(t *testing.T, s *Store, steps []config.WorkflowStep) (string, *protocol.RunSpec) {
 	t.Helper()
-	id, err := s.CreateTaskJob(t.Context(), protocol.Task{Title: "Build it", SourceURL: "https://github.com/acme/repo/issues/1", Spec: "literal {{stage.output_dir}}"}, "machinist", "deliver", steps)
+	id, err := s.CreateTaskJob(t.Context(), protocol.Task{Title: "Build it", SourceURL: "https://github.com/acme/repo/issues/1", Spec: "literal {{stage.output_dir}}"}, "machinist", "deliver", "", steps)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -19,11 +19,15 @@ CREATE TABLE IF NOT EXISTS artifacts(id TEXT PRIMARY KEY, job_id TEXT NOT NULL, 
 CREATE INDEX IF NOT EXISTS artifacts_job ON artifacts(job_id);
 `
 
-func (s *Store) CreateTaskJob(ctx context.Context, task protocol.Task, repository, name string, steps []config.WorkflowStep) (string, error) {
+func (s *Store) CreateTaskJob(ctx context.Context, task protocol.Task, repository, name, project string, steps []config.WorkflowStep) (string, error) {
 	if err := task.Validate(); err != nil {
 		return "", err
 	}
-	return s.createWorkflowJob(ctx, task.Brief(), repository, name, steps, &task, task.Title)
+	project, err := ResolveProjectKey(project, task.Title)
+	if err != nil {
+		return "", err
+	}
+	return s.createWorkflowJob(ctx, task.Brief(), repository, name, project, steps, &task, task.Title)
 }
 
 // Snapshots both the brief and exact upstream artifact identities before dispatch.

@@ -167,7 +167,8 @@ type RunOutput struct {
 }
 
 type CreateJobOptions struct {
-	Title string
+	Title   string
+	Project string
 }
 
 func OpenStore(path string) (*Store, error) {
@@ -349,6 +350,11 @@ func (s *Store) CreateJobWithOptions(ctx context.Context, prompt, repository, na
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO jobs(id,title,prompt,repository,command,state,created_at,updated_at) VALUES(?,?,?,?,?,'queued',?,?)`, jobID, options.Title, prompt, repository, name, now, now); err != nil {
 		return "", fmt.Errorf("insert job: %w", err)
+	}
+	if options.Project != "" {
+		if err := saveJobMetadata(ctx, tx, jobID, map[string]any{"project": options.Project}); err != nil {
+			return "", fmt.Errorf("insert job metadata: %w", err)
+		}
 	}
 	runID, err := randomID("run", 12)
 	if err != nil {

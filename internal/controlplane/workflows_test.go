@@ -297,5 +297,5 @@ func TestDynamicApprovalSurvivesRestart(t *testing.T) {
 
 // Fixtures for workflows submitted before task specs and shared files.
 func (s *Store) createLegacyWorkflowJob(ctx context.Context, prompt, repository, name string, steps []config.WorkflowStep) (string, error) {
-	return s.createWorkflowJob(ctx, prompt, repository, name, steps, nil, "")
+	return s.createWorkflowJob(ctx, prompt, repository, name, "", steps, nil, "")
 }
