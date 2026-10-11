@@ -8,6 +8,7 @@ import { Artifacts, useTaskArtifacts } from "./artifacts.jsx";
 import { Transcript } from "./transcript.jsx";
 import { taskPresentation } from "./task-presentation.js";
 import { linkifyText } from "./linkify.js";
+import { Markdown } from "./markdown.js";
 import { jobDisplayTitle, priorAttempts, supersededJob } from "./runs-board.js";
 import { runSidebarLinks } from "./run-links.js";
 import { formatDurationMillis, formatTokenUsage } from "./run-metrics.js";
@@ -255,20 +256,21 @@ export function TaskDetail({
         </ol>
       )}
       <div
-        className="grid items-start gap-6 lg:grid-cols-[minmax(0,380px)_minmax(0,1fr)]"
+        className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,380px)]"
         aria-label="Task sections"
       >
-        <section aria-label="Instructions" className="lg:order-2">
+        <section aria-label="Instructions">
           <h2 className="mb-3 text-lg font-semibold">Instructions</h2>
-          <pre className="whitespace-pre-wrap break-words font-sans leading-6">
-            {linkifyText(
+          <Markdown
+            className="break-words leading-6"
+            source={
               job.task
                 ? job.task.spec || "Use the linked source for requirements."
-                : job.prompt,
-            )}
-          </pre>
+                : job.prompt
+            }
+          />
         </section>
-        <div className="space-y-5 lg:order-1">
+        <div className="space-y-5">
           <Card
             className="space-y-5 p-5 sm:p-6"
             aria-label="Current result"

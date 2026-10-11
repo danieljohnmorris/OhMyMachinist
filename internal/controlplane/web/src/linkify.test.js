@@ -23,6 +23,6 @@ test("escapes non-URL text around links", () => {
       linkifyText('<img src=x onerror="alert(1)"> https://example.com/page,'),
     ),
   );
-  assert.match(html, /^<p>&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt; <a href="https:\/\/example\.com\/page"/);
+  assert.match(html, /^<p>&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt; <a class="[^"]*text-primary[^"]*" href="https:\/\/example\.com\/page"/);
   assert.match(html, /<\/a>,<\/p>$/);
 });
