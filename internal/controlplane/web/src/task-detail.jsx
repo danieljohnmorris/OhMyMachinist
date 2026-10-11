@@ -25,6 +25,8 @@ export function TaskDetail({
   deleting,
   onDelete,
   onWorkflowAction,
+  tab,
+  onTabChange,
 }) {
   const artifacts = useTaskArtifacts(job, csrfToken);
   if (!job)
@@ -269,12 +271,18 @@ export function TaskDetail({
           </div>
         </div>
       </div>
-      {latest && <Transcript run={latest} csrfToken={csrfToken} />}
-      {(job.task && lastCompleted) || history.length > 0 ? (
+      {latest ? (
         <Tabs
           key={job.id}
-          label="Task artifacts and history"
+          label="Task transcript, artifacts and history"
+          selected={tab || "transcript"}
+          onSelect={onTabChange}
           items={[
+            {
+              id: "transcript",
+              label: "Transcript",
+              content: <Transcript run={latest} csrfToken={csrfToken} />,
+            },
             ...(job.task && lastCompleted
               ? [
                   {

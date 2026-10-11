@@ -76,12 +76,70 @@ func TestRunEventsRequiresSameOriginOrWorkerToken(t *testing.T) {
 		t.Fatalf("anonymous status = %d", response.StatusCode)
 	}
 	request.Header.Set("X-Machinist-CSRF", server.csrfToken)
-	request.Header.Set("Sec-Fetch-Site", "same-origin")
+	request.Header.Set("Sec-Fetch-Site", "cross-site")
 	response, err = http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
 	response.Body.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("cross-site status = %d", response.StatusCode)
+	}
+	// Browsers without Fetch Metadata send no Sec-Fetch-Site at all; a valid
+	// CSRF token must still be accepted.
+	request.Header.Del("Sec-Fetch-Site")
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing run status = %d", response.StatusCode)
+	}
+}
+
+func TestRunEventsOutputMissingAndUnknown(t *testing.T) {
+	server, webServer := newTestHTTPServer(t)
+	defer webServer.Close()
+	auth := map[string]string{"Authorization": "Bearer secret"}
+	if _, err := server.store.CreateJob(t.Context(), "request", "machinist", "plan", testAgent("plan", "Plan request")); err != nil {
+		t.Fatal(err)
+	}
+	pollResponse := postJSON(t, webServer.URL+"/api/v1/workers/poll", pollRequest("worker-a", []string{"codex"}, []string{"machinist"}), auth)
+	var polled protocol.PollResponse
+	if err := json.NewDecoder(pollResponse.Body).Decode(&polled); err != nil {
+		t.Fatal(err)
+	}
+	pollResponse.Body.Close()
+	if polled.Run == nil {
+		t.Fatal("poll returned no run")
+	}
+	runID := polled.Run.ID
+	if got := readRunEvents(t, server, webServer.URL, runID); got.State != "running" || got.Events != "" {
+		t.Fatalf("run without output events = %#v", got)
+	}
+	push := func(events string) int {
+		response := postJSON(t, webServer.URL+"/api/v1/runs/"+runID+"/events", protocol.LiveEvents{InstanceID: "worker-a", LeaseToken: polled.Run.LeaseToken, Events: events}, auth)
+		defer response.Body.Close()
+		return response.StatusCode
+	}
+	if status := push("line 1\nline 2\n"); status != http.StatusNoContent {
+		t.Fatalf("live push status = %d", status)
+	}
+	if got := readRunEvents(t, server, webServer.URL, runID); got.State != "running" || got.Events != "line 1\nline 2\n" {
+		t.Fatalf("run with output events = %#v", got)
+	}
+	endpoint := webServer.URL + "/api/v1/runs/missing_run/events"
+	request, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("X-Machinist-CSRF", server.csrfToken)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
 	if response.StatusCode != http.StatusNotFound {
 		t.Fatalf("missing run status = %d", response.StatusCode)
 	}
