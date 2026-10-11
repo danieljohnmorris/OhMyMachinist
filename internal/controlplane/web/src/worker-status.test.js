@@ -12,5 +12,6 @@ test("workers show connected and disconnected poll status", async () => {
   assert.match(main, /status\.workers\.filter\(\(worker\) => worker\.connected\)\.length/);
   assert.match(main, /worker\$\{connectedWorkers === 1 \? "" : "s"\} online/);
   assert.match(main, /truncate whitespace-nowrap/);
-  assert.match(main, /title=\{`\$\{connectedWorkers\} connected · \$\{status\.workers\.length\} registered`\}/);
+  assert.match(main, /concurrencyLabel\(status\.max_concurrent_jobs, status\.jobs\.filter\(\(job\) => job\.state === "running"\)\.length\)/);
+  assert.match(main, /Workers are connected lanes that can take a job\. The limit is how many jobs may run at once\./);
 });

@@ -14,6 +14,7 @@ import { cn } from "@/lib/utils";
 import { routeFromHash } from "@/routes";
 import { boardCardTimestamp, boardColumns, currentRun, filterJobs, groupJobsByBoardColumn, jobCounts, jobDisplayTitle } from "@/runs-board";
 import { groupJobsByProject } from "@/project";
+import { concurrencyLabel } from "@/concurrency";
 import { createStatusLoader } from "@/status-loader";
 import { TriggersPage } from "@/triggers";
 import "./styles.css";
@@ -182,7 +183,7 @@ function App() {
           <a href="#/workflows" aria-current={["commands", "workflows"].includes(view) ? "page" : undefined} className={cn("nav-item", ["commands", "workflows"].includes(view) && "nav-item-active")}><Bot className="size-4" /><span>Workflows</span></a>
         </nav>
         <div className="hidden border-t border-border pt-3 md:block">
-          <div className="nav-item" title={`${connectedWorkers} connected · ${status.workers.length} registered`}><Server className="size-4 shrink-0" /><span className="min-w-0 truncate whitespace-nowrap">{connectedWorkers ? `${connectedWorkers} worker${connectedWorkers === 1 ? "" : "s"} online` : "No workers online"}</span></div>
+          <div className="nav-item" title={`Workers are connected lanes that can take a job. The limit is how many jobs may run at once. ${connectedWorkers} connected · ${status.workers.length} registered`}><Server className="size-4 shrink-0" /><span className="min-w-0 truncate whitespace-nowrap">{`${concurrencyLabel(status.max_concurrent_jobs, status.jobs.filter((job) => job.state === "running").length)} · ${connectedWorkers ? `${connectedWorkers} worker${connectedWorkers === 1 ? "" : "s"} online` : "No workers online"}`}</span></div>
           <button onClick={() => setDark((value) => !value)} className="nav-item w-full" aria-label={`Switch to ${dark ? "light" : "dark"} theme`}>
             {dark ? <Moon className="size-4" /> : <Sun className="size-4" />}<span>{dark ? "Dark" : "Light"} theme</span>
           </button>
