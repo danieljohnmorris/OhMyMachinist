@@ -727,6 +727,48 @@ func TestCompletionEndpointClassifiesClientAndPersistenceErrors(t *testing.T) {
 	}
 }
 
+func TestStatusExposesConcurrencyLimit(t *testing.T) {
+	server, webServer := newTestHTTPServerWithLimit(t, 1)
+	defer webServer.Close()
+
+	jobID, err := server.store.CreateJob(t.Context(), "request", "machinist", "plan", testAgent("plan", "Plan request"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := server.store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"machinist"}))
+	if err != nil || run == nil {
+		t.Fatalf("poll = %#v, %v", run, err)
+	}
+
+	status := getStatus(t, webServer.URL)
+	if status.MaxConcurrentJobs == nil || *status.MaxConcurrentJobs != 1 {
+		t.Fatalf("max_concurrent_jobs = %v, want 1", status.MaxConcurrentJobs)
+	}
+	if status.RunningJobs != 1 {
+		t.Fatalf("running_jobs = %d, want 1", status.RunningJobs)
+	}
+	if len(status.Jobs) != 1 || status.Jobs[0].ID != jobID {
+		t.Fatalf("jobs = %#v, want only job %s", status.Jobs, jobID)
+	}
+}
+
+func TestStatusExposesUnlimitedConcurrency(t *testing.T) {
+	server, webServer := newTestHTTPServer(t)
+	defer webServer.Close()
+
+	if _, err := server.store.CreateJob(t.Context(), "request", "machinist", "plan", testAgent("plan", "Plan request")); err != nil {
+		t.Fatal(err)
+	}
+
+	status := getStatus(t, webServer.URL)
+	if status.MaxConcurrentJobs != nil {
+		t.Fatalf("max_concurrent_jobs = %v, want null when unlimited", *status.MaxConcurrentJobs)
+	}
+	if status.RunningJobs != 0 {
+		t.Fatalf("running_jobs = %d, want 0", status.RunningJobs)
+	}
+}
+
 func TestServerCancellationAlwaysStopsHTTPServer(t *testing.T) {
 	for range 32 {
 		directory := t.TempDir()

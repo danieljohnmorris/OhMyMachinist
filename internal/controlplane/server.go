@@ -53,9 +53,11 @@ type Server struct {
 type statusResponse struct {
 	Workflows []string `json:"workflows"`
 	Snapshot
-	Commands     []string `json:"commands"`
-	Repositories []string `json:"repositories"`
-	CSRFToken    string   `json:"csrf_token"`
+	Commands          []string `json:"commands"`
+	Repositories      []string `json:"repositories"`
+	MaxConcurrentJobs *int     `json:"max_concurrent_jobs"`
+	RunningJobs       int      `json:"running_jobs"`
+	CSRFToken         string   `json:"csrf_token"`
 }
 
 type submitRequest struct {
@@ -351,12 +353,25 @@ func (s *Server) status(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusInternalServerError, repositoryErr)
 		return
 	}
+	var maxConcurrentJobs *int
+	if s.maxConcurrentJobs > 0 {
+		limit := s.maxConcurrentJobs
+		maxConcurrentJobs = &limit
+	}
+	var runningJobs int
+	for _, job := range snapshot.Jobs {
+		if job.State == "running" {
+			runningJobs++
+		}
+	}
 	writeJSON(response, http.StatusOK, statusResponse{
-		Snapshot:     snapshot,
-		Commands:     definition.CommandNames(),
-		Workflows:    definition.WorkflowNames(),
-		Repositories: repositories,
-		CSRFToken:    s.csrfToken,
+		Snapshot:          snapshot,
+		Commands:          definition.CommandNames(),
+		Workflows:         definition.WorkflowNames(),
+		Repositories:      repositories,
+		MaxConcurrentJobs: maxConcurrentJobs,
+		RunningJobs:       runningJobs,
+		CSRFToken:         s.csrfToken,
 	})
 }
 
