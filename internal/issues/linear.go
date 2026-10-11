@@ -14,21 +14,22 @@ import (
 const linearEndpoint = "https://api.linear.app/graphql"
 
 type LinearConfig struct {
-	APIKey string
+	APIKey  string
 	Project string
 }
 
 type LinearClient struct {
-	config LinearConfig
-	project string
-	client *http.Client
+	config   LinearConfig
+	project  string
+	endpoint string
+	client   *http.Client
 }
 
 func NewLinearClient(config LinearConfig) (*LinearClient, error) {
 	if err := requiresValue(config.APIKey, "LINEAR_API_KEY"); err != nil {
 		return nil, err
 	}
-	return &LinearClient{config: config, project: config.Project, client: &http.Client{Timeout: 30 * time.Second}}, nil
+	return &LinearClient{config: config, project: config.Project, endpoint: linearEndpoint, client: &http.Client{Timeout: 30 * time.Second}}, nil
 }
 
 func (l *LinearClient) FetchIssue(ctx context.Context, key string) (Issue, error) {
@@ -108,7 +109,7 @@ func (l *LinearClient) PostComment(ctx context.Context, key, body string) error 
 		} `json:"data"`
 	}
 	query := `mutation Comment($issue: String!, $body: String!) { commentCreate(input: {issueId: $issue, body: $body}) { success } }`
-		variables := map[string]string{"issue": issue.ID, "body": body}
+	variables := map[string]string{"issue": issue.ID, "body": body}
 	return l.request(ctx, map[string]any{"query": query, "variables": variables}, &response)
 }
 
@@ -160,7 +161,7 @@ func (l *LinearClient) request(ctx context.Context, body any, output any) error 
 	if err != nil {
 		return err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, linearEndpoint, bytes.NewReader(payload))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, l.endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return err
 	}

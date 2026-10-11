@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/owainlewis/machinist/internal/config"
-	"github.com/owainlewis/machinist/internal/issues"
 	"github.com/owainlewis/machinist/internal/protocol"
 )
 
@@ -68,6 +67,7 @@ type submitRequest struct {
 	Repository string `json:"repository"`
 	Command    string `json:"command"`
 	Model      string `json:"model"`
+	Project    string `json:"project"`
 }
 
 type commandDefinitionResponse struct {
@@ -135,7 +135,7 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 	server := &Server{
 		store: store, definitionPath: definitionPath, triggers: managedTriggers,
 		github: NewGitHubCLI("gh", 30*time.Second), now: time.Now,
-		issueSources: issueSources,
+		issueSources:   issueSources,
 		schedulerEvery: 30 * time.Second, shutdownTimeout: 5 * time.Second,
 		schedulerError:    func(err error) { log.Printf("scheduler: %v", err) },
 		maxConcurrentJobs: maxConcurrentJobs, workerToken: workerToken, csrfToken: csrfToken,
@@ -293,6 +293,8 @@ func (s *Server) routes() (http.Handler, error) {
 	mux.HandleFunc("POST /api/v1/workers/poll", s.authorizeWorker(s.poll))
 	mux.HandleFunc("POST /api/v1/runs/{id}/heartbeat", s.authorizeWorker(s.heartbeat))
 	mux.HandleFunc("POST /api/v1/runs/{id}/complete", s.authorizeWorker(s.complete))
+	mux.HandleFunc("POST /api/v1/runs/{id}/events", s.authorizeWorker(s.liveEvents))
+	mux.HandleFunc("GET /api/v1/runs/{id}/events", s.authorizeArtifact(s.runEvents))
 	mux.Handle("/", http.FileServer(http.FS(dist)))
 	return securityHeaders(mux), nil
 }
@@ -406,6 +408,12 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusBadRequest, errors.New("model must be at most 128 characters on one line"))
 		return
 	}
+	input.Project = strings.TrimSpace(input.Project)
+	project, projectErr := ResolveProjectKey(input.Project, input.Title)
+	if projectErr != nil {
+		writeError(response, http.StatusBadRequest, projectErr)
+		return
+	}
 	if input.Workflow != "" {
 		if input.Command != "" {
 			writeError(response, http.StatusBadRequest, errors.New("choose either workflow or command"))
@@ -416,7 +424,7 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 			writeError(response, http.StatusBadRequest, err)
 			return
 		}
-		if input.Prompt != "" && (input.SourceURL != "" || input.Spec != "" || input.Title != "") {
+		if input.Prompt != "" && (input.SourceURL != "" || input.Spec != "") {
 			writeError(response, http.StatusBadRequest, errors.New("use spec instead of prompt for a task"))
 			return
 		}
@@ -434,7 +442,7 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 			writeError(response, http.StatusBadRequest, err)
 			return
 		}
-		id, err := s.store.CreateTaskJob(request.Context(), task, input.Repository, input.Workflow, steps)
+		id, err := s.store.CreateTaskJob(request.Context(), task, input.Repository, input.Workflow, project, steps)
 		if err != nil {
 			writeError(response, http.StatusInternalServerError, err)
 			return
@@ -442,8 +450,8 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 		writeJSON(response, http.StatusCreated, map[string]string{"id": id})
 		return
 	}
-	if input.Title != "" || input.SourceURL != "" || input.Spec != "" {
-		writeError(response, 400, errors.New("task fields require a workflow"))
+	if input.SourceURL != "" || input.Spec != "" {
+		writeError(response, 400, errors.New("source_url and spec require a workflow"))
 		return
 	}
 	if strings.TrimSpace(input.Command) == "" {
@@ -461,7 +469,7 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 	command.Model = input.Model
-	jobID, err := s.store.CreateJob(request.Context(), input.Prompt, input.Repository, input.Command, command)
+	jobID, err := s.store.CreateJobWithOptions(request.Context(), input.Prompt, input.Repository, input.Command, command, CreateJobOptions{Title: input.Title, Project: project})
 	if err != nil {
 		writeError(response, http.StatusInternalServerError, err)
 		return

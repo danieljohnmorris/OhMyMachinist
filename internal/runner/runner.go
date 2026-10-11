@@ -113,12 +113,11 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	} else if !validRunID(runID) {
 		return Result{}, fmt.Errorf("invalid run ID %q", runID)
 	}
-	runDirectory := filepath.Join(options.DataDirectory, "runs", runID)
+	runDirectory := runDirectoryPath(options.DataDirectory, runID, options.ArtifactKey)
 	if options.ArtifactKey != "" {
 		if !validArtifactKey(options.ArtifactKey) {
 			return Result{}, fmt.Errorf("invalid artifact key %q", options.ArtifactKey)
 		}
-		runDirectory = filepath.Join(runDirectory, options.ArtifactKey)
 	}
 	if err := createDurableDirectory(runDirectory); err != nil {
 		return Result{}, &RuntimeError{Cause: fmt.Errorf("create run directory: %w", err)}
@@ -307,6 +306,23 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 		return result, &OutcomeError{State: state, ExitCode: exitCode, Cause: outcome}
 	}
 	return result, nil
+}
+
+// runDirectoryPath returns the directory holding a run's event log and other
+// run files. Managed runs pass an artifact key (the lease token) for workflow
+// output isolation.
+func runDirectoryPath(dataDirectory, runID, artifactKey string) string {
+	runDirectory := filepath.Join(dataDirectory, "runs", runID)
+	if artifactKey != "" {
+		runDirectory = filepath.Join(runDirectory, artifactKey)
+	}
+	return runDirectory
+}
+
+// EventsFilePath returns the event log path for a run so callers can tail it
+// while the run is still executing.
+func EventsFilePath(dataDirectory, runID, artifactKey string) string {
+	return filepath.Join(runDirectoryPath(dataDirectory, runID, artifactKey), "events.jsonl")
 }
 
 func validRunID(value string) bool {

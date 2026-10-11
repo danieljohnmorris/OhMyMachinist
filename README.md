@@ -91,6 +91,27 @@ This fork adds two generic issue sources and delivery metadata:
 - **Job metadata.** Workflow steps may set `metadata` in their JSON step result. The job page shows optional issue, branch, pull request, preview, review verdict/summary, screenshots, status, and timestamps. Job titles use `KEY: Title`, and job lists expose the full title in a tooltip when clipped.
 - **Generic delivery example.** `examples/factory/delivery.sh` has a dry-run mode and separate code/review stages. It never merges or deploys.
 
+### Post-PR review
+
+`deploy/factory/post_pr_review.py` reviews an existing pull request after delivery. It classifies changed files, runs configured checks for the languages in the diff, classifies failures as new or pre-existing, runs code and prose reviewers, performs a docs pass, and posts one PR comment. It also sets the `machinist/review` commit status.
+
+```sh
+python3 deploy/factory/post_pr_review.py --repo <checkout> --pr <github-pr-url-or-owner/name#n> [--base <branch>] [--executor-cmd "<cmd ...>"] [--dry-run] [--json-out <path>] [--timeout-seconds <seconds>]
+```
+
+- Exit codes: `0` pass, `2` blocked by new check failures or critical/bug findings, `3` review tool error.
+- Executor: set `MACHINIST_REVIEW_EXECUTOR` or pass `--executor-cmd`. The command must read a prompt on stdin and print the final answer. With neither set, reviewers and docs are skipped with an explicit note.
+- Timeouts: default to 900 seconds per command; set `MACHINIST_REVIEW_TIMEOUT_SECONDS` or `--timeout-seconds`.
+- Dry run: prints the comment body and planned commands without calling GitHub write APIs, pushing, or committing.
+
+Wire it after delivery with:
+
+```sh
+python3 deploy/factory/post_pr_review.py --repo "$repo" --pr "$(jq -r .pr "$MACHINIST_OUTPUT_DIR/pr.json")"
+```
+
+Configure branch protection to require the `machinist/review` commit status so blocked pull requests cannot merge. The tool never merges, approves, or closes pull requests.
+
 To follow upstream while keeping this fork:
 
 ```sh

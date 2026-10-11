@@ -7,8 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 )
+
+var projectKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,9}$`)
+var projectTitlePattern = regexp.MustCompile(`^([A-Z][A-Z0-9]{1,9})-\d+\b`)
 
 const jobMetadataSchema = `
 CREATE TABLE IF NOT EXISTS job_metadata (
@@ -23,6 +27,7 @@ type JobScreenshot struct {
 }
 
 type JobMetadata struct {
+	Project       string          `json:"project,omitempty"`
 	IssueURL      string          `json:"issue_url,omitempty"`
 	Branch        string          `json:"branch,omitempty"`
 	PRURL         string          `json:"pr_url,omitempty"`
@@ -82,14 +87,49 @@ func NormalizeJobMetadata(raw map[string]any) (*JobMetadata, error) {
 			}
 		}
 	}
+	if metadata.Project != "" && !projectKeyPattern.MatchString(metadata.Project) {
+		return nil, fmt.Errorf("%w: project must match [A-Z][A-Z0-9]{1,9}", ErrJobMetadataInvalid)
+	}
 	if metadata.IssueURL == "" && metadata.Branch == "" && metadata.PRURL == "" && metadata.PreviewURL == "" &&
 		metadata.ReviewVerdict == "" && metadata.ReviewSummary == "" && len(metadata.Screenshots) == 0 {
-		return nil, nil
+		if metadata.Project == "" {
+			return nil, nil
+		}
 	}
 	return &metadata, nil
 }
 
+func ResolveProjectKey(explicit, title string) (string, error) {
+	if explicit != "" {
+		if !projectKeyPattern.MatchString(explicit) {
+			return "", fmt.Errorf("project must match [A-Z][A-Z0-9]{1,9}; got %q", explicit)
+		}
+		return explicit, nil
+	}
+	if match := projectTitlePattern.FindStringSubmatch(strings.TrimSpace(title)); match != nil {
+		return match[1], nil
+	}
+	return "", nil
+}
+
 func saveJobMetadata(ctx context.Context, tx *sql.Tx, jobID string, raw map[string]any) error {
+	var existingProject string
+	var existing string
+	err := tx.QueryRowContext(ctx, `SELECT metadata FROM job_metadata WHERE job_id=?`, jobID).Scan(&existing)
+	if err == nil {
+		var prior JobMetadata
+		if decodeErr := json.Unmarshal([]byte(existing), &prior); decodeErr == nil {
+			existingProject = prior.Project
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if existingProject != "" && (raw == nil || raw["project"] == nil) {
+		if raw == nil {
+			raw = map[string]any{}
+		}
+		raw["project"] = existingProject
+	}
 	metadata, err := NormalizeJobMetadata(raw)
 	if err != nil || metadata == nil {
 		return err

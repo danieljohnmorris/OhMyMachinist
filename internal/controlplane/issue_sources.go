@@ -29,7 +29,7 @@ func (l linearPoller) Poll(ctx context.Context, label string) ([]issues.Issue, e
 }
 
 func loadIssueSources(path string) (map[string]issuePoller, error) {
-	definition, err := config.LoadConfig(path)
+	definition, err := config.LoadDefinitions(path)
 	if err != nil {
 		return nil, fmt.Errorf("load issue sources: %w", err)
 	}

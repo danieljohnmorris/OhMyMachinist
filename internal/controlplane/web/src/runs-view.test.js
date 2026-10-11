@@ -5,7 +5,7 @@ import { JSDOM } from "jsdom";
 import { createServer } from "vite";
 
 const jobs = [
-  { id: "job_failed", state: "failed", prompt: "Failed fixture", repository: "example/repo", command: "codex", created_at: "2026-01-01T00:00:00Z", runs: [{ id: "run_failed", state: "failed", command: "codex" }] },
+  { id: "job_failed", state: "failed", prompt: "Failed fixture", repository: "example/repo", command: "codex", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-05T00:00:00Z", runs: [{ id: "run_failed", state: "failed", command: "codex", completed_at: "2026-01-01T06:00:00Z" }] },
   { id: "job_succeeded", state: "succeeded", prompt: "Succeeded fixture", repository: "example/repo", command: "codex", created_at: "2026-01-01T00:00:00Z", runs: [{ id: "run_succeeded", state: "succeeded", command: "codex" }] },
 ];
 
@@ -20,7 +20,10 @@ test("runs default to board view and share filters when switching views", async 
   let artifactRequests = 0;
   const detailJob = {
     id: "job_detail", state: "succeeded", repository: "example/repo", command: "build",
-    task: { title: "Task with files", spec: "Build the feature" },
+    task: {
+      title: "Task with files",
+      spec: "Build the feature: https://github.com/omacom/mobile/pull/179. <img src=x onerror=\"alert(1)\">",
+    },
     created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:01:00Z",
     runs: [
       { id: "plan", command: "plan", state: "succeeded", outcome: "complete", summary: "Planned" },
@@ -66,6 +69,9 @@ test("runs default to board view and share filters when switching views", async 
 
   assert.equal(button("Board").getAttribute("aria-pressed"), "true");
   assert.ok(document.querySelector('a[href="#/runs/job_failed"]'), "board links to task");
+  const failedCardTime = document.querySelector('a[href="#/runs/job_failed"] time');
+  assert.equal(failedCardTime?.getAttribute("datetime"), "2026-01-01T06:00:00Z", "board card prefers finish time over last update");
+  assert.match(failedCardTime?.textContent ?? "", /ago|just now/);
   assert.equal(button("List").getAttribute("aria-pressed"), "false");
 
   button("Board").click();
@@ -87,13 +93,22 @@ test("runs default to board view and share filters when switching views", async 
   await eventually(() => assert.match(document.body.textContent, /Task with files/));
   await eventually(() => assert.ok(document.querySelector('[aria-label="View result.md"]')));
   assert.equal(artifactRequests, 1, "metadata fetched once across all panels and attempts");
-  const tab = name => [...document.querySelectorAll('[role="tab"]')].find(el => el.textContent === name);
-  tab("Details").click();
-  await eventually(() => assert.equal(tab("Details").getAttribute("aria-selected"), "true"));
-  const details = document.querySelector('[role="tabpanel"]:not([hidden])');
+  for (const label of ["Result", "Instructions", "Details"]) {
+    assert.equal([...document.querySelectorAll('[role="tab"]')].find(el => el.textContent === label), undefined, `${label} should not be a tab`);
+  }
+  const instructions = document.querySelector('[aria-label="Task sections"] pre');
+  const details = document.querySelector('[aria-label="Task details"]');
+  const result = document.querySelector('[aria-label="Current result"]');
+  assert.ok(instructions && result && details, "instructions, result, and details are visible together");
   for (const text of ["test-executor", "test-model", "test-worker", "Not reported", "Delete task", "Exit code"]) {
     assert.ok(details.textContent.includes(text), `details include ${text}`);
   }
+  const instructionLink = instructions.querySelector('a[href="https://github.com/omacom/mobile/pull/179"]');
+  assert.equal(instructionLink?.target, "_blank");
+  assert.equal(instructionLink?.rel, "noopener noreferrer");
+  assert.doesNotMatch(instructions.innerHTML, /<img /);
+  assert.ok(instructions.textContent.includes('<img src=x onerror="alert(1)">'));
+  const tab = name => [...document.querySelectorAll('[role="tab"]')].find(el => el.textContent === name);
   tab("History").click();
   await eventually(() => assert.equal(tab("History").getAttribute("aria-selected"), "true"));
   assert.match(document.querySelector('[role="tabpanel"]:not([hidden])').textContent, /plan.md/);

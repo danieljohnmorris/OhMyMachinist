@@ -15,6 +15,19 @@ export function boardColumnForState(state) {
   return "finished";
 }
 
+const zeroTime = "0001-01-01T00:00:00Z";
+
+export function boardCardTimestamp(job) {
+  if (boardColumnForState(job.state) === "finished") {
+    const completedAt = (job.runs || [])
+      .filter((run) => run.completed_at && run.completed_at !== zeroTime && Number.isFinite(Date.parse(run.completed_at)))
+      .map((run) => run.completed_at)
+      .sort((left, right) => Date.parse(right) - Date.parse(left));
+    if (completedAt.length) return completedAt[0];
+  }
+  return job.updated_at || job.created_at || "";
+}
+
 export function needsAttention(state) {
   return !activeStates.has(state) && state !== "succeeded";
 }
@@ -50,8 +63,9 @@ export function currentRun(job) {
 }
 
 export function jobDisplayTitle(job) {
+  const storedTitle = typeof job.title === "string" ? job.title.trim() : "";
   const title = typeof job.github_issue_title === "string" ? job.github_issue_title.trim() : "";
-  return job.task?.title || title || job.task?.spec || job.task?.source_url || job.prompt || job.id;
+  return storedTitle || job.task?.title || title || job.task?.spec || job.task?.source_url || job.prompt || job.id;
 }
 
 export function githubIssueReference(job) {

@@ -1,12 +1,14 @@
 package managedworker
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -88,11 +90,89 @@ func (w *Worker) Run(ctx context.Context) error {
 func (w *Worker) executeWithHeartbeats(ctx context.Context, spec protocol.RunSpec) protocol.Completion {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	go w.streamLiveEvents(ctx, spec)
 	execute := w.executeRun
 	if execute == nil {
 		execute = w.execute
 	}
 	return withHeartbeats(ctx, w, spec, "", func() protocol.Completion { return execute(ctx, spec) }, cancel)
+}
+
+// liveEventsInterval controls how often the worker pushes new event log lines
+// while a run executes. The run page polls the control plane about as often.
+const liveEventsInterval = time.Second
+
+// streamLiveEvents tails the run's event log and pushes new complete lines to
+// the control plane so the run page can show a live transcript. Pushes are
+// best effort: a lost chunk leaves a gap until the run's completion delivers
+// the full event log.
+func (w *Worker) streamLiveEvents(ctx context.Context, spec protocol.RunSpec) {
+	eventsPath := runner.EventsFilePath(w.config.DataDirectory, spec.ID, spec.LeaseToken)
+	ticker := time.NewTicker(liveEventsInterval)
+	defer ticker.Stop()
+	var sent int64
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		file, err := os.Open(eventsPath)
+		if err != nil {
+			continue
+		}
+		chunk, next, readErr := readCompleteLines(file, sent)
+		_ = file.Close()
+		if readErr != nil || next == sent {
+			continue
+		}
+		err = w.client.Post(ctx, "/api/v1/runs/"+url.PathEscape(spec.ID)+"/events", protocol.LiveEvents{
+			InstanceID: w.instanceID,
+			LeaseToken: spec.LeaseToken,
+			Events:     chunk,
+		}, nil)
+		if err != nil {
+			if ctx.Err() != nil || stopLiveEvents(err) {
+				return
+			}
+			continue
+		}
+		sent = next
+	}
+}
+
+// stopLiveEvents reports whether a live events push failed in a way retrying
+// cannot fix: the lease moved on, the log is full, or the control plane does
+// not offer live events.
+func stopLiveEvents(err error) bool {
+	var responseErr *ResponseError
+	if !errors.As(err, &responseErr) {
+		return false
+	}
+	switch responseErr.Status {
+	case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusConflict, http.StatusRequestEntityTooLarge:
+		return true
+	}
+	return false
+}
+
+// readCompleteLines reads from offset and returns only bytes up to the last
+// complete line, plus the offset to resume from. It returns the original
+// offset when the file holds no new complete line.
+func readCompleteLines(file *os.File, offset int64) (string, int64, error) {
+	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+		return "", offset, err
+	}
+	chunk, err := io.ReadAll(file)
+	if err != nil {
+		return "", offset, err
+	}
+	lastLine := bytes.LastIndexByte(chunk, '\n')
+	if lastLine < 0 {
+		return "", offset, nil
+	}
+	chunk = chunk[:lastLine+1]
+	return string(chunk), offset + int64(len(chunk)), nil
 }
 
 func (w *Worker) deliverWithHeartbeats(ctx context.Context, spec protocol.RunSpec, completion protocol.Completion) error {

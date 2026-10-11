@@ -10,7 +10,7 @@ import (
 
 func TestWorkflowStepMetadataIsStoredOnJob(t *testing.T) {
 	store := openTestStore(t, t.TempDir()+"/db")
-	jobID, err := store.createLegacyWorkflowJob(t.Context(), "issue URL", "machinist", "deliver", []config.WorkflowStep{{Command: testAgent("build", "issue URL")}})
+	_, err := store.createLegacyWorkflowJob(t.Context(), "issue URL", "machinist", "deliver", []config.WorkflowStep{{Command: testAgent("build", "issue URL")}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -21,11 +21,11 @@ func TestWorkflowStepMetadataIsStoredOnJob(t *testing.T) {
 	body, err := json.Marshal(map[string]any{"step_result": map[string]any{
 		"outcome": "complete", "summary": "Ready for review",
 		"metadata": map[string]any{
-			"issue_url": "https://plane.example.com/workspace/issue/ABC-12",
-			"branch":    "factory/ABC-12",
-			"pr_url":    "https://github.com/example/repo/pull/1",
+			"issue_url":      "https://plane.example.com/workspace/issue/ABC-12",
+			"branch":         "factory/ABC-12",
+			"pr_url":         "https://github.com/example/repo/pull/1",
 			"review_verdict": map[string]any{"verdict": "approve", "summary": "Tests cover the change."},
-			"screenshots": []any{map[string]any{"label": "Desktop", "thumbnail_url": "https://cdn.example.com/desktop-small.png", "url": "https://cdn.example.com/desktop.png"}},
+			"screenshots":    []any{map[string]any{"label": "Desktop", "thumbnail_url": "https://cdn.example.com/desktop-small.png", "url": "https://cdn.example.com/desktop.png"}},
 		},
 	}})
 	if err != nil {
@@ -43,5 +43,34 @@ func TestWorkflowStepMetadataIsStoredOnJob(t *testing.T) {
 		metadata.PRURL != "https://github.com/example/repo/pull/1" || metadata.ReviewVerdict != `{"summary":"Tests cover the change.","verdict":"approve"}` ||
 		len(metadata.Screenshots) != 1 || metadata.Screenshots[0].URL != "https://cdn.example.com/desktop.png" {
 		t.Fatalf("metadata = %#v", metadata)
+	}
+}
+
+func TestCreateTaskJobStoresExplicitAndInferredProjects(t *testing.T) {
+	store := openTestStore(t, t.TempDir()+"/db")
+	steps := []config.WorkflowStep{{Command: testAgent("build", "requirements")}}
+	explicitID, err := store.CreateTaskJob(t.Context(), protocol.Task{Title: "Fix thing", Spec: "requirements"}, "machinist", "deliver", "OMM", steps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inferredID, err := store.CreateTaskJob(t.Context(), protocol.Task{Title: "BLOG-2: Post", Spec: "requirements"}, "machinist", "deliver", "", steps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateTaskJob(t.Context(), protocol.Task{Title: "Bad thing", Spec: "requirements"}, "machinist", "deliver", "bad-key", steps); err == nil {
+		t.Fatal("invalid project was accepted")
+	}
+	snapshot, err := store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects := map[string]string{}
+	for _, job := range snapshot.Jobs {
+		if job.Metadata != nil && job.Metadata.Project != "" {
+			projects[job.ID] = job.Metadata.Project
+		}
+	}
+	if projects[explicitID] != "OMM" || projects[inferredID] != "BLOG" {
+		t.Fatalf("projects = %#v, explicit = %s, inferred = %s", projects, explicitID, inferredID)
 	}
 }
