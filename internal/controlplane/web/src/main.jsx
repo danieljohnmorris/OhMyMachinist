@@ -171,6 +171,12 @@ function App() {
     }
   }
 
+  function selectTaskTab(next) {
+    const hash = `#/runs/${encodeURIComponent(route.jobID)}${next && next !== "transcript" ? `?tab=${encodeURIComponent(next)}` : ""}`;
+    window.history.replaceState(null, "", hash);
+    setRoute({ ...route, tab: next });
+  }
+
   return (
     <div className="app-shell min-h-screen bg-background text-foreground md:flex">
       <aside className="app-sidebar sticky top-0 z-20 flex shrink-0 items-center border-b border-border bg-sidebar px-3 py-2 md:h-screen md:w-56 md:flex-col md:items-stretch md:border-b-0 md:border-r md:px-4 md:py-5">
@@ -197,7 +203,7 @@ function App() {
       </aside>
 
       <main className="workshop min-w-0 flex-1">
-        {view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={selectedJob} jobs={status.jobs} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : view === "workers" ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} /> : view === "triggers" ? <TriggersPage triggers={status.triggers || []} loaded={statusLoaded} error={statusError} /> : ["commands", "workflows"].includes(view) ? <CommandsPage /> : <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
+        {view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={selectedJob} jobs={status.jobs} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} tab={route.tab} onTabChange={selectTaskTab} /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : view === "workers" ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} /> : view === "triggers" ? <TriggersPage triggers={status.triggers || []} loaded={statusLoaded} error={statusError} /> : ["commands", "workflows"].includes(view) ? <CommandsPage /> : <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
           <PageHeading title="Tasks" description="Describe the work. Review the result.">
             <div className="flex items-center gap-2">
               <Button className="text-xs!" onClick={() => setComposerOpen(true)}><Plus className="size-4" />New task</Button>

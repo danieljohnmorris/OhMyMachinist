@@ -29,6 +29,9 @@ export function transcriptLines(events, maxLines = transcriptMaxLines) {
     try {
       event = JSON.parse(raw);
     } catch {
+      // Raw (non-JSONL) log content is real output; show it rather than
+      // silently hiding it behind "Waiting for output…".
+      lines.push({ stream: "stdout", text: raw });
       continue;
     }
     if (event.type === "process.output") {

@@ -17,7 +17,11 @@ func (s *Server) authorizeArtifact(next http.HandlerFunc) http.HandlerFunc {
 				writeUnauthorized(w)
 				return
 			}
-		} else if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Machinist-CSRF")), []byte(s.csrfToken)) != 1 || r.Header.Get("Sec-Fetch-Site") != "same-origin" {
+		// The CSRF token is the real defense: cross-origin pages cannot read it
+		// from the status endpoint. Fetch Metadata is an extra signal, so only
+		// an explicit cross-site marker is rejected; browsers that omit the
+		// header (older Safari, embedded webviews) still load with a valid token.
+		} else if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Machinist-CSRF")), []byte(s.csrfToken)) != 1 || r.Header.Get("Sec-Fetch-Site") == "cross-site" {
 			writeError(w, 403, errors.New("artifact access requires a worker token or same-origin browser request"))
 			return
 		}

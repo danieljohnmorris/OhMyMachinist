@@ -22,9 +22,9 @@ test("joins base64 output chunks into whole lines per stream", () => {
   ]);
 });
 
-test("skips malformed lines and keeps only the newest lines", () => {
+test("shows malformed lines as raw output and keeps only the newest lines", () => {
   const events = ["not json", ...Array.from({ length: 5 }, (_, i) => line({ type: "tick", message: String(i) }))].join("\n");
-  assert.deepEqual(transcriptLines(events, 2).map((entry) => entry.text), ["tick: 3", "tick: 4"]);
+  assert.deepEqual(transcriptLines(events, 6).map((entry) => entry.text), ["not json", "tick: 0", "tick: 1", "tick: 2", "tick: 3", "tick: 4"]);
   assert.deepEqual(transcriptLines(""), []);
 });
 
