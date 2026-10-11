@@ -8,7 +8,7 @@ import { Artifacts, useTaskArtifacts } from "./artifacts.jsx";
 import { Transcript } from "./transcript.jsx";
 import { taskPresentation } from "./task-presentation.js";
 import { linkifyText } from "./linkify.js";
-import { jobDisplayTitle } from "./runs-board.js";
+import { jobDisplayTitle, priorAttempts, supersededJob } from "./runs-board.js";
 import { runSidebarLinks } from "./run-links.js";
 import { formatDurationMillis, formatTokenUsage } from "./run-metrics.js";
 import { activityRows } from "./run-activity.js";
@@ -17,11 +17,13 @@ import {
   friendlyName,
   stateLabel,
   formatTimestamp,
+  relativeTime,
 } from "./task-display.jsx";
 
 export function TaskDetail({
   csrfToken,
   job,
+  jobs = [],
   loaded,
   error,
   deleting,
@@ -45,6 +47,8 @@ export function TaskDetail({
   const { result, history, stages } = taskPresentation(job);
   const { planeTicket, pullRequest } = runSidebarLinks(job, result);
   const reviewing = job.state === "awaiting_approval";
+  const retriedAs = supersededJob(jobs, job);
+  const attempts = priorAttempts(jobs, job);
   return (
     <div className="mx-auto max-w-[1200px] space-y-7 p-4 sm:p-6 lg:p-8">
       <header className="space-y-4">
@@ -63,6 +67,61 @@ export function TaskDetail({
         <p className="text-sm text-muted-foreground">
           {job.repository} · {friendlyName(job.workflow?.name || job.command)}
         </p>
+        {retriedAs && (
+          <Card
+            className="flex flex-wrap items-center gap-2 p-4"
+            aria-label="Retried as"
+          >
+            <ArrowRight className="size-4 text-muted-foreground" aria-hidden="true" />
+            <span className="text-sm">Retried as</span>
+            <a
+              className="text-sm font-medium text-primary underline"
+              href={`#/runs/${encodeURIComponent(retriedAs.id)}`}
+            >
+              {jobDisplayTitle(retriedAs)}
+            </a>
+            <State value={retriedAs.state} />
+          </Card>
+        )}
+        {attempts.length > 0 && (
+          <Card className="space-y-3 p-5" aria-label="Prior attempts">
+            <h2 className="text-sm font-semibold">
+              Prior attempts
+            </h2>
+            <ol className="space-y-3">
+              {attempts.map((attempt) => {
+                const run = attempt.runs.at(-1);
+                return (
+                  <li
+                    key={attempt.id}
+                    className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm"
+                  >
+                    <a
+                      className="font-medium text-primary underline"
+                      href={`#/runs/${encodeURIComponent(attempt.id)}`}
+                    >
+                      {jobDisplayTitle(attempt)}
+                    </a>
+                    <State value={attempt.state} />
+                    <span className="text-muted-foreground">
+                      {relativeTime(attempt.created_at)}
+                    </span>
+                    {run?.error && (
+                      <span className="w-full text-xs text-danger">
+                        {run.error}
+                      </span>
+                    )}
+                    {run?.exit_code != null && !run?.error && (
+                      <span className="text-xs text-muted-foreground">
+                        exit code {run.exit_code}
+                      </span>
+                    )}
+                  </li>
+                );
+              })}
+            </ol>
+          </Card>
+        )}
         {job.task?.source_url && (
           <a
             className="block text-sm text-primary underline"

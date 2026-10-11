@@ -87,6 +87,11 @@ func (s *Store) createWorkflowJob(ctx context.Context, prompt, repository, name,
 		if _, err = tx.ExecContext(ctx, "INSERT INTO task_inputs(job_id,task) VALUES(?,?)", id, string(raw)); err != nil {
 			return "", err
 		}
+		if task.SourceURL != "" {
+			if err = s.linkPriorAttempt(ctx, tx, id, task.SourceURL, repository); err != nil {
+				return "", err
+			}
+		}
 	}
 	if err = enqueueStep(ctx, tx, id, repository, 0, steps[0], false, now); err != nil {
 		return "", err

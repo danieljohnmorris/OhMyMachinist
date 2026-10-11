@@ -12,7 +12,7 @@ import { Card } from "@/components/ui/card";
 import { PageHeading } from "@/components/ui/page-heading";
 import { cn } from "@/lib/utils";
 import { routeFromHash } from "@/routes";
-import { boardCardTimestamp, boardColumns, boardDateFilters, currentRun, filterJobs, filterJobsByDate, groupJobsByBoardColumn, jobCounts, jobDisplayTitle } from "@/runs-board";
+import { boardCardTimestamp, boardColumns, boardDateFilters, collapseIssueAttempts, currentRun, filterJobs, filterJobsByDate, groupJobsByBoardColumn, jobCounts, jobDisplayTitle } from "@/runs-board";
 import { groupJobsByProject } from "@/project";
 import { concurrencyLabel } from "@/concurrency";
 import { createStatusLoader } from "@/status-loader";
@@ -102,8 +102,9 @@ function App() {
 
   const repositories = status.repositories;
 
-  const counts = useMemo(() => jobCounts(status.jobs), [status.jobs]);
-  const visibleJobs = useMemo(() => filterJobs(status.jobs, filter), [filter, status.jobs]);
+  const displayJobs = useMemo(() => collapseIssueAttempts(status.jobs), [status.jobs]);
+  const counts = useMemo(() => jobCounts(displayJobs), [displayJobs]);
+  const visibleJobs = useMemo(() => filterJobs(displayJobs, filter), [filter, displayJobs]);
   const datedJobs = useMemo(() => filterJobsByDate(visibleJobs, dateFilter), [dateFilter, visibleJobs]);
 
   const connectedWorkers = status.workers.filter((worker) => worker.connected).length;
@@ -196,7 +197,7 @@ function App() {
       </aside>
 
       <main className="workshop min-w-0 flex-1">
-        {view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={selectedJob} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : view === "workers" ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} /> : view === "triggers" ? <TriggersPage triggers={status.triggers || []} loaded={statusLoaded} error={statusError} /> : ["commands", "workflows"].includes(view) ? <CommandsPage /> : <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
+        {view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={selectedJob} jobs={status.jobs} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : view === "workers" ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} /> : view === "triggers" ? <TriggersPage triggers={status.triggers || []} loaded={statusLoaded} error={statusError} /> : ["commands", "workflows"].includes(view) ? <CommandsPage /> : <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
           <PageHeading title="Tasks" description="Describe the work. Review the result.">
             <div className="flex items-center gap-2">
               <Button className="text-xs!" onClick={() => setComposerOpen(true)}><Plus className="size-4" />New task</Button>
@@ -301,6 +302,14 @@ function RunColumn({ column, jobs, idPrefix }) {
   </section>;
 }
 
+function attemptBadges(job) {
+  if (!job.attempt_count || job.attempt_count < 2) return null;
+  return <div className="flex flex-wrap items-center gap-1.5">
+    <Badge className="border-border bg-surface text-muted-foreground">attempt {job.attempt_count}</Badge>
+    {job.prior_failed_count > 0 && <Badge className="border-danger/25 bg-danger/10 text-danger">{job.prior_failed_count === 1 ? "1 prior fail" : `${job.prior_failed_count} prior fails`}</Badge>}
+  </div>;
+}
+
 function RunCard({ job }) {
   const title = jobDisplayTitle(job);
   const run = currentRun(job);
@@ -312,13 +321,14 @@ function RunCard({ job }) {
       <State value={job.state} />
       <time className="text-xs text-muted-foreground" dateTime={timestamp} title={timestamp ? new Date(timestamp).toLocaleString() : undefined}>{relativeTime(timestamp)}</time>
     </div>
+    {attemptBadges(job)}
   </a></Card>;
 }
 
 function RunRow({ job }) {
   const title=jobDisplayTitle(job);
   const run=currentRun(job);
-  return <article className="border-b border-border last:border-b-0"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="flex items-center justify-between gap-4 px-5 py-4 hover:bg-muted/35" aria-label={`Open task ${title}`}><div className="min-w-0"><p className="break-words text-sm font-medium" title={title}>{title}</p><p className="mt-1 text-xs text-muted-foreground">{job.repository} · {friendlyName(run?.command || job.command)}</p></div><div className="flex shrink-0 flex-col items-end gap-1"><State value={job.state} /><time className="text-xs text-muted-foreground" dateTime={job.created_at}>{relativeTime(job.created_at)}</time></div></a></article>;
+  return <article className="border-b border-border last:border-b-0"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="flex items-center justify-between gap-4 px-5 py-4 hover:bg-muted/35" aria-label={`Open task ${title}`}><div className="min-w-0"><p className="break-words text-sm font-medium" title={title}>{title}</p><p className="mt-1 text-xs text-muted-foreground">{job.repository} · {friendlyName(run?.command || job.command)}</p>{attemptBadges(job)}</div><div className="flex shrink-0 flex-col items-end gap-1"><State value={job.state} /><time className="text-xs text-muted-foreground" dateTime={job.created_at}>{relativeTime(job.created_at)}</time></div></a></article>;
 }
 
 function EmptyRuns({ filtered, openComposer }) {

@@ -57,6 +57,9 @@ type Job struct {
 	OccurrenceKey    string            `json:"occurrence_key,omitempty"`
 	TriggerSubject   string            `json:"trigger_subject,omitempty"`
 	State            string            `json:"state"`
+	Attempt          int               `json:"attempt"`
+	PreviousJobID    string            `json:"previous_job_id,omitempty"`
+	SupersededBy     string            `json:"superseded_by,omitempty"`
 	CreatedAt        time.Time         `json:"created_at"`
 	UpdatedAt        time.Time         `json:"updated_at"`
 	StateHistory     []StateTransition `json:"state_history,omitempty"`
@@ -207,7 +210,7 @@ func OpenStore(path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) initialize(ctx context.Context) error {
-	const schemaVersion = 6
+	const schemaVersion = 7
 	var version int
 	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		return fmt.Errorf("read database schema version: %w", err)
@@ -236,7 +239,8 @@ CREATE TABLE IF NOT EXISTS jobs (
  trigger_identity TEXT NOT NULL DEFAULT '', trigger_config_signature TEXT NOT NULL DEFAULT '',
  trigger_generation_id TEXT NOT NULL DEFAULT '', occurrence_key TEXT NOT NULL DEFAULT '',
  trigger_subject TEXT NOT NULL DEFAULT '', github_issue_title TEXT NOT NULL DEFAULT '',
- fixed_trigger INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+ fixed_trigger INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ previous_job_id TEXT NOT NULL DEFAULT '', attempt INTEGER NOT NULL DEFAULT 1, superseded_by TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS runs (
  id TEXT PRIMARY KEY, job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id), command TEXT NOT NULL, command_hash TEXT NOT NULL,
  executor TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', repository TEXT NOT NULL, rendered_prompt TEXT NOT NULL,
@@ -278,7 +282,12 @@ END;`
 			return fmt.Errorf("upgrade database schema to version 6: %w", err)
 		}
 	}
-	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+jobMetadataSchema+"PRAGMA user_version=6;")
+	if version < 7 {
+		if err := s.addJobAttemptColumns(ctx); err != nil {
+			return fmt.Errorf("upgrade database schema to version 7: %w", err)
+		}
+	}
+	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+jobMetadataSchema+"PRAGMA user_version=7;")
 	return err
 }
 
@@ -292,6 +301,28 @@ func (s *Store) addJobTitle(ctx context.Context) error {
 	}
 	_, err := s.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN title TEXT NOT NULL DEFAULT ''`)
 	return err
+}
+
+// addJobAttemptColumns links requeued runs to the attempt they replace: the issue a
+// job came from, the prior job it follows, and the newer job that superseded it.
+func (s *Store) addJobAttemptColumns(ctx context.Context) error {
+	for _, column := range []struct{ name, definition string }{
+		{"previous_job_id", "TEXT NOT NULL DEFAULT ''"},
+		{"attempt", "INTEGER NOT NULL DEFAULT 1"},
+		{"superseded_by", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		var present int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name=?`, column.name).Scan(&present); err != nil {
+			return err
+		}
+		if present > 0 {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN ` + column.name + ` ` + column.definition); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // upgradeToVersionTwo removes the Shepherd schedule bookkeeping. Finished jobs
@@ -385,6 +416,36 @@ func (s *Store) CreateJobWithOptions(ctx context.Context, prompt, repository, na
 		return "", fmt.Errorf("commit job: %w", err)
 	}
 	return jobID, nil
+}
+
+// linkPriorAttempt chains a newly created job to the most recent finished job for the
+// same source issue: the new job records the prior job and its attempt number, and the
+// prior job records the job that superseded it. Issues are matched by trigger subject
+// or task source URL within one repository.
+func (s *Store) linkPriorAttempt(ctx context.Context, tx *sql.Tx, jobID, subject, repository string) error {
+	if subject == "" {
+		return nil
+	}
+	var previousID string
+	var previousAttempt int
+	err := tx.QueryRowContext(ctx, `SELECT id,attempt FROM jobs
+WHERE repository=? AND id<>? AND state IN ('succeeded','failed','cancelled')
+AND (trigger_subject=? OR id IN (SELECT job_id FROM task_inputs WHERE json_valid(task) AND json_extract(task,'$.source_url')=?))
+ORDER BY created_at DESC,id DESC LIMIT 1`, repository, jobID, subject, subject).Scan(&previousID, &previousAttempt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("find prior job for issue %q: %w", subject, err)
+	}
+	now := s.now().UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET previous_job_id=?,attempt=?,updated_at=? WHERE id=?`, previousID, previousAttempt+1, now, jobID); err != nil {
+		return fmt.Errorf("link job to prior attempt: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET superseded_by=?,updated_at=? WHERE id=?`, jobID, now, previousID); err != nil {
+		return fmt.Errorf("mark prior job superseded: %w", err)
+	}
+	return nil
 }
 
 // SyncTriggers makes the durable trigger set match the resolved configuration. Existing
@@ -576,6 +637,9 @@ WHERE github_trigger_requests.state='pending'`, admission.Identity, admission.Oc
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET title=? WHERE id=?`, admission.Title, jobID); err != nil {
 		return "", false, fmt.Errorf("insert triggered job title: %w", err)
+	}
+	if err := s.linkPriorAttempt(ctx, tx, jobID, admission.Subject, admission.Repository); err != nil {
+		return "", false, err
 	}
 	if admission.Task != nil {
 		task := *admission.Task
@@ -1228,7 +1292,7 @@ func (s *Store) RunOutput(ctx context.Context, runID string) (RunOutput, error) 
 }
 
 func (s *Store) listJobs(ctx context.Context) ([]Job, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT j.id,j.title,j.prompt,j.repository,j.github_issue_title,j.command,j.trigger_identity,j.occurrence_key,j.trigger_subject,j.state,j.created_at,j.updated_at,
+	rows, err := s.db.QueryContext(ctx, `SELECT j.id,j.title,j.prompt,j.repository,j.github_issue_title,j.command,j.trigger_identity,j.occurrence_key,j.trigger_subject,j.state,j.previous_job_id,j.attempt,COALESCE(j.superseded_by,''),j.created_at,j.updated_at,
 COALESCE(r.id,''),COALESCE(r.command,''),COALESCE(r.executor,''),COALESCE(r.model,''),COALESCE(r.state,''),COALESCE(NULLIF(r.worker_name,''),w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,''),r.duration_millis,r.token_usage,a.step,COALESCE(a.outcome,''),COALESCE(NULLIF(a.summary,''),CASE WHEN json_valid(r.result) THEN json_extract(r.result,'$.final_message') END,'')
 FROM jobs j LEFT JOIN runs r ON r.job_id=j.id LEFT JOIN workers w ON w.instance_id=r.worker_instance LEFT JOIN workflow_attempts a ON a.run_id=r.id ORDER BY j.created_at DESC,j.id,r.rowid`)
 	if err != nil {
@@ -1240,7 +1304,7 @@ FROM jobs j LEFT JOIN runs r ON r.job_id=j.id LEFT JOIN workers w ON w.instance_
 		job := Job{Runs: []Run{}}
 		var run Run
 		var created, updated, started, completed string
-		if err := rows.Scan(&job.ID, &job.Title, &job.Prompt, &job.Repository, &job.GitHubIssueTitle, &job.Command, &job.TriggerID, &job.OccurrenceKey, &job.TriggerSubject, &job.State, &created, &updated,
+		if err := rows.Scan(&job.ID, &job.Title, &job.Prompt, &job.Repository, &job.GitHubIssueTitle, &job.Command, &job.TriggerID, &job.OccurrenceKey, &job.TriggerSubject, &job.State, &job.PreviousJobID, &job.Attempt, &job.SupersededBy, &created, &updated,
 			&run.ID, &run.Command, &run.Executor, &run.Model, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &started, &completed, &run.DurationMillis, &run.TokenUsage, &run.Step, &run.Outcome, &run.Summary); err != nil {
 			return nil, err
 		}
