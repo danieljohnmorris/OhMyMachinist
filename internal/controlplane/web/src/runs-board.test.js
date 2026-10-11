@@ -1,6 +1,30 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { boardColumnForState, filterJobs, githubIssueReference, groupJobsByBoardColumn, jobDisplayTitle, needsAttention } from "./runs-board.js";
+import { boardCardTimestamp, boardColumnForState, filterJobs, githubIssueReference, groupJobsByBoardColumn, jobDisplayTitle, needsAttention } from "./runs-board.js";
+
+test("board card timestamps prefer run completion for finished jobs and last update otherwise", () => {
+  const finishedJob = {
+    state: "succeeded",
+    updated_at: "2026-10-11T10:00:00Z",
+    runs: [
+      { completed_at: "2026-10-11T08:00:00Z" },
+      { completed_at: "2026-10-11T09:30:00Z" },
+      {},
+    ],
+  };
+  assert.equal(boardCardTimestamp(finishedJob), "2026-10-11T09:30:00Z");
+
+  const finishedWithoutRuns = { state: "failed", updated_at: "2026-10-11T10:00:00Z", runs: [] };
+  assert.equal(boardCardTimestamp(finishedWithoutRuns), "2026-10-11T10:00:00Z");
+
+  const zeroTimes = { state: "succeeded", runs: [{ completed_at: "0001-01-01T00:00:00Z" }], updated_at: "2026-10-11T10:00:00Z" };
+  assert.equal(boardCardTimestamp(zeroTimes), "2026-10-11T10:00:00Z");
+
+  const runningJob = { state: "running", updated_at: "2026-10-11T11:00:00Z", created_at: "2026-10-11T07:00:00Z", runs: [{ completed_at: "2026-10-11T09:00:00Z" }] };
+  assert.equal(boardCardTimestamp(runningJob), "2026-10-11T11:00:00Z");
+
+  assert.equal(boardCardTimestamp({ state: "queued", created_at: "2026-10-11T07:00:00Z" }), "2026-10-11T07:00:00Z");
+});
 
 test("job states map to the three board columns without hiding attention states", () => {
   assert.equal(boardColumnForState("queued"), "queued");
