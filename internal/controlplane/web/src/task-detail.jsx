@@ -9,6 +9,7 @@ import { Transcript } from "./transcript.jsx";
 import { taskPresentation } from "./task-presentation.js";
 import { linkifyText } from "./linkify.js";
 import { jobDisplayTitle } from "./runs-board.js";
+import { runSidebarLinks } from "./run-links.js";
 import { formatDurationMillis, formatTokenUsage } from "./run-metrics.js";
 import { activityRows } from "./run-activity.js";
 import {
@@ -42,6 +43,7 @@ export function TaskDetail({
   const latest = job.runs.at(-1);
   const lastCompleted = job.runs.findLast((run) => run.outcome === "complete");
   const { result, history, stages } = taskPresentation(job);
+  const { planeTicket, pullRequest } = runSidebarLinks(job, result);
   const reviewing = job.state === "awaiting_approval";
   return (
     <div className="mx-auto max-w-[1200px] space-y-7 p-4 sm:p-6 lg:p-8">
@@ -76,17 +78,36 @@ export function TaskDetail({
             {error}
           </p>
         )}
-        {job.metadata && (
+        {(job.metadata || planeTicket || pullRequest) && (
           <Card className="space-y-4 p-5" aria-label="Job metadata">
             <h2 className="text-lg font-semibold">Metadata</h2>
             <dl className="grid gap-4 text-sm sm:grid-cols-2">
+              {planeTicket && (
+                <div className="min-w-0">
+                  <dt className="text-xs uppercase tracking-wide text-muted-foreground">Plane</dt>
+                  <dd className="mt-1 break-words">
+                    <a className="text-primary underline" href={planeTicket.href} target="_blank" rel="noopener noreferrer">
+                      {planeTicket.text}
+                    </a>
+                  </dd>
+                </div>
+              )}
+              {pullRequest && (
+                <div className="min-w-0">
+                  <dt className="text-xs uppercase tracking-wide text-muted-foreground">Pull request</dt>
+                  <dd className="mt-1 break-words">
+                    <a className="text-primary underline" href={pullRequest.href} target="_blank" rel="noopener noreferrer">
+                      {pullRequest.text}
+                    </a>
+                  </dd>
+                </div>
+              )}
               {[
-                ["Issue", job.metadata.issue_url],
-                ["Branch", job.metadata.branch],
-                ["Pull request", job.metadata.pr_url],
-                ["Preview", job.metadata.preview_url],
-                ["Review verdict", job.metadata.review_verdict],
-                ["Review summary", job.metadata.review_summary],
+                ["Issue", job.metadata?.issue_url],
+                ["Branch", job.metadata?.branch],
+                ["Preview", job.metadata?.preview_url],
+                ["Review verdict", job.metadata?.review_verdict],
+                ["Review summary", job.metadata?.review_summary],
                 ["Status", stateLabel(job.state)],
                 ["Created", formatTimestamp(job.created_at)],
                 ["Updated", formatTimestamp(job.updated_at)],
@@ -101,7 +122,7 @@ export function TaskDetail({
                   </div>
                 ))}
             </dl>
-            {job.metadata.screenshots?.length > 0 && (
+            {job.metadata?.screenshots?.length > 0 && (
               <div>
                 <h3 className="text-sm font-medium">Screenshots</h3>
                 <ul className="mt-3 flex flex-wrap gap-3">
