@@ -16,6 +16,8 @@ PR_URL=${FACTORY_PR_URL:-}
 PREVIEW_URL=${FACTORY_PREVIEW_URL:-}
 SCREENSHOT_DIR=${FACTORY_SCREENSHOT_DIR:-${MACHINIST_OUTPUT_DIR:-}}
 SCREENSHOT_PREFIX=${FACTORY_SCREENSHOT_PREFIX:-${ISSUE_KEY}}
+POST_PR_REVIEW_SCRIPT=${FACTORY_POST_PR_REVIEW_SCRIPT:-}
+DISABLE_POST_PR_REVIEW=${FACTORY_DISABLE_POST_PR_REVIEW:-}
 STEP=${1:-dry-run}
 
 run() {
@@ -31,6 +33,27 @@ require_issue() {
     echo 'FACTORY_ISSUE_KEY and FACTORY_ISSUE_TITLE are required' >&2
     return 1
   }
+}
+
+post_pr_review() {
+  local pr_url="$1"
+  if [[ "$DISABLE_POST_PR_REVIEW" == "1" || -z "$pr_url" ]]; then
+    return 0
+  fi
+  if [[ -n "$DRY_RUN" ]]; then
+    printf '[dry-run] post-pr review against %s\n' "$pr_url"
+    return 0
+  fi
+  local review_script="${POST_PR_REVIEW_SCRIPT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/deploy/factory/post_pr_review.py}"
+  if [[ ! -f "$review_script" ]]; then
+    echo "post-pr review skipped: $review_script not found" >&2
+    return 0
+  fi
+  local review_dir="${MACHINIST_OUTPUT_DIR:-$PWD/.factory-review}"
+  mkdir -p "$review_dir"
+  if ! python3 "$review_script" --repo "${FACTORY_REPO:-$PWD}" --pr "$pr_url" --json-out "$review_dir/post-pr-review.json"; then
+    echo 'post-pr review failed; continuing' >&2
+  fi
 }
 
 case "$STEP" in
@@ -59,10 +82,13 @@ case "$STEP" in
   pull-request)
     if [[ -n "$DRY_RUN" ]]; then
       run "$GH_COMMAND" pr create --draft --title "${ISSUE_KEY:-ISSUE_KEY}: ${ISSUE_TITLE:-ISSUE_TITLE}" --body-file "${PROMPT_FILE:-PR_BODY_FILE}"
+      post_pr_review "PR_URL"
     else
       require_issue
       [[ -n "$PROMPT_FILE" ]] || { echo 'FACTORY_PROMPT_FILE is required' >&2; exit 2; }
-      run "$GH_COMMAND" pr create --draft --title "$ISSUE_KEY: $ISSUE_TITLE" --body-file "$PROMPT_FILE"
+      pr_url=$("$GH_COMMAND" pr create --draft --title "$ISSUE_KEY: $ISSUE_TITLE" --body-file "$PROMPT_FILE")
+      printf '%s\n' "$pr_url"
+      post_pr_review "$pr_url"
     fi
     ;;
   review)

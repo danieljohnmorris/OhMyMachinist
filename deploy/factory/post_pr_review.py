@@ -5,6 +5,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import shlex
 import shutil
@@ -406,6 +407,17 @@ def run_reviewer(
         return {"role": role, "ran": False, "findings": [], "error": f"reviewer failed: {error}", "output": ""}
 
 
+def max_reviewer_workers(role_count: int, environ: dict[str, str] | None = None) -> int:
+    env = os.environ if environ is None else environ
+    try:
+        cap = int(env.get("MACHINIST_REVIEW_MAX_PARALLEL", ""))
+    except (TypeError, ValueError):
+        return max(1, role_count)
+    if cap < 1:
+        return max(1, role_count)
+    return max(1, min(role_count, cap))
+
+
 def run_reviewers(
     roles: list[str],
     args: list[str],
@@ -414,7 +426,7 @@ def run_reviewers(
 ) -> list[dict[str, Any]]:
     if len(roles) == 1:
         return [run_reviewer(roles[0], args, diff, timeout)]
-    with ThreadPoolExecutor(max_workers=len(roles)) as pool:
+    with ThreadPoolExecutor(max_workers=max_reviewer_workers(len(roles))) as pool:
         futures = {pool.submit(run_reviewer, role, args, diff, timeout): role for role in roles}
         return [future.result() for future in as_completed(futures)]
 
