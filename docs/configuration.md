@@ -63,6 +63,27 @@ server and copy the entire artifact directory before changing the path; changing
 the setting alone does not move saved files. Back up the database and files together.
 See [storage settings](artifacts.md#storage) for size limits. Files are kept until their task is deleted.
 
+## Failure alerts
+
+When a run ends `failed` or `timed_out`, the server writes one pending fail alert
+JSON file per run to a configured spool directory for an external alert poller or
+notifier to pick up:
+
+```toml
+[alerts]
+directory = "/var/lib/machinist/alerts"
+```
+
+The payload records the job id, run id, command (stage) name, configured timeout,
+elapsed time, exit code, the issue key and URL when the job came from a tracker,
+and a `reason` of `failed` or `timed_out` — so a notifier can report "timed out
+after 2h" instead of a generic failure. A command that runs past its `timeout`
+ends `timed_out` with exit code 124 and alerts exactly like any other failure;
+each file is written once per run and never duplicated. Cancelled runs do not
+alert. Relative paths resolve against the config file and `~` expands to the
+server user's home, like the artifact storage path. When `[alerts]` is absent,
+no files are written.
+
 ## Migration
 
 The `agents` table was renamed to `commands`. Move `[agents.NAME]` to `[commands.NAME]`

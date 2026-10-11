@@ -46,6 +46,7 @@ type Server struct {
 	shutdownTimeout   time.Duration
 	maxConcurrentJobs int
 	workerToken       string
+	failAlerts        *failAlertWriter
 	csrfToken         string
 	handler           http.Handler
 }
@@ -117,6 +118,10 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 	if e = store.configureStorage(storage); e != nil {
 		return nil, e
 	}
+	alertsDirectory, e := definition.ResolveAlerts()
+	if e != nil {
+		return nil, e
+	}
 	startup := time.Now().UTC()
 	definitions := make([]TriggerDefinition, 0, len(managedTriggers))
 	for _, trigger := range managedTriggers {
@@ -138,6 +143,7 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 		issueSources:   issueSources,
 		schedulerEvery: 30 * time.Second, shutdownTimeout: 5 * time.Second,
 		schedulerError:    func(err error) { log.Printf("scheduler: %v", err) },
+		failAlerts:        &failAlertWriter{directory: alertsDirectory},
 		maxConcurrentJobs: maxConcurrentJobs, workerToken: workerToken, csrfToken: csrfToken,
 	}
 	server.handler, err = server.routes()
@@ -546,7 +552,27 @@ func (s *Server) complete(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusInternalServerError, errors.New("complete run"))
 		return
 	}
+	if alertingState(input.State) {
+		s.writeFailAlert(request.Context(), request.PathValue("id"))
+	}
 	response.WriteHeader(http.StatusNoContent)
+}
+
+// writeFailAlert spools the pending fail alert for a failed or timed-out run.
+// The run is already terminal when this runs, so alerting is best effort: a
+// failed alert write is logged and never fails the completion delivery.
+func (s *Server) writeFailAlert(ctx context.Context, runID string) {
+	alert, ok, err := s.store.pendingFailAlert(ctx, runID)
+	if err != nil {
+		log.Printf("collect fail alert for run %q: %v", runID, err)
+		return
+	}
+	if !ok {
+		return
+	}
+	if err := s.failAlerts.write(alert); err != nil {
+		log.Printf("write fail alert for run %q: %v", runID, err)
+	}
 }
 
 func (s *Server) heartbeat(response http.ResponseWriter, request *http.Request) {
