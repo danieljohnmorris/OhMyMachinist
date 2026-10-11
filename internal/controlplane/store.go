@@ -421,10 +421,11 @@ func (s *Store) CreateJobWithOptions(ctx context.Context, prompt, repository, na
 // linkPriorAttempt chains a newly created job to the most recent finished job for the
 // same source issue: the new job records the prior job and its attempt number, and the
 // prior job records the job that superseded it. Issues are matched by trigger subject
-// or task source URL within one repository.
-func (s *Store) linkPriorAttempt(ctx context.Context, tx *sql.Tx, jobID, subject, repository string) error {
+// or task source URL within one repository. Returns the prior job ID, empty when the
+// job starts a new attempt chain.
+func (s *Store) linkPriorAttempt(ctx context.Context, tx *sql.Tx, jobID, subject, repository string) (string, error) {
 	if subject == "" {
-		return nil
+		return "", nil
 	}
 	var previousID string
 	var previousAttempt int
@@ -433,19 +434,19 @@ WHERE repository=? AND id<>? AND state IN ('succeeded','failed','cancelled')
 AND (trigger_subject=? OR id IN (SELECT job_id FROM task_inputs WHERE json_valid(task) AND json_extract(task,'$.source_url')=?))
 ORDER BY created_at DESC,id DESC LIMIT 1`, repository, jobID, subject, subject).Scan(&previousID, &previousAttempt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil
+		return "", nil
 	}
 	if err != nil {
-		return fmt.Errorf("find prior job for issue %q: %w", subject, err)
+		return "", fmt.Errorf("find prior job for issue %q: %w", subject, err)
 	}
 	now := s.now().UTC().Format(time.RFC3339Nano)
 	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET previous_job_id=?,attempt=?,updated_at=? WHERE id=?`, previousID, previousAttempt+1, now, jobID); err != nil {
-		return fmt.Errorf("link job to prior attempt: %w", err)
+		return "", fmt.Errorf("link job to prior attempt: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET superseded_by=?,updated_at=? WHERE id=?`, jobID, now, previousID); err != nil {
-		return fmt.Errorf("mark prior job superseded: %w", err)
+		return "", fmt.Errorf("mark prior job superseded: %w", err)
 	}
-	return nil
+	return previousID, nil
 }
 
 // SyncTriggers makes the durable trigger set match the resolved configuration. Existing
@@ -638,8 +639,23 @@ WHERE github_trigger_requests.state='pending'`, admission.Identity, admission.Oc
 	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET title=? WHERE id=?`, admission.Title, jobID); err != nil {
 		return "", false, fmt.Errorf("insert triggered job title: %w", err)
 	}
-	if err := s.linkPriorAttempt(ctx, tx, jobID, admission.Subject, admission.Repository); err != nil {
+	previous, err := s.linkPriorAttempt(ctx, tx, jobID, admission.Subject, admission.Repository)
+	if err != nil {
 		return "", false, err
+	}
+	command := admission.Command
+	// A requeue carries the prior attempt's transcript so the coder can diagnose
+	// the failure from the prompt alone.
+	if previous != "" {
+		block, blockErr := priorAttemptContext(ctx, tx, previous)
+		if blockErr != nil {
+			return "", false, blockErr
+		}
+		admission.Prompt, _ = appendPriorContext(admission.Prompt, "", block)
+		command.Prompt += "\n\n" + block
+		if _, err := tx.ExecContext(ctx, `UPDATE jobs SET prompt=? WHERE id=?`, admission.Prompt, jobID); err != nil {
+			return "", false, fmt.Errorf("add prior attempt context: %w", err)
+		}
 	}
 	if admission.Task != nil {
 		task := *admission.Task
@@ -660,7 +676,6 @@ WHERE github_trigger_requests.state='pending'`, admission.Identity, admission.Oc
 	if err != nil {
 		return "", false, err
 	}
-	command := admission.Command
 	if _, err := tx.ExecContext(ctx, `INSERT INTO runs(id,job_id,command,command_hash,executor,model,repository,rendered_prompt,timeout_ms,state) VALUES(?,?,?,?,?,?,?,?,?,'queued')`, runID, jobID, command.Name, command.Hash, command.Executor, command.Model, admission.Repository, command.Prompt, command.Timeout.Milliseconds()); err != nil {
 		return "", false, fmt.Errorf("insert triggered run: %w", err)
 	}

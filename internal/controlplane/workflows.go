@@ -83,14 +83,27 @@ func (s *Store) createWorkflowJob(ctx context.Context, prompt, repository, name,
 		}
 	}
 	if task != nil {
+		if task.SourceURL != "" {
+			previous, err := s.linkPriorAttempt(ctx, tx, id, task.SourceURL, repository)
+			if err != nil {
+				return "", err
+			}
+			// A requeue carries the prior attempt's transcript so the coder can
+			// diagnose the failure from the prompt alone.
+			if previous != "" {
+				block, err := priorAttemptContext(ctx, tx, previous)
+				if err != nil {
+					return "", err
+				}
+				prompt, task.Spec = appendPriorContext(prompt, task.Spec, block)
+				if _, err = tx.ExecContext(ctx, `UPDATE jobs SET prompt=? WHERE id=?`, prompt, id); err != nil {
+					return "", fmt.Errorf("add prior attempt context: %w", err)
+				}
+			}
+		}
 		raw, _ := json.Marshal(task)
 		if _, err = tx.ExecContext(ctx, "INSERT INTO task_inputs(job_id,task) VALUES(?,?)", id, string(raw)); err != nil {
 			return "", err
-		}
-		if task.SourceURL != "" {
-			if err = s.linkPriorAttempt(ctx, tx, id, task.SourceURL, repository); err != nil {
-				return "", err
-			}
 		}
 	}
 	if err = enqueueStep(ctx, tx, id, repository, 0, steps[0], false, now); err != nil {
