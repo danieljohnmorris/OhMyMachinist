@@ -5,7 +5,7 @@ import { JSDOM } from "jsdom";
 import { createServer } from "vite";
 
 const jobs = [
-  { id: "job_failed", state: "failed", prompt: "Failed fixture", repository: "example/repo", command: "codex", created_at: "2026-01-01T00:00:00Z", runs: [{ id: "run_failed", state: "failed", command: "codex" }] },
+  { id: "job_failed", state: "failed", prompt: "Failed fixture", repository: "example/repo", command: "codex", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-05T00:00:00Z", runs: [{ id: "run_failed", state: "failed", command: "codex", completed_at: "2026-01-01T06:00:00Z" }] },
   { id: "job_succeeded", state: "succeeded", prompt: "Succeeded fixture", repository: "example/repo", command: "codex", created_at: "2026-01-01T00:00:00Z", runs: [{ id: "run_succeeded", state: "succeeded", command: "codex" }] },
 ];
 
@@ -69,6 +69,9 @@ test("runs default to board view and share filters when switching views", async 
 
   assert.equal(button("Board").getAttribute("aria-pressed"), "true");
   assert.ok(document.querySelector('a[href="#/runs/job_failed"]'), "board links to task");
+  const failedCardTime = document.querySelector('a[href="#/runs/job_failed"] time');
+  assert.equal(failedCardTime?.getAttribute("datetime"), "2026-01-01T06:00:00Z", "board card prefers finish time over last update");
+  assert.match(failedCardTime?.textContent ?? "", /ago|just now/);
   assert.equal(button("List").getAttribute("aria-pressed"), "false");
 
   button("Board").click();
