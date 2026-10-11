@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { boardCardTimestamp, boardColumnForState, filterJobs, githubIssueReference, groupJobsByBoardColumn, jobDisplayTitle, needsAttention } from "./runs-board.js";
+import { boardCardTimestamp, boardColumnForState, boardDateFilters, boardDateWindow, filterJobs, filterJobsByDate, githubIssueReference, groupJobsByBoardColumn, jobDisplayTitle, needsAttention } from "./runs-board.js";
 
 test("board card timestamps prefer run completion for finished jobs and last update otherwise", () => {
   const finishedJob = {
@@ -56,6 +56,53 @@ test("board and table filters use the same filtered job set", () => {
   const visibleJobs = filterJobs(jobs, "active");
   const grouped = groupJobsByBoardColumn(visibleJobs);
   assert.equal(grouped.queued.length + grouped.running.length + grouped.finished.length, visibleJobs.length);
+});
+
+test("board date filters offer exactly today, yesterday, last 7 days and all", () => {
+  assert.deepEqual(boardDateFilters, [
+    { id: "today", label: "Today" },
+    { id: "yesterday", label: "Yesterday" },
+    { id: "last7", label: "Last 7 days" },
+    { id: "all", label: "All" },
+  ]);
+});
+
+test("board date windows use local calendar days and include today in the 7-day window", () => {
+  const now = new Date(2026, 5, 15, 12, 0, 0);
+
+  const today = boardDateWindow(now, "today");
+  assert.equal(today.start.getTime(), new Date(2026, 5, 15, 0, 0, 0).getTime());
+  assert.equal(today.end.getTime(), new Date(2026, 5, 16, 0, 0, 0).getTime());
+
+  const yesterday = boardDateWindow(now, "yesterday");
+  assert.equal(yesterday.start.getTime(), new Date(2026, 5, 14, 0, 0, 0).getTime());
+  assert.equal(yesterday.end.getTime(), new Date(2026, 5, 15, 0, 0, 0).getTime());
+
+  const last7 = boardDateWindow(now, "last7");
+  assert.equal(last7.start.getTime(), new Date(2026, 5, 9, 0, 0, 0).getTime());
+  assert.equal(last7.end.getTime(), new Date(2026, 5, 16, 0, 0, 0).getTime());
+
+  assert.equal(boardDateWindow(now, "all"), null);
+  assert.equal(boardDateWindow(now, ""), null);
+});
+
+test("date filters keep jobs whose board timestamp falls inside the window", () => {
+  const now = new Date(2026, 5, 15, 12, 0, 0);
+  const jobs = [
+    { id: "today", state: "running", updated_at: new Date(2026, 5, 15, 9, 0, 0).toISOString(), runs: [] },
+    { id: "yesterday", state: "succeeded", updated_at: new Date(2026, 5, 14, 23, 0, 0).toISOString(), runs: [] },
+    { id: "boundary", state: "succeeded", updated_at: new Date(2026, 5, 9, 0, 0, 0).toISOString(), runs: [] },
+    { id: "too_old", state: "succeeded", updated_at: new Date(2026, 5, 8, 23, 59, 0).toISOString(), runs: [] },
+    { id: "future", state: "queued", updated_at: new Date(2026, 5, 16, 1, 0, 0).toISOString(), runs: [] },
+    { id: "no_timestamp", state: "queued", runs: [] },
+  ];
+  const allIds = ["today", "yesterday", "boundary", "too_old", "future", "no_timestamp"];
+
+  assert.deepEqual(filterJobsByDate(jobs, "all", now).map(({ id }) => id), allIds);
+  assert.deepEqual(filterJobsByDate(jobs, "today", now).map(({ id }) => id), ["today"]);
+  assert.deepEqual(filterJobsByDate(jobs, "yesterday", now).map(({ id }) => id), ["yesterday"]);
+  assert.deepEqual(filterJobsByDate(jobs, "last7", now).map(({ id }) => id), ["today", "yesterday", "boundary"]);
+  assert.deepEqual(filterJobsByDate(jobs, "unknown", now).map(({ id }) => id), allIds);
 });
 
 test("GitHub issue titles are preferred over prompts and hashes", () => {
