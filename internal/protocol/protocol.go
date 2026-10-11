@@ -42,6 +42,14 @@ type Heartbeat struct {
 	LeaseToken string `json:"lease_token"`
 }
 
+// LiveEvents carries event log lines a worker pushes while a run is still
+// executing, so the control plane can serve a live transcript.
+type LiveEvents struct {
+	InstanceID string `json:"instance_id"`
+	LeaseToken string `json:"lease_token"`
+	Events     string `json:"events"`
+}
+
 type Completion struct {
 	Artifacts        []string        `json:"artifacts,omitempty"`
 	PublicationError string          `json:"publication_error,omitempty"`
