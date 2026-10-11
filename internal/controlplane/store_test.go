@@ -72,7 +72,7 @@ func TestOpenStoreReplacesLegacySchema(t *testing.T) {
 	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if count != 0 || version != 6 {
+	if count != 0 || version != 7 {
 		t.Fatalf("migrated database count=%d version=%d", count, version)
 	}
 }
@@ -83,7 +83,7 @@ func TestOpenStoreRejectsNewerSchemaWithoutDeletingIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`CREATE TABLE future_data(value TEXT); INSERT INTO future_data VALUES('preserved'); PRAGMA user_version=7;`); err != nil {
+	if _, err := db.Exec(`CREATE TABLE future_data(value TEXT); INSERT INTO future_data VALUES('preserved'); PRAGMA user_version=8;`); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -711,6 +711,145 @@ func TestStoreAdmitsUniqueFixedOccurrencesAndCoalescesOverlap(t *testing.T) {
 	}
 }
 
+func TestRequeueLinksJobToPriorAttempt(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "machinist.db"))
+	steps := []config.WorkflowStep{{Command: testAgent("build", "{{task.spec}}")}}
+	const issue = "https://github.com/example/repo/issues/7"
+	task := protocol.Task{Title: "Fix the thing", SourceURL: issue, Spec: "Build it."}
+
+	first, err := store.CreateTaskJob(t.Context(), task, "machinist", "deliver", "", steps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := workflowWorker()
+	worker.Artifacts = true
+	run, err := store.Poll(t.Context(), worker)
+	if err != nil || run == nil {
+		t.Fatalf("poll first attempt: %v %v", run, err)
+	}
+	if err := store.Complete(t.Context(), run.ID, protocol.Completion{InstanceID: "worker-a", LeaseToken: run.LeaseToken, State: "failed", ExitCode: 1, Error: "tests failed"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Requeuing the same issue in the same repository chains to the failed attempt.
+	second, err := store.CreateTaskJob(t.Context(), task, "machinist", "deliver", "", steps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]Job{}
+	for _, job := range snapshot.Jobs {
+		byID[job.ID] = job
+	}
+	if len(snapshot.Jobs) != 2 {
+		t.Fatalf("snapshot jobs = %#v", snapshot.Jobs)
+	}
+	retry, firstRun := byID[second], byID[first]
+	if retry.Attempt != 2 || retry.PreviousJobID != first || retry.SupersededBy != "" {
+		t.Fatalf("retry job = %#v", retry)
+	}
+	if firstRun.Attempt != 1 || firstRun.PreviousJobID != "" || firstRun.SupersededBy != second {
+		t.Fatalf("superseded job = %#v", firstRun)
+	}
+
+	// A third attempt chains onto the second and keeps both directions navigable.
+	run, err = store.Poll(t.Context(), worker)
+	if err != nil || run == nil {
+		t.Fatalf("poll second attempt: %v %v", run, err)
+	}
+	if err := store.Complete(t.Context(), run.ID, protocol.Completion{InstanceID: "worker-a", LeaseToken: run.LeaseToken, State: "timed_out", ExitCode: 124, Error: "timed out"}); err != nil {
+		t.Fatal(err)
+	}
+	third, err := store.CreateTaskJob(t.Context(), task, "machinist", "deliver", "", steps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, job := range snapshot.Jobs {
+		switch job.ID {
+		case third:
+			if job.Attempt != 3 || job.PreviousJobID != second {
+				t.Fatalf("third attempt = %#v", job)
+			}
+		case second:
+			if job.SupersededBy != third {
+				t.Fatalf("second attempt = %#v", job)
+			}
+		}
+	}
+
+	// The same issue in another repository is an unrelated job, not a new attempt.
+	other, err := store.CreateTaskJob(t.Context(), task, "other-repo", "deliver", "", steps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, job := range snapshot.Jobs {
+		if job.ID == other && (job.Attempt != 1 || job.PreviousJobID != "") {
+			t.Fatalf("other repository job = %#v", job)
+		}
+	}
+}
+
+func TestIssueTriggerRequeueLinksToPriorAttempt(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "machinist.db"))
+	if err := store.SyncTriggers(t.Context(), []TriggerDefinition{{Identity: "issue/github", Family: "issue", ConfigSignature: "signature"}}); err != nil {
+		t.Fatal(err)
+	}
+	generation := mustTriggerGeneration(t, store, "issue/github")
+	const subject = "https://github.com/example/repo/issues/9"
+	admission := func(occurrence string) TriggerAdmission {
+		return TriggerAdmission{
+			Identity: "issue/github", Family: "issue", ConfigSignature: "signature", ConfigGeneration: generation,
+			OccurrenceKey: occurrence, Subject: subject, Title: "Fix it", ScheduledAt: store.now().UTC(),
+			Prompt: "Build it.", Repository: "machinist", SelectionName: "deliver",
+			Command: testAgent("build", "Build it."),
+		}
+	}
+
+	first, created, err := store.CreateTriggeredJob(t.Context(), admission("event-1"))
+	if err != nil || !created {
+		t.Fatalf("first admission = %q, %v, %v", first, created, err)
+	}
+	run, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"machinist"}))
+	if err != nil || run == nil {
+		t.Fatalf("poll first attempt: %v %v", run, err)
+	}
+	if err := store.Complete(t.Context(), run.ID, protocol.Completion{InstanceID: "worker-a", LeaseToken: run.LeaseToken, State: "failed", ExitCode: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A new request on the same issue after failure creates a new linked attempt.
+	second, created, err := store.CreateTriggeredJob(t.Context(), admission("event-2"))
+	if err != nil || !created {
+		t.Fatalf("requeue admission = %q, %v, %v", second, created, err)
+	}
+	snapshot, err := store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Jobs) != 2 {
+		t.Fatalf("snapshot jobs = %#v", snapshot.Jobs)
+	}
+	for _, job := range snapshot.Jobs {
+		if job.ID == second && (job.Attempt != 2 || job.PreviousJobID != first) {
+			t.Fatalf("requeued job = %#v", job)
+		}
+		if job.ID == first && job.SupersededBy != second {
+			t.Fatalf("failed job = %#v", job)
+		}
+	}
+}
+
 func TestStorePreservesLatestFailedJobHealthAcrossSuccessfulPolls(t *testing.T) {
 	clock := newTestClock(time.Date(2026, time.August, 27, 9, 0, 0, 0, time.UTC))
 	store := openTestStore(t, filepath.Join(t.TempDir(), "machinist.db"))
@@ -1140,8 +1279,8 @@ func testVersionOneUpgrade(t *testing.T, partial string) {
 	}
 	defer store.Close()
 	var version int
-	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 6 {
-		t.Fatalf("schema version = %d, %v, want 6", version, err)
+	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 7 {
+		t.Fatalf("schema version = %d, %v, want 7", version, err)
 	}
 	var columns int
 	if err := store.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name IN ('has_shepherd','schedule_name','title')`).Scan(&columns); err != nil || columns != 1 {
