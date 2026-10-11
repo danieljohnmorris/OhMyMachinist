@@ -24,12 +24,33 @@ func TestFactoryWorkflowDryRun(t *testing.T) {
 		t.Fatalf("dry run: %v: %s", err, output)
 	}
 	text := string(output)
-	for _, expected := range []string{"[dry-run] git switch", "[dry-run] adversarial review", "[dry-run] comment on"} {
+	for _, expected := range []string{"[dry-run] git switch", "[dry-run] adversarial review", "[dry-run] comment on", "[dry-run] post-pr review"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("dry-run output missing %q: %s", expected, text)
 		}
 	}
 	if strings.Contains(text, "merge") || strings.Contains(text, "deploy") {
 		t.Fatalf("dry-run exposed a forbidden action: %s", text)
+	}
+}
+
+func TestFactoryWorkflowDryRunPostPRReviewDisabled(t *testing.T) {
+	script, err := filepath.Abs("delivery.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(script, "dry-run")
+	command.Env = append(os.Environ(),
+		"FACTORY_ISSUE_KEY=ABC-12", "FACTORY_ISSUE_TITLE=Add archive page",
+		"FACTORY_PROMPT_FILE=pr-body.md", "FACTORY_REVIEW_COMMAND=review",
+		"FACTORY_COMMENT_COMMAND=comment", "FACTORY_SCREENSHOT_DIR=",
+		"FACTORY_DISABLE_POST_PR_REVIEW=1",
+	)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dry run: %v: %s", err, output)
+	}
+	if strings.Contains(string(output), "post-pr review") {
+		t.Fatalf("disabled post-pr review still ran: %s", output)
 	}
 }
