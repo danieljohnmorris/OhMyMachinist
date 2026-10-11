@@ -59,7 +59,14 @@ type Job struct {
 	State            string            `json:"state"`
 	CreatedAt        time.Time         `json:"created_at"`
 	UpdatedAt        time.Time         `json:"updated_at"`
+	StateHistory     []StateTransition `json:"state_history,omitempty"`
 	Runs             []Run             `json:"runs"`
+}
+
+// StateTransition is one recorded job state change with the time it happened.
+type StateTransition struct {
+	State     string    `json:"state"`
+	ChangedAt time.Time `json:"changed_at"`
 }
 
 type Run struct {
@@ -246,7 +253,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS jobs_trigger_occurrence ON jobs(trigger_identi
 CREATE UNIQUE INDEX IF NOT EXISTS jobs_active_fixed_trigger ON jobs(trigger_identity) WHERE fixed_trigger=1 AND state IN ('queued','running');
 CREATE UNIQUE INDEX IF NOT EXISTS jobs_active_trigger_subject ON jobs(trigger_subject) WHERE trigger_subject<>'' AND state IN ('queued','running');
 CREATE INDEX IF NOT EXISTS github_trigger_requests_reconciliation ON github_trigger_requests(trigger_identity,needs_reconciliation,requested_at);
-`
+CREATE TABLE IF NOT EXISTS job_state_history (
+ job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+ state TEXT NOT NULL, changed_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS job_state_history_job ON job_state_history(job_id);
+CREATE TRIGGER IF NOT EXISTS job_state_history_insert AFTER INSERT ON jobs
+BEGIN
+ INSERT INTO job_state_history(job_id,state,changed_at) VALUES (new.id,new.state,new.created_at);
+END;
+CREATE TRIGGER IF NOT EXISTS job_state_history_update AFTER UPDATE OF state ON jobs WHEN old.state<>new.state
+BEGIN
+ INSERT INTO job_state_history(job_id,state,changed_at) VALUES (new.id,new.state,new.updated_at);
+END;`
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("initialize database: %w", err)
 	}
@@ -1255,7 +1273,40 @@ FROM jobs j LEFT JOIN runs r ON r.job_id=j.id LEFT JOIN workers w ON w.instance_
 	if err := loadJobMetadata(ctx, s.db, jobs); err != nil {
 		return nil, fmt.Errorf("read job metadata: %w", err)
 	}
+	if err := loadJobStateHistory(ctx, s.db, jobs); err != nil {
+		return nil, fmt.Errorf("read job state history: %w", err)
+	}
 	return jobs, nil
+}
+
+// loadJobStateHistory attaches each job's recorded state transitions, oldest
+// first. Jobs from before the history existed have no entries.
+func loadJobStateHistory(ctx context.Context, db *sql.DB, jobs []Job) error {
+	byID := make(map[string]*Job, len(jobs))
+	for i := range jobs {
+		byID[jobs[i].ID] = &jobs[i]
+	}
+	rows, err := db.QueryContext(ctx, `SELECT job_id,state,changed_at FROM job_state_history ORDER BY rowid`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var jobID, state, changedAt string
+		if err := rows.Scan(&jobID, &state, &changedAt); err != nil {
+			return err
+		}
+		job := byID[jobID]
+		if job == nil {
+			continue
+		}
+		at, err := time.Parse(time.RFC3339Nano, changedAt)
+		if err != nil {
+			continue
+		}
+		job.StateHistory = append(job.StateHistory, StateTransition{State: state, ChangedAt: at})
+	}
+	return rows.Err()
 }
 
 func resultMetrics(result []byte) (*int64, *int64) {

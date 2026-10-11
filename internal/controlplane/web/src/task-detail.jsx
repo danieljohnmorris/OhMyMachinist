@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { ArrowLeft, ArrowRight, Check } from "lucide-react";
 import { Tabs } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
@@ -10,6 +10,7 @@ import { taskPresentation } from "./task-presentation.js";
 import { linkifyText } from "./linkify.js";
 import { jobDisplayTitle } from "./runs-board.js";
 import { formatDurationMillis, formatTokenUsage } from "./run-metrics.js";
+import { activityRows } from "./run-activity.js";
 import {
   State,
   friendlyName,
@@ -223,6 +224,7 @@ export function TaskDetail({
               />
             )}
           </Card>
+          <RunActivity job={job} />
           <div
             className="space-y-6 rounded-sm border border-border bg-surface p-5 text-sm sm:p-6"
             aria-label="Task details"
@@ -343,6 +345,51 @@ export function TaskDetail({
         />
       ) : null}
     </div>
+  );
+}
+
+// Run activity lists the job's state transitions, oldest first, with a
+// relative time per transition and the duration spent in each exited state.
+// The current state keeps a live duration while the run is still in progress.
+// Relative times refresh periodically without a full page reload; new
+// transitions arrive through the page's existing status refresh.
+function RunActivity({ job }) {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(new Date()), 30000);
+    return () => clearInterval(timer);
+  }, []);
+  const rows = activityRows(job, now);
+  if (!rows.length) return null;
+  return (
+    <Card className="space-y-3 p-5 sm:p-6" aria-label="Run activity">
+      <h2 className="text-lg font-semibold">Activity</h2>
+      <ol className="space-y-3 text-sm">
+        {rows.map((row, index) => (
+          <li
+            key={index}
+            className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1"
+          >
+            <time
+              className="min-w-0"
+              dateTime={row.at}
+              title={formatTimestamp(row.at)}
+            >
+              {row.kind === "transition"
+                ? `${stateLabel(row.from)} → ${stateLabel(row.to)}`
+                : stateLabel(row.state)}
+              <span className="text-muted-foreground"> · {row.ago}</span>
+            </time>
+            {row.duration && (
+              <span className="text-xs text-muted-foreground">
+                {stateLabel(row.kind === "transition" ? row.from : row.state)}{" "}
+                {row.duration}
+              </span>
+            )}
+          </li>
+        ))}
+      </ol>
+    </Card>
   );
 }
 

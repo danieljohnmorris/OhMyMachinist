@@ -48,6 +48,59 @@ func TestStoreRejectsContradictoryOutcomes(t *testing.T) {
 	}
 }
 
+func TestStoreRecordsJobStateTransitions(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "machinist.db"))
+	jobID, err := store.CreateJob(t.Context(), "request", "machinist", "plan", testAgent("plan", "Plan request"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.CreateJob(t.Context(), "request", "machinist", "plan", testAgent("plan", "Plan request")); err != nil {
+		t.Fatal(err)
+	}
+	assertHistory := func(want []string) {
+		t.Helper()
+		snapshot, err := store.Snapshot(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var states []string
+		for _, job := range snapshot.Jobs {
+			if job.ID != jobID {
+				continue
+			}
+			for _, transition := range job.StateHistory {
+				states = append(states, transition.State)
+				if transition.ChangedAt.IsZero() {
+					t.Fatalf("transition %q has zero changed_at", transition.State)
+				}
+			}
+		}
+		if !slices.Equal(states, want) {
+			t.Fatalf("state history = %v, want %v", states, want)
+		}
+	}
+
+	run, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"machinist"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	run, err = store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"machinist"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Complete(t.Context(), run.ID, protocol.Completion{InstanceID: "worker-a", LeaseToken: run.LeaseToken, State: "timed_out", ExitCode: 124}); err != nil {
+		t.Fatal(err)
+	}
+	assertHistory([]string{"queued", "running", "failed"})
+
+	// Jobs created before the history existed must load without transitions.
+	if _, err := store.db.Exec(`DELETE FROM job_state_history`); err != nil {
+		t.Fatal(err)
+	}
+	assertHistory(nil)
+}
+
 func TestOpenStoreReplacesLegacySchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "machinist.db")
 	db, err := sql.Open("sqlite", path)
