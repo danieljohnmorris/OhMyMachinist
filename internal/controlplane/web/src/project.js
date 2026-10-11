@@ -1,10 +1,11 @@
-export const projectKeyPattern = /^([A-Z][A-Z0-9]{1,9})-\d+\b/;
+export const projectKeyPattern = /^([A-Z][A-Z0-9]+)-/i;
 
 export function resolveJobProject(job) {
   const explicit = typeof job?.metadata?.project === "string" ? job.metadata.project.trim() : "";
   if (explicit) return explicit;
   const title = jobDisplayTitle(job);
-  return title.match(projectKeyPattern)?.[1] || "Other";
+  const match = title.match(projectKeyPattern)?.[1];
+  return match ? match.toUpperCase() : "Other";
 }
 
 export function groupJobsByProject(jobs) {
@@ -25,6 +26,7 @@ export function groupJobsByProject(jobs) {
 }
 
 function jobDisplayTitle(job) {
+  const storedTitle = typeof job?.title === "string" ? job.title.trim() : "";
   const title = typeof job?.github_issue_title === "string" ? job.github_issue_title.trim() : "";
-  return job.task?.title || title || job.task?.spec || job.task?.source_url || job.prompt || job.id;
+  return storedTitle || job.task?.title || title || job.task?.spec || job.task?.source_url || job.prompt || job.id;
 }

@@ -12,7 +12,7 @@ import { Card } from "@/components/ui/card";
 import { PageHeading } from "@/components/ui/page-heading";
 import { cn } from "@/lib/utils";
 import { routeFromHash } from "@/routes";
-import { boardCardTimestamp, boardColumns, currentRun, filterJobs, groupJobsByBoardColumn, jobCounts, jobDisplayTitle } from "@/runs-board";
+import { boardCardTimestamp, boardColumns, boardDateFilters, currentRun, filterJobs, filterJobsByDate, groupJobsByBoardColumn, jobCounts, jobDisplayTitle } from "@/runs-board";
 import { groupJobsByProject } from "@/project";
 import { concurrencyLabel } from "@/concurrency";
 import { createStatusLoader } from "@/status-loader";
@@ -36,6 +36,7 @@ function App() {
   const [submitting, setSubmitting] = useState(false);
   const [composerOpen, setComposerOpen] = useState(false);
   const [filter, setFilter] = useState("all");
+  const [dateFilter, setDateFilter] = useState("all");
   const [runsView, setRunsView] = useState("board");
   const [boardLayout, setBoardLayout] = useState(() => localStorage.getItem("machinist-board-layout") === "projects" ? "projects" : "all");
   const [dark, setDark] = useState(() => localStorage.getItem("machinist-theme") !== "light");
@@ -103,6 +104,7 @@ function App() {
 
   const counts = useMemo(() => jobCounts(status.jobs), [status.jobs]);
   const visibleJobs = useMemo(() => filterJobs(status.jobs, filter), [filter, status.jobs]);
+  const datedJobs = useMemo(() => filterJobsByDate(visibleJobs, dateFilter), [dateFilter, visibleJobs]);
 
   const connectedWorkers = status.workers.filter((worker) => worker.connected).length;
   const selectedJob = route.jobID ? status.jobs.find((job) => job.id === route.jobID) : undefined;
@@ -217,6 +219,11 @@ function App() {
                   <Button variant="ghost" size="sm" className={cn("h-7 border-transparent px-2.5 text-xs!", runsView === "board" && "bg-surface text-foreground shadow-xs")} aria-pressed={runsView === "board"} onClick={() => setRunsView("board")}><LayoutDashboard className="size-3.5" />Board</Button>
                   <Button variant="ghost" size="sm" className={cn("h-7 border-transparent px-2.5 text-xs!", runsView === "table" && "bg-surface text-foreground shadow-xs")} aria-pressed={runsView === "table"} onClick={() => setRunsView("table")}><Table2 className="size-3.5" />List</Button>
                 </div>
+                {runsView === "board" && <div className="inline-flex rounded-lg bg-muted/60 p-1" role="group" aria-label="Board date filter">
+                  {boardDateFilters.map(({ id, label }) => (
+                    <Button key={id} variant="ghost" size="sm" className={cn("h-7 border-transparent px-2.5 text-xs!", dateFilter === id && "bg-surface text-foreground shadow-xs")} aria-pressed={dateFilter === id} onClick={() => setDateFilter(id)}>{label}</Button>
+                  ))}
+                </div>}
                 <div className="inline-flex rounded-lg bg-muted/60 p-1" role="group" aria-label="Board layout">
                   <Button variant="ghost" size="sm" className={cn("h-7 border-transparent px-2.5 text-xs!", boardLayout === "all" && "bg-surface text-foreground shadow-xs")} aria-pressed={boardLayout === "all"} onClick={() => setBoardLayout("all")}>All</Button>
                   <Button variant="ghost" size="sm" className={cn("h-7 border-transparent px-2.5 text-xs!", boardLayout === "projects" && "bg-surface text-foreground shadow-xs")} aria-pressed={boardLayout === "projects"} onClick={() => setBoardLayout("projects")}>By project</Button>
@@ -224,7 +231,7 @@ function App() {
               </div>
             </div>
 
-            {runsView === "board" ? (boardLayout === "projects" ? <ProjectRunBoard jobs={visibleJobs} /> : <RunBoard jobs={visibleJobs} />) : <Card className="overflow-hidden">
+            {runsView === "board" ? (boardLayout === "projects" ? <ProjectRunBoard jobs={datedJobs} /> : <RunBoard jobs={datedJobs} />) : <Card className="overflow-hidden">
               {visibleJobs.length ? visibleJobs.map((job) => <RunRow key={job.id} job={job} />) : <EmptyRuns filtered={filter !== "all"} openComposer={() => setComposerOpen(true)} />}
             </Card>}
           </section>

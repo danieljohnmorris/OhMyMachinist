@@ -41,6 +41,48 @@ export function filterJobs(jobs, filter) {
   });
 }
 
+export const boardDateFilters = [
+  { id: "today", label: "Today" },
+  { id: "yesterday", label: "Yesterday" },
+  { id: "last7", label: "Last 7 days" },
+  { id: "all", label: "All" },
+];
+
+function startOfLocalDay(date) {
+  const day = new Date(date);
+  day.setHours(0, 0, 0, 0);
+  return day;
+}
+
+// Date filters use local calendar days, not a rolling 168-hour window:
+// "Last 7 days" is today plus the previous six calendar days.
+export function boardDateWindow(now, filter) {
+  const todayStart = startOfLocalDay(now);
+  const tomorrowStart = startOfLocalDay(now);
+  tomorrowStart.setDate(tomorrowStart.getDate() + 1);
+  if (filter === "today") return { start: todayStart, end: tomorrowStart };
+  if (filter === "yesterday") {
+    const start = startOfLocalDay(now);
+    start.setDate(start.getDate() - 1);
+    return { start, end: todayStart };
+  }
+  if (filter === "last7") {
+    const start = startOfLocalDay(now);
+    start.setDate(start.getDate() - 6);
+    return { start, end: tomorrowStart };
+  }
+  return null;
+}
+
+export function filterJobsByDate(jobs, filter, now = new Date()) {
+  const window = boardDateWindow(now, filter);
+  if (!window) return jobs;
+  return jobs.filter((job) => {
+    const timestamp = Date.parse(boardCardTimestamp(job));
+    return Number.isFinite(timestamp) && timestamp >= window.start.getTime() && timestamp < window.end.getTime();
+  });
+}
+
 export function groupJobsByBoardColumn(jobs) {
   const groups = { queued: [], running: [], attention: [], finished: [] };
   for (const job of jobs) groups[boardColumnForState(job.state)].push(job);

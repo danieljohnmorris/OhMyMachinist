@@ -9,7 +9,15 @@ test("job projects use stored project first, then title, then Other", () => {
   assert.equal(resolveJobProject({ github_issue_title: "OMM-3: Sidebar links" }), "OMM");
   assert.equal(resolveJobProject({ github_issue_title: "SPARK-1: Spark" }), "SPARK");
   assert.equal(resolveJobProject({ prompt: "No project" }), "Other");
-  assert.equal(resolveJobProject({ github_issue_title: "lower-1: No" }), "Other");
+  assert.equal(resolveJobProject({ github_issue_title: "No prefix at all" }), "Other");
+});
+
+test("job projects fall back to stored titles and match prefixes case-insensitively", () => {
+  assert.equal(resolveJobProject({ title: "SPARK-12: Fix intake" }), "SPARK");
+  assert.equal(resolveJobProject({ title: "blog-7: Draft post" }), "BLOG");
+  assert.equal(resolveJobProject({ title: "SPARK-Notes: no digits needed" }), "SPARK");
+  assert.equal(resolveJobProject({ title: "mach-1: lowercase", metadata: { project: "SPARK" } }), "SPARK");
+  assert.equal(resolveJobProject({ title: "Fix-bug: hyphen without key", metadata: { project: "MACH" } }), "MACH");
 });
 
 test("project stacks use recent activity and preserve jobs in each stack", () => {
