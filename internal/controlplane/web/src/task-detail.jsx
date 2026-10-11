@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { Artifacts, useTaskArtifacts } from "./artifacts.jsx";
+import { Transcript } from "./transcript.jsx";
 import { taskPresentation } from "./task-presentation.js";
 import { linkifyText } from "./linkify.js";
 import { jobDisplayTitle } from "./runs-board.js";
@@ -268,6 +269,7 @@ export function TaskDetail({
           </div>
         </div>
       </div>
+      {latest && <Transcript run={latest} csrfToken={csrfToken} />}
       {(job.task && lastCompleted) || history.length > 0 ? (
         <Tabs
           key={job.id}
