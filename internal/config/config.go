@@ -69,14 +69,31 @@ type Server struct {
 }
 
 type Config struct {
-	Storage   Storage             `toml:"storage"`
-	Workflows map[string]Workflow `toml:"workflows"`
-	Server    Server              `toml:"server"`
-	Commands  map[string]Command  `toml:"commands"`
-	GitHub    GitHub              `toml:"github"`
-	IssueSources issues.Config   `toml:"issue_sources"`
-	Triggers  TriggerDefinitions  `toml:"triggers"`
-	path      string
+	Storage      Storage             `toml:"storage"`
+	Workflows    map[string]Workflow `toml:"workflows"`
+	Server       Server              `toml:"server"`
+	Commands     map[string]Command  `toml:"commands"`
+	GitHub       GitHub              `toml:"github"`
+	IssueSources issues.Config       `toml:"issue_sources"`
+	Triggers     TriggerDefinitions  `toml:"triggers"`
+	Alerts       Alerts              `toml:"alerts"`
+	path         string
+}
+
+// Alerts configures the pending failure alert spool directory. An external
+// alert poller watches it; when unset, no failure alerts are written.
+type Alerts struct {
+	Directory string `toml:"directory"`
+}
+
+// ResolveAlerts expands the alert spool directory like other configured paths
+// (home expansion, relative to the config file). An empty directory disables
+// alerting.
+func (c Config) ResolveAlerts() (string, error) {
+	if c.Alerts.Directory == "" {
+		return "", nil
+	}
+	return resolveConfigPath(c.Alerts.Directory, filepath.Dir(c.path))
 }
 
 type GitHub struct {
