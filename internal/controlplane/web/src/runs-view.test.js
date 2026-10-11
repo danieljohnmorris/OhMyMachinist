@@ -96,7 +96,7 @@ test("runs default to board view and share filters when switching views", async 
   for (const label of ["Result", "Instructions", "Details"]) {
     assert.equal([...document.querySelectorAll('[role="tab"]')].find(el => el.textContent === label), undefined, `${label} should not be a tab`);
   }
-  const instructions = document.querySelector('[aria-label="Task sections"] pre');
+  const instructions = document.querySelector('[aria-label="Task sections"] [aria-label="Instructions"]');
   const details = document.querySelector('[aria-label="Task details"]');
   const result = document.querySelector('[aria-label="Current result"]');
   assert.ok(instructions && result && details, "instructions, result, and details are visible together");
