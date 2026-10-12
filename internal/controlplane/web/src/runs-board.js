@@ -54,7 +54,14 @@ export function priorAttempts(jobs, job) {
     current = byID.get(current.previous_job_id);
     if (current) chain.push(current);
   }
-  return chain.reverse();
+  if (chain.length) return chain.reverse();
+  // Plane-intake jobs often lack previous_job_id; fall back to same ticket key.
+  const key = jobTicketKey(job);
+  if (!key) return [];
+  return jobs
+    .filter((candidate) => candidate.id !== job.id && jobTicketKey(candidate) === key
+      && Date.parse(attemptTime(candidate) || 0) < Date.parse(attemptTime(job) || 0))
+    .sort((left, right) => Date.parse(attemptTime(left) || 0) - Date.parse(attemptTime(right) || 0));
 }
 
 export function supersededJob(jobs, job) {
@@ -161,6 +168,56 @@ export function jobCounts(jobs) {
 export function currentRun(job) {
   if (job.workflow) return job.runs.at(-1);
   return [...job.runs].reverse().find((run) => run.state !== "queued") || job.runs[0];
+}
+
+
+export function attemptTime(job) {
+  return job.updated_at || job.created_at || "";
+}
+
+const ticketKeyPattern = /^([A-Z][A-Z0-9]{1,9}-\d+)\b/;
+
+// Collapse key for one Plane ticket: the issue key leading the displayed title
+// (e.g. SPARK-6), falling back to the persisted source field that identifies
+// the ticket. Empty when the job is not tied to a ticket.
+export function jobTicketKey(job) {
+  const title = jobDisplayTitle(job);
+  const fromTitle = typeof title === "string" ? title.trim().match(ticketKeyPattern)?.[1] : undefined;
+  if (fromTitle) return `key:${fromTitle}`;
+  for (const source of [job.metadata?.issue_url, job.task?.source_url]) {
+    if (typeof source === "string" && source.trim()) return `url:${source.trim()}`;
+  }
+  return "";
+}
+
+// One entry per Plane ticket: the latest attempt as the card and every older
+// attempt linked from it. Jobs without a ticket key stay as their own entry.
+export function collapseJobsByTicket(jobs) {
+  const groups = new Map();
+  const entries = [];
+  for (const job of jobs) {
+    const key = jobTicketKey(job);
+    const group = key ? groups.get(key) : undefined;
+    if (!group) {
+      const entry = { latest: job, priors: [] };
+      if (key) groups.set(key, entry);
+      entries.push(entry);
+      continue;
+    }
+    if (Date.parse(attemptTime(job)) > Date.parse(attemptTime(group.latest))) {
+      group.priors.push(group.latest);
+      group.latest = job;
+    } else {
+      group.priors.push(job);
+    }
+  }
+  return entries;
+}
+
+export function groupEntriesByBoardColumn(entries) {
+  const groups = { queued: [], running: [], attention: [], finished: [] };
+  for (const entry of entries) groups[boardColumnForState(entry.latest.state)].push(entry);
+  return groups;
 }
 
 export function jobDisplayTitle(job) {

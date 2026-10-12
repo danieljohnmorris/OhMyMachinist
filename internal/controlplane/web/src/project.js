@@ -30,3 +30,20 @@ function jobDisplayTitle(job) {
   const title = typeof job?.github_issue_title === "string" ? job.github_issue_title.trim() : "";
   return storedTitle || job.task?.title || title || job.task?.spec || job.task?.source_url || job.prompt || job.id;
 }
+
+export function groupEntriesByProject(entries) {
+  const groups = new Map();
+  for (const entry of entries) {
+    const project = resolveJobProject(entry.latest);
+    if (!groups.has(project)) groups.set(project, { entries: [], activity: "" });
+    const group = groups.get(project);
+    group.entries.push(entry);
+    const activity = entry.latest.updated_at || entry.latest.created_at || "";
+    if (!group.activity || Date.parse(activity) > Date.parse(group.activity)) {
+      group.activity = activity;
+    }
+  }
+  return [...groups.entries()]
+    .sort(([, left], [, right]) => Date.parse(right.activity) - Date.parse(left.activity))
+    .map(([project, group]) => [project, group.entries]);
+}

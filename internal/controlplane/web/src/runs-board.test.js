@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { boardCardTimestamp, boardColumnForState, boardDateFilters, boardDateWindow, collapseIssueAttempts, filterJobs, filterJobsByDate, githubIssueReference, groupJobsByBoardColumn, jobDisplayTitle, needsAttention, priorAttempts, supersededJob } from "./runs-board.js";
+import { attemptTime, boardCardTimestamp, boardColumnForState, boardDateFilters, boardDateWindow, collapseIssueAttempts, collapseJobsByTicket, filterJobs, filterJobsByDate, githubIssueReference, groupJobsByBoardColumn, jobDisplayTitle, jobTicketKey, needsAttention, priorAttempts, supersededJob } from "./runs-board.js";
 
 test("board card timestamps prefer run completion for finished jobs and last update otherwise", () => {
   const finishedJob = {
@@ -183,4 +183,53 @@ test("jobs without an issue source stay on their own cards", () => {
   assert.equal(grouped.queued.length, 1);
   assert.equal(grouped.finished.length, 1);
   assert.deepEqual(grouped.finished.map(({ id }) => id), ["plain_1"]);
+});
+
+test("ticket keys come from the title first, then the persisted source field", () => {
+  assert.equal(jobTicketKey({ title: "SPARK-6: Board collapse", prompt: "ignored" }), "key:SPARK-6");
+  assert.equal(jobTicketKey({ github_issue_title: "MACH-13: One card per ticket" }), "key:MACH-13");
+  assert.equal(jobTicketKey({ prompt: "no key", metadata: { issue_url: "https://plane.example/tickets/SPARK-6/" } }), "url:https://plane.example/tickets/SPARK-6/");
+  assert.equal(jobTicketKey({ prompt: "no key", task: { source_url: "https://plane.example/tickets/SPARK-6/" } }), "url:https://plane.example/tickets/SPARK-6/");
+  assert.equal(jobTicketKey({ prompt: "unticketed work", id: "job_1" }), "");
+});
+
+test("attempts of one ticket collapse to the latest with priors linked", () => {
+  const spark = (id, state, updated) => ({ id, state, title: "SPARK-6: Board collapse", created_at: "2026-10-01T00:00:00Z", updated_at: updated, runs: [] });
+  const entries = collapseJobsByTicket([
+    spark("spark_cancelled", "cancelled", "2026-10-02T00:00:00Z"),
+    spark("spark_latest", "succeeded", "2026-10-11T00:00:00Z"),
+    spark("spark_failed", "failed", "2026-10-05T00:00:00Z"),
+    { id: "unticketed", state: "running", prompt: "no key", created_at: "2026-10-06T00:00:00Z", runs: [] },
+  ]);
+  assert.equal(entries.length, 2);
+  assert.equal(entries[0].latest.id, "spark_latest");
+  assert.deepEqual(entries[0].priors.map(({ id }) => id), ["spark_cancelled", "spark_failed"]);
+  assert.equal(entries[1].latest.id, "unticketed");
+  assert.equal(entries[1].priors.length, 0);
+  assert.deepEqual(entries.map(({ latest }) => attemptTime(latest)), ["2026-10-11T00:00:00Z", "2026-10-06T00:00:00Z"]);
+});
+
+test("collapse groups by the persisted source field when titles have no key", () => {
+  const source = { task: { source_url: "https://plane.example/tickets/SPARK-6/" }, prompt: "retry", created_at: "2026-10-01T00:00:00Z", runs: [] };
+  const entries = collapseJobsByTicket([
+    { ...source, id: "old", updated_at: "2026-10-02T00:00:00Z" },
+    { ...source, id: "new", updated_at: "2026-10-09T00:00:00Z" },
+  ]);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].latest.id, "new");
+  assert.deepEqual(entries[0].priors.map(({ id }) => id), ["old"]);
+});
+
+test("attempt time prefers the last update and falls back to creation", () => {
+  assert.equal(attemptTime({ updated_at: "2026-10-11T00:00:00Z", created_at: "2026-10-01T00:00:00Z" }), "2026-10-11T00:00:00Z");
+  assert.equal(attemptTime({ created_at: "2026-10-01T00:00:00Z" }), "2026-10-01T00:00:00Z");
+  assert.equal(attemptTime({}), "");
+});
+
+test("priorAttempts falls back to same Plane ticket when previous_job_id is absent", () => {
+  const jobs = [
+    { id: "a", title: "SPARK-6: x", state: "failed", updated_at: "2026-10-02T00:00:00Z", created_at: "2026-10-01T00:00:00Z", runs: [] },
+    { id: "b", title: "SPARK-6: x", state: "succeeded", updated_at: "2026-10-11T00:00:00Z", created_at: "2026-10-10T00:00:00Z", runs: [] },
+  ];
+  assert.deepEqual(priorAttempts(jobs, jobs[1]).map(({ id }) => id), ["a"]);
 });
