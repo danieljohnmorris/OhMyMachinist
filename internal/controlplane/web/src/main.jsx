@@ -1,5 +1,5 @@
 import { TaskDetail } from "./task-detail.jsx";
-import { State, friendlyName, relativeTime } from "./task-display.jsx";
+import { State, friendlyName, relativeTime, stateLabel } from "./task-display.jsx";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "@fontsource-variable/manrope";
@@ -12,8 +12,8 @@ import { Card } from "@/components/ui/card";
 import { PageHeading } from "@/components/ui/page-heading";
 import { cn } from "@/lib/utils";
 import { routeFromHash } from "@/routes";
-import { boardCardTimestamp, boardColumns, boardDateFilters, collapseIssueAttempts, currentRun, filterJobs, filterJobsByDate, groupJobsByBoardColumn, jobCounts, jobDisplayTitle } from "@/runs-board";
-import { groupJobsByProject } from "@/project";
+import { attemptTime, boardCardTimestamp, boardColumns, boardDateFilters, collapseIssueAttempts, collapseJobsByTicket, currentRun, filterJobs, filterJobsByDate, groupEntriesByBoardColumn, groupJobsByBoardColumn, jobCounts, jobDisplayTitle } from "@/runs-board";
+import { groupEntriesByProject, groupJobsByProject } from "@/project";
 import { concurrencyLabel } from "@/concurrency";
 import { createStatusLoader } from "@/status-loader";
 import { TriggersPage } from "@/triggers";
@@ -106,6 +106,12 @@ function App() {
   const counts = useMemo(() => jobCounts(displayJobs), [displayJobs]);
   const visibleJobs = useMemo(() => filterJobs(displayJobs, filter), [filter, displayJobs]);
   const datedJobs = useMemo(() => filterJobsByDate(visibleJobs, dateFilter), [dateFilter, visibleJobs]);
+  // Board: one card per Plane ticket (latest attempt); date/state filters apply to the latest.
+  const boardEntries = useMemo(() => {
+    const datedIds = new Set(filterJobsByDate(status.jobs, dateFilter).map((job) => job.id));
+    return collapseJobsByTicket(status.jobs).filter((entry) =>
+      datedIds.has(entry.latest.id) && filterJobs([entry.latest], filter).length > 0);
+  }, [dateFilter, filter, status.jobs]);
 
   const connectedWorkers = status.workers.filter((worker) => worker.connected).length;
   const selectedJob = route.jobID ? status.jobs.find((job) => job.id === route.jobID) : undefined;
@@ -238,7 +244,7 @@ function App() {
               </div>
             </div>
 
-            {runsView === "board" ? (boardLayout === "projects" ? <ProjectRunBoard jobs={datedJobs} /> : <RunBoard jobs={datedJobs} />) : <Card className="overflow-hidden">
+            {runsView === "board" ? (boardLayout === "projects" ? <ProjectRunBoard entries={boardEntries} /> : <RunBoard entries={boardEntries} />) : <Card className="overflow-hidden">
               {visibleJobs.length ? visibleJobs.map((job) => <RunRow key={job.id} job={job} />) : <EmptyRuns filtered={filter !== "all"} openComposer={() => setComposerOpen(true)} />}
             </Card>}
           </section>
@@ -271,39 +277,39 @@ function RunComposer({ title,setTitle,sourceURL,setSourceURL,choices,repositorie
   </Card>;
 }
 
-function RunBoard({ jobs }) {
-  const groupedJobs = groupJobsByBoardColumn(jobs);
+function RunBoard({ entries }) {
+  const groupedEntries = groupEntriesByBoardColumn(entries);
   return <div className="grid min-w-0 gap-4 md:grid-cols-2 xl:grid-cols-4">
-    {boardColumns.map((column) => <RunColumn key={column.id} column={column} jobs={groupedJobs[column.id]} idPrefix="board" />)}
+    {boardColumns.map((column) => <RunColumn key={column.id} column={column} entries={groupedEntries[column.id]} idPrefix="board" />)}
   </div>;
 }
 
-function ProjectRunBoard({ jobs }) {
-  const projectGroups = groupJobsByProject(jobs);
+function ProjectRunBoard({ entries }) {
+  const projectGroups = groupEntriesByProject(entries);
   return <div className="grid min-w-0 gap-6">
-    {projectGroups.map(([project, projectJobs]) => {
-      const groupedJobs = groupJobsByBoardColumn(projectJobs);
+    {projectGroups.map(([project, projectEntries]) => {
+      const groupedEntries = groupEntriesByBoardColumn(projectEntries);
       return <section key={project} className="min-w-0" aria-labelledby={`project-${project}`}>
         <header className="mb-2 flex items-center justify-between gap-3">
           <h2 id={`project-${project}`} className="text-base font-semibold">{project}</h2>
-          <Badge className="shrink-0 border-border bg-surface text-muted-foreground" aria-label={`${projectJobs.length} visible ${project} runs`}>{projectJobs.length}</Badge>
+          <Badge className="shrink-0 border-border bg-surface text-muted-foreground" aria-label={`${projectEntries.length} visible ${project} runs`}>{projectEntries.length}</Badge>
         </header>
         <div className="grid min-w-0 gap-4 md:grid-cols-2 xl:grid-cols-4">
-          {boardColumns.map((column) => <RunColumn key={column.id} column={column} jobs={groupedJobs[column.id]} idPrefix={`project-${project}`} />)}
+          {boardColumns.map((column) => <RunColumn key={column.id} column={column} entries={groupedEntries[column.id]} idPrefix={`project-${project}`} />)}
         </div>
       </section>;
     })}
   </div>;
 }
 
-function RunColumn({ column, jobs, idPrefix }) {
+function RunColumn({ column, entries, idPrefix }) {
   return <section className="run-column min-w-0 border border-border bg-muted/20" aria-labelledby={`${idPrefix}-${column.id}`}>
     <header className="flex items-center justify-between gap-3 border-b border-border px-3 py-2.5">
       <div className="min-w-0"><h2 id={`${idPrefix}-${column.id}`} className="text-sm font-semibold">{column.title}</h2><p className="break-words text-xs text-muted-foreground">{column.description}</p></div>
-      <Badge className="shrink-0 border-border bg-surface text-muted-foreground" aria-label={`${jobs.length} visible ${column.title.toLowerCase()} runs`}>{jobs.length}</Badge>
+      <Badge className="shrink-0 border-border bg-surface text-muted-foreground" aria-label={`${entries.length} visible ${column.title.toLowerCase()} runs`}>{entries.length}</Badge>
     </header>
     <div className="grid min-w-0 gap-2 p-2">
-      {jobs.length ? jobs.map((job) => <RunCard key={job.id} job={job} />) : <p className="px-2 py-8 text-center text-xs text-muted-foreground">No runs</p>}
+      {entries.length ? entries.map((entry) => <RunCard key={entry.latest.id} job={entry.latest} priors={entry.priors} />) : <p className="px-2 py-8 text-center text-xs text-muted-foreground">No runs</p>}
     </div>
   </section>;
 }
@@ -316,19 +322,26 @@ function attemptBadges(job) {
   </div>;
 }
 
-function RunCard({ job }) {
+function RunCard({ job, priors = [] }) {
   const title = jobDisplayTitle(job);
   const run = currentRun(job);
   const timestamp = boardCardTimestamp(job);
-  return <Card className="overflow-hidden"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="block min-w-0 space-y-3 p-4 transition hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50" aria-label={`Open task ${title}`}>
-    <p className="break-words text-sm font-medium leading-5" title={title}>{title}</p>
-    <p className="text-xs text-muted-foreground">{job.repository} · {friendlyName(run?.command || job.command)}</p>
-    <div className="flex flex-wrap items-center justify-between gap-2">
-      <State value={job.state} />
-      <time className="text-xs text-muted-foreground" dateTime={timestamp} title={timestamp ? new Date(timestamp).toLocaleString() : undefined}>{relativeTime(timestamp)}</time>
-    </div>
-    {attemptBadges(job)}
-  </a></Card>;
+  const attemptCount = priors.length > 0 ? priors.length + 1 : (job.attempt_count || 0);
+  return <div className="min-w-0 space-y-1">
+    <Card className="overflow-hidden"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="block min-w-0 space-y-3 p-4 transition hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50" aria-label={`Open task ${title}`}>
+      <p className="break-words text-sm font-medium leading-5" title={title}>{title}</p>
+      <p className="text-xs text-muted-foreground">{job.repository} · {friendlyName(run?.command || job.command)}</p>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <State value={job.state} />
+        <time className="text-xs text-muted-foreground" dateTime={timestamp} title={timestamp ? new Date(timestamp).toLocaleString() : undefined}>{relativeTime(timestamp)}</time>
+      </div>
+      {priors.length === 0 && attemptBadges(job)}
+    </a></Card>
+    {priors.length > 0 && <div className="flex flex-wrap items-center gap-1.5 px-1">
+      <Badge className="border-border bg-surface text-muted-foreground" aria-label={`${attemptCount} attempts`}>{attemptCount} attempts</Badge>
+      {priors.map((prior) => <a key={prior.id} href={`#/runs/${encodeURIComponent(prior.id)}`} className="text-xs text-muted-foreground underline hover:text-foreground" aria-label={`Open prior attempt ${stateLabel(prior.state)} ${relativeTime(attemptTime(prior))}`}>{stateLabel(prior.state)} · {relativeTime(attemptTime(prior))}</a>)}
+    </div>}
+  </div>;
 }
 
 function RunRow({ job }) {
