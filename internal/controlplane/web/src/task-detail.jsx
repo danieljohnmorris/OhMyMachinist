@@ -9,7 +9,7 @@ import { Transcript } from "./transcript.jsx";
 import { taskPresentation } from "./task-presentation.js";
 import { linkifyText } from "./linkify.js";
 import { Markdown } from "./markdown.js";
-import { jobDisplayTitle, priorAttempts, supersededJob } from "./runs-board.js";
+import { jobDisplayTitle, supersededJob, ticketAttempts, attemptStart, attemptDurationMillis } from "./runs-board.js";
 import { runSidebarLinks } from "./run-links.js";
 import { formatDurationMillis, formatTokenUsage } from "./run-metrics.js";
 import { activityRows } from "./run-activity.js";
@@ -18,7 +18,6 @@ import {
   friendlyName,
   stateLabel,
   formatTimestamp,
-  relativeTime,
 } from "./task-display.jsx";
 
 export function TaskDetail({
@@ -30,6 +29,7 @@ export function TaskDetail({
   deleting,
   onDelete,
   onWorkflowAction,
+  onAttemptChange,
   tab,
   onTabChange,
 }) {
@@ -51,7 +51,7 @@ export function TaskDetail({
   const { planeTicket, pullRequest } = runSidebarLinks(job, result);
   const reviewing = job.state === "awaiting_approval";
   const retriedAs = supersededJob(jobs, job);
-  const attempts = priorAttempts(jobs, job);
+  const attempts = ticketAttempts(jobs, job);
   return (
     <div className="mx-auto max-w-[1200px] space-y-7 p-4 sm:p-6 lg:p-8">
       <header className="space-y-4">
@@ -84,45 +84,6 @@ export function TaskDetail({
               {jobDisplayTitle(retriedAs)}
             </a>
             <State value={retriedAs.state} />
-          </Card>
-        )}
-        {attempts.length > 0 && (
-          <Card className="space-y-3 p-5" aria-label="Prior attempts">
-            <h2 className="text-sm font-semibold">
-              Prior attempts
-            </h2>
-            <ol className="space-y-3">
-              {attempts.map((attempt) => {
-                const run = attempt.runs.at(-1);
-                return (
-                  <li
-                    key={attempt.id}
-                    className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm"
-                  >
-                    <a
-                      className="font-medium text-primary underline"
-                      href={`#/runs/${encodeURIComponent(attempt.id)}`}
-                    >
-                      {jobDisplayTitle(attempt)}
-                    </a>
-                    <State value={attempt.state} />
-                    <span className="text-muted-foreground">
-                      {relativeTime(attempt.created_at)}
-                    </span>
-                    {run?.error && (
-                      <span className="w-full text-xs text-danger">
-                        {run.error}
-                      </span>
-                    )}
-                    {run?.exit_code != null && !run?.error && (
-                      <span className="text-xs text-muted-foreground">
-                        exit code {run.exit_code}
-                      </span>
-                    )}
-                  </li>
-                );
-              })}
-            </ol>
           </Card>
         )}
         {job.task?.source_url && (
@@ -255,117 +216,81 @@ export function TaskDetail({
           ))}
         </ol>
       )}
+      {attempts.length > 1 && (
+        <div
+          className="flex flex-wrap items-center gap-3"
+          aria-label="Attempt picker"
+        >
+          <label className="text-sm font-medium" htmlFor="attempt-picker">
+            Attempt
+          </label>
+          <select
+            id="attempt-picker"
+            className="field-control w-auto"
+            value={job.id}
+            onChange={(event) => onAttemptChange?.(event.target.value)}
+          >
+            {attempts.map((attempt, index) => {
+              const start = attemptStart(attempt);
+              const duration = attemptDurationMillis(attempt);
+              return (
+                <option key={attempt.id} value={attempt.id}>
+                  {[
+                    `Attempt ${index + 1}`,
+                    stateLabel(attempt.state),
+                    start ? `started ${formatTimestamp(start)}` : "",
+                    duration == null ? "" : formatDurationMillis(duration),
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </option>
+              );
+            })}
+          </select>
+          <State value={job.state} />
+        </div>
+      )}
       <div
         className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,380px)]"
         aria-label="Task sections"
       >
-        <section aria-label="Instructions">
-          <h2 className="mb-3 text-lg font-semibold">Instructions</h2>
-          <Markdown
-            className="break-words leading-6"
-            source={
-              job.task
-                ? job.task.spec || "Use the linked source for requirements."
-                : job.prompt
-            }
-          />
-        </section>
-        <div className="space-y-5">
-          <Card
-            className="space-y-5 p-5 sm:p-6"
-            aria-label="Current result"
-          >
-            <h2 className="text-lg font-semibold">
-              {resultTitle(job, result)}
-            </h2>
-            {result?.summary && (
-              <p className="whitespace-pre-wrap break-words text-sm leading-6 text-muted-foreground">
-                {linkifyText(result.summary)}
-              </p>
-            )}
-            {result?.error && result.error !== result.summary && (
-              <p
-                role="alert"
-                className="whitespace-pre-wrap break-words text-sm text-danger"
-              >
-                {linkifyText(result.error)}
-              </p>
-            )}
-            {result && job.task && (
-              <Artifacts
-                key={result.id}
-                artifacts={artifacts}
-                runID={result.id}
-                csrfToken={csrfToken}
-              />
-            )}
-            {job.workflow && (
-              <TaskActions
-                key={`${job.id}:${latest?.id}:${job.state}`}
-                job={job}
-                result={result}
-                onAction={onWorkflowAction}
-              />
-            )}
-          </Card>
-          <RunActivity job={job} />
-          <div
-            className="space-y-6 rounded-sm border border-border bg-surface p-5 text-sm sm:p-6"
-            aria-label="Task details"
-          >
-            <h2 className="text-lg font-semibold">Details</h2>
-            {result?.revision && (
-              <section>
-                <h2 className="mb-2 font-medium">Requested changes</h2>
-                <p className="whitespace-pre-wrap break-words">
-                  {linkifyText(result.revision.feedback)}
-                </p>
-              </section>
-            )}
-            {result?.summary && (
-              <section>
-                <h2 className="mb-2 font-medium">Full summary</h2>
-                <p className="whitespace-pre-wrap break-words leading-6">
-                  {linkifyText(result.summary)}
-                </p>
-              </section>
-            )}
-            {result && <ExecutionDetails run={result} />}
-            <section className="border-t border-border pt-4">
-              <dl className="my-4 grid gap-3 sm:grid-cols-2">
-                <RunMetric label="Task ID" value={job.id} />
-                <RunMetric label="Repository" value={job.repository} />
-                <RunMetric
-                  label="Created"
-                  value={formatTimestamp(job.created_at)}
-                />
-                <RunMetric
-                  label="Updated"
-                  value={formatTimestamp(job.updated_at)}
-                />
-              </dl>
-              <Button
-                variant="outline"
-                disabled={!terminal || deleting}
-                onClick={() => onDelete(job)}
-              >
-                {deleting ? "Deleting…" : "Delete task"}
-              </Button>
-            </section>
-          </div>
-        </div>
-      </div>
-      {latest ? (
         <Tabs
           key={job.id}
-          label="Task transcript, artifacts and history"
+          label="Task spec, transcript, activity, artifacts and history"
           selected={tab || "transcript"}
           onSelect={onTabChange}
           items={[
             {
+              id: "spec",
+              label: "Spec",
+              content: (
+                <section aria-label="Instructions">
+                  <Markdown
+                    className="break-words leading-6"
+                    source={
+                      job.task
+                        ? job.task.spec || "Use the linked source for requirements."
+                        : job.prompt
+                    }
+                  />
+                </section>
+              ),
+            },
+            {
               id: "transcript",
               label: "Transcript",
-              content: <Transcript run={latest} csrfToken={csrfToken} />,
+              content: latest ? (
+                <Transcript run={latest} csrfToken={csrfToken} />
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  No transcript yet.
+                </p>
+              ),
+            },
+            {
+              id: "activity",
+              label: "Activity",
+              content: <RunActivity job={job} />,
             },
             ...(job.task && lastCompleted
               ? [
@@ -433,7 +358,90 @@ export function TaskDetail({
               : []),
           ]}
         />
-      ) : null}
+        <div className="space-y-5">
+          <Card
+            className="space-y-5 p-5 sm:p-6"
+            aria-label="Current result"
+          >
+            <h2 className="text-lg font-semibold">
+              {resultTitle(job, result)}
+            </h2>
+            {result?.summary && (
+              <p className="whitespace-pre-wrap break-words text-sm leading-6 text-muted-foreground">
+                {linkifyText(result.summary)}
+              </p>
+            )}
+            {result?.error && result.error !== result.summary && (
+              <p
+                role="alert"
+                className="whitespace-pre-wrap break-words text-sm text-danger"
+              >
+                {linkifyText(result.error)}
+              </p>
+            )}
+            {result && job.task && (
+              <Artifacts
+                key={result.id}
+                artifacts={artifacts}
+                runID={result.id}
+                csrfToken={csrfToken}
+              />
+            )}
+            {job.workflow && (
+              <TaskActions
+                key={`${job.id}:${latest?.id}:${job.state}`}
+                job={job}
+                result={result}
+                onAction={onWorkflowAction}
+              />
+            )}
+          </Card>
+          <div
+            className="space-y-6 rounded-sm border border-border bg-surface p-5 text-sm sm:p-6"
+            aria-label="Task details"
+          >
+            <h2 className="text-lg font-semibold">Details</h2>
+            {result?.revision && (
+              <section>
+                <h2 className="mb-2 font-medium">Requested changes</h2>
+                <p className="whitespace-pre-wrap break-words">
+                  {linkifyText(result.revision.feedback)}
+                </p>
+              </section>
+            )}
+            {result?.summary && (
+              <section>
+                <h2 className="mb-2 font-medium">Full summary</h2>
+                <p className="whitespace-pre-wrap break-words leading-6">
+                  {linkifyText(result.summary)}
+                </p>
+              </section>
+            )}
+            {result && <ExecutionDetails run={result} />}
+            <section className="border-t border-border pt-4">
+              <dl className="my-4 grid gap-3 sm:grid-cols-2">
+                <RunMetric label="Task ID" value={job.id} />
+                <RunMetric label="Repository" value={job.repository} />
+                <RunMetric
+                  label="Created"
+                  value={formatTimestamp(job.created_at)}
+                />
+                <RunMetric
+                  label="Updated"
+                  value={formatTimestamp(job.updated_at)}
+                />
+              </dl>
+              <Button
+                variant="outline"
+                disabled={!terminal || deleting}
+                onClick={() => onDelete(job)}
+              >
+                {deleting ? "Deleting…" : "Delete task"}
+              </Button>
+            </section>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -450,7 +458,13 @@ function RunActivity({ job }) {
     return () => clearInterval(timer);
   }, []);
   const rows = activityRows(job, now);
-  if (!rows.length) return null;
+  if (!rows.length)
+    return (
+      <Card className="space-y-3 p-5 sm:p-6" aria-label="Run activity">
+        <h2 className="text-lg font-semibold">Activity</h2>
+        <p className="text-sm text-muted-foreground">No activity recorded.</p>
+      </Card>
+    );
   return (
     <Card className="space-y-3 p-5 sm:p-6" aria-label="Run activity">
       <h2 className="text-lg font-semibold">Activity</h2>

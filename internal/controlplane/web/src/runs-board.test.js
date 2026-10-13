@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { attemptTime, boardCardTimestamp, boardColumnForState, boardDateFilters, boardDateWindow, collapseIssueAttempts, collapseJobsByTicket, filterJobs, filterJobsByDate, githubIssueReference, groupJobsByBoardColumn, jobDisplayTitle, jobTicketKey, needsAttention, priorAttempts, supersededJob } from "./runs-board.js";
+import { attemptDurationMillis, attemptStart, attemptTime, boardCardTimestamp, boardColumnForState, boardDateFilters, boardDateWindow, collapseIssueAttempts, collapseJobsByTicket, filterJobs, filterJobsByDate, githubIssueReference, groupJobsByBoardColumn, jobDisplayTitle, jobTicketKey, needsAttention, priorAttempts, supersededJob, ticketAttempts } from "./runs-board.js";
 
 test("board card timestamps prefer run completion for finished jobs and last update otherwise", () => {
   const finishedJob = {
@@ -232,4 +232,68 @@ test("priorAttempts falls back to same Plane ticket when previous_job_id is abse
     { id: "b", title: "SPARK-6: x", state: "succeeded", updated_at: "2026-10-11T00:00:00Z", created_at: "2026-10-10T00:00:00Z", runs: [] },
   ];
   assert.deepEqual(priorAttempts(jobs, jobs[1]).map(({ id }) => id), ["a"]);
+});
+
+test("ticketAttempts lists every ticket attempt oldest first from any member", () => {
+  const spark = (id, attempt, created, extra = {}) => ({
+    id,
+    attempt,
+    title: "SPARK-6: Board collapse",
+    created_at: created,
+    updated_at: created,
+    runs: [],
+    ...extra,
+  });
+  const jobs = [
+    spark("newest", 3, "2026-10-10T00:00:00Z"),
+    spark("oldest", 1, "2026-10-01T00:00:00Z"),
+    spark("middle", 2, "2026-10-05T00:00:00Z"),
+    { id: "unticketed", prompt: "no key", created_at: "2026-10-06T00:00:00Z", runs: [] },
+  ];
+  for (const member of jobs.slice(0, 3)) {
+    assert.deepEqual(ticketAttempts(jobs, member).map(({ id }) => id), ["oldest", "middle", "newest"]);
+  }
+  assert.deepEqual(ticketAttempts(jobs, jobs[3]).map(({ id }) => id), ["unticketed"]);
+});
+
+test("ticketAttempts follows previous_job_id chains without a ticket key", () => {
+  const jobs = [
+    { id: "first", state: "failed", created_at: "2026-10-01T00:00:00Z", runs: [] },
+    { id: "second", previous_job_id: "first", state: "failed", created_at: "2026-10-02T00:00:00Z", runs: [] },
+    { id: "third", previous_job_id: "second", state: "running", created_at: "2026-10-03T00:00:00Z", runs: [] },
+    { id: "unrelated", state: "succeeded", created_at: "2026-10-02T00:00:00Z", runs: [] },
+  ];
+  assert.deepEqual(ticketAttempts(jobs, jobs[0]).map(({ id }) => id), ["first", "second", "third"]);
+  assert.deepEqual(ticketAttempts(jobs, jobs[2]).map(({ id }) => id), ["first", "second", "third"]);
+  assert.deepEqual(ticketAttempts(jobs, jobs[3]).map(({ id }) => id), ["unrelated"]);
+});
+
+test("attemptStart prefers the earliest run start and falls back to creation", () => {
+  assert.equal(
+    attemptStart({ created_at: "2026-10-01T00:00:00Z", runs: [{ started_at: "2026-10-02T00:00:00Z" }, { started_at: "2026-10-01T12:00:00Z" }] }),
+    "2026-10-01T12:00:00Z",
+  );
+  assert.equal(attemptStart({ created_at: "2026-10-01T00:00:00Z", runs: [{}] }), "2026-10-01T00:00:00Z");
+  assert.equal(attemptStart({ runs: [] }), "");
+});
+
+test("attemptDurationMillis measures wall clock, elapsed for in-progress attempts", () => {
+  const now = new Date("2026-10-02T00:00:00Z");
+  assert.equal(
+    attemptDurationMillis({ state: "succeeded", created_at: "2026-10-01T00:00:00Z", runs: [{ started_at: "2026-10-01T00:10:00Z", completed_at: "2026-10-01T00:40:00Z" }, { started_at: "2026-10-01T01:00:00Z", completed_at: "2026-10-01T01:30:00Z" }] }, now),
+    80 * 60 * 1000,
+    "end is the latest completed run, start is the earliest run start",
+  );
+  assert.equal(
+    attemptDurationMillis({ state: "running", created_at: "2026-10-01T00:00:00Z", runs: [{ started_at: "2026-10-01T00:10:00Z" }] }, now),
+    23 * 60 * 60 * 1000 + 50 * 60 * 1000,
+    "running attempts show elapsed time to now",
+  );
+  assert.equal(
+    attemptDurationMillis({ state: "queued", created_at: "2026-10-01T00:00:00Z", runs: [] }, now),
+    24 * 60 * 60 * 1000,
+    "queued attempts elapse from creation",
+  );
+  assert.equal(attemptDurationMillis({ state: "failed", runs: [{ started_at: "2026-10-01T00:00:00Z" }] }, now), undefined, "terminal without completion times has no duration");
+  assert.equal(attemptDurationMillis({ state: "queued", runs: [] }, now), undefined, "no timestamps at all has no duration");
 });
