@@ -10,6 +10,7 @@ import {
   saveReviewDefaultProfile,
   saveReviewProfileSetting,
 } from "@/review-settings";
+import { createToken, loadTokens, revokeToken } from "@/api-tokens";
 
 // Settings: per-project review profile for the built-in PR review (MACH-32).
 // The review runs from a resolved profile: repo .machinist/review.yaml at the
@@ -210,7 +211,108 @@ export function SettingsPage({ repositories = [], csrfToken }) {
       </div>}
       {!loaded && <QuietState title={project ? "Loading review profile" : "No repositories yet"} description={project ? "Fetching the resolved profile for this project." : "Register a worker repository to edit its review profile."} role="status" />}
     </Card>
+    <TokensCard csrfToken={csrfToken} />
   </div>;
+}
+
+// TokensCard manages scoped API tokens: the machine clients (and MCP tools)
+// use these bearer credentials. Write-scope tokens may queue, cancel and
+// requeue jobs and change settings; read-scope tokens may only read.
+function TokensCard({ csrfToken }) {
+  const [tokens, setTokens] = useState([]);
+  const [name, setName] = useState("");
+  const [scope, setScope] = useState("read");
+  const [secret, setSecret] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+
+  const refresh = async () => {
+    try {
+      setTokens(await loadTokens(csrfToken));
+      setError("");
+    } catch (loadError) {
+      setError(loadError.message);
+    } finally {
+      setLoaded(true);
+    }
+  };
+
+  useEffect(() => {
+    refresh();
+  }, []);
+
+  const create = async () => {
+    setBusy(true);
+    setError("");
+    setSecret("");
+    try {
+      const result = await createToken(csrfToken, { name, scope });
+      setSecret(result.secret);
+      setName("");
+      await refresh();
+    } catch (createError) {
+      setError(createError.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const revoke = async (id) => {
+    setBusy(true);
+    setError("");
+    try {
+      await revokeToken(csrfToken, id);
+      await refresh();
+    } catch (revokeError) {
+      setError(revokeError.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return <Card className="p-4 sm:p-5">
+    <div className="space-y-1">
+      <h2 className="font-medium">API tokens</h2>
+      <p className="text-sm text-muted-foreground">Bearer credentials for machine clients and MCP tools. The secret is shown once; store it in your bot's environment, never in the repository.</p>
+    </div>
+    {error && <div role="alert" className="mt-3 whitespace-pre-wrap rounded-md border border-danger/35 bg-danger/10 px-3 py-2 text-sm text-danger">{error}</div>}
+    {secret && <div role="status" className="mt-3 space-y-1 rounded-md border border-success/35 bg-success/10 px-3 py-2 text-sm text-success">
+      <div>New token secret (copy now, shown once):</div>
+      <code className="block break-all font-mono text-xs">{secret}</code>
+    </div>}
+    <div className="mt-3 flex flex-wrap items-center gap-2">
+      <input className="field-control w-56" value={name} onChange={(event) => setName(event.target.value)} placeholder="Token name" aria-label="Token name" />
+      <select className="field-control w-32" value={scope} onChange={(event) => setScope(event.target.value)} aria-label="Token scope">
+        <option value="read">read</option>
+        <option value="write">write</option>
+      </select>
+      <Button disabled={busy || !name.trim()} onClick={create}>Create token</Button>
+    </div>
+    {loaded && <table className="mt-4 w-full text-sm">
+      <thead>
+        <tr className="text-left text-muted-foreground">
+          <th className="py-1 pr-3 font-medium">Name</th>
+          <th className="py-1 pr-3 font-medium">Scope</th>
+          <th className="py-1 pr-3 font-medium">ID</th>
+          <th className="py-1 pr-3 font-medium">Status</th>
+          <th className="py-1 font-medium"><span className="sr-only">Actions</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        {tokens.map((token) => <tr key={token.id} className="border-t">
+          <td className="py-1 pr-3">{token.name}</td>
+          <td className="py-1 pr-3"><Badge variant="outline">{token.scope}</Badge></td>
+          <td className="py-1 pr-3 font-mono text-xs">{token.id}</td>
+          <td className="py-1 pr-3">{token.revokedAt ? "revoked" : "active"}</td>
+          <td className="py-1 text-right">
+            {!token.revokedAt && <Button variant="outline" disabled={busy} onClick={() => revoke(token.id)}>Revoke</Button>}
+          </td>
+        </tr>)}
+        {!tokens.length && <tr className="border-t"><td className="py-2 text-muted-foreground" colSpan={5}>No tokens yet.</td></tr>}
+      </tbody>
+    </table>}
+  </Card>;
 }
 
 function PreviewResult({ preview }) {

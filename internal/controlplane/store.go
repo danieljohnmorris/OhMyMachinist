@@ -286,6 +286,20 @@ CREATE TABLE IF NOT EXISTS project_review_settings (
 CREATE TABLE IF NOT EXISTS settings (
  key TEXT PRIMARY KEY,
  value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS api_tokens (
+ id TEXT PRIMARY KEY,
+ name TEXT NOT NULL,
+ token_hash TEXT NOT NULL UNIQUE,
+ scope TEXT NOT NULL CHECK(scope IN ('read','write')),
+ created_at TEXT NOT NULL,
+ revoked_at TEXT);
+CREATE TABLE IF NOT EXISTS audit_log (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ at TEXT NOT NULL,
+ token_id TEXT NOT NULL DEFAULT '',
+ token_name TEXT NOT NULL DEFAULT '',
+ action TEXT NOT NULL,
+ detail TEXT NOT NULL DEFAULT '');
 CREATE TRIGGER IF NOT EXISTS job_state_history_insert AFTER INSERT ON jobs
 BEGIN
  INSERT INTO job_state_history(job_id,state,changed_at) VALUES (new.id,new.state,new.created_at);
@@ -1355,7 +1369,7 @@ WHERE julianday(old.last_seen_at) < julianday(?)
 }
 
 func (s *Store) Snapshot(ctx context.Context) (Snapshot, error) {
-	jobs, err := s.listJobs(ctx)
+	jobs, err := s.listJobs(ctx, "")
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -1443,10 +1457,19 @@ func (s *Store) RunOutput(ctx context.Context, runID string) (RunOutput, error) 
 	return output, err
 }
 
-func (s *Store) listJobs(ctx context.Context) ([]Job, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT j.id,j.title,j.prompt,j.repository,j.github_issue_title,j.command,j.trigger_identity,j.occurrence_key,j.trigger_subject,j.state,j.previous_job_id,j.attempt,COALESCE(j.superseded_by,''),j.issue_key,j.resolution_kind,j.resolution_detail,COALESCE(j.resolved_at,''),j.created_at,j.updated_at,
+// listJobs returns jobs newest first with their runs attached. A non-empty
+// jobID restricts the result to that job.
+func (s *Store) listJobs(ctx context.Context, jobID string) ([]Job, error) {
+	query := `SELECT j.id,j.title,j.prompt,j.repository,j.github_issue_title,j.command,j.trigger_identity,j.occurrence_key,j.trigger_subject,j.state,j.previous_job_id,j.attempt,COALESCE(j.superseded_by,''),j.issue_key,j.resolution_kind,j.resolution_detail,COALESCE(j.resolved_at,''),j.created_at,j.updated_at,
 COALESCE(r.id,''),COALESCE(r.command,''),COALESCE(r.executor,''),COALESCE(r.model,''),COALESCE(r.state,''),COALESCE(NULLIF(r.worker_name,''),w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,''),r.duration_millis,r.token_usage,a.step,COALESCE(a.outcome,''),COALESCE(NULLIF(a.summary,''),CASE WHEN json_valid(r.result) THEN json_extract(r.result,'$.final_message') END,'')
-FROM jobs j LEFT JOIN runs r ON r.job_id=j.id LEFT JOIN workers w ON w.instance_id=r.worker_instance LEFT JOIN workflow_attempts a ON a.run_id=r.id ORDER BY j.created_at DESC,j.id,r.rowid`)
+FROM jobs j LEFT JOIN runs r ON r.job_id=j.id LEFT JOIN workers w ON w.instance_id=r.worker_instance LEFT JOIN workflow_attempts a ON a.run_id=r.id`
+	args := []any{}
+	if jobID != "" {
+		query += ` WHERE j.id=?`
+		args = append(args, jobID)
+	}
+	query += ` ORDER BY j.created_at DESC,j.id,r.rowid`
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1501,6 +1524,74 @@ FROM jobs j LEFT JOIN runs r ON r.job_id=j.id LEFT JOIN workers w ON w.instance_
 		return nil, fmt.Errorf("read job state history: %w", err)
 	}
 	return jobs, nil
+}
+
+// ListJobs returns every job newest first with runs attached.
+func (s *Store) ListJobs(ctx context.Context) ([]Job, error) {
+	return s.listJobs(ctx, "")
+}
+
+// GetJob returns one job with its runs, or sql.ErrNoRows when unknown.
+func (s *Store) GetJob(ctx context.Context, jobID string) (Job, error) {
+	jobs, err := s.listJobs(ctx, jobID)
+	if err != nil {
+		return Job{}, err
+	}
+	if len(jobs) == 0 {
+		return Job{}, sql.ErrNoRows
+	}
+	return jobs[0], nil
+}
+
+// GetRun returns one run with its attempt metadata, or sql.ErrNoRows when
+// unknown. The event transcript is served separately by RunEvents so large
+// logs stay out of job listings.
+func (s *Store) GetRun(ctx context.Context, runID string) (Run, error) {
+	var run Run
+	var started, completed string
+	err := s.db.QueryRowContext(ctx, `SELECT r.id,r.command,r.executor,r.model,r.state,COALESCE(NULLIF(r.worker_name,''),w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,''),r.duration_millis,r.token_usage,a.step,COALESCE(a.outcome,''),COALESCE(NULLIF(a.summary,''),CASE WHEN json_valid(r.result) THEN json_extract(r.result,'$.final_message') END,'')
+FROM runs r LEFT JOIN workers w ON w.instance_id=r.worker_instance LEFT JOIN workflow_attempts a ON a.run_id=r.id WHERE r.id=?`, runID).
+		Scan(&run.ID, &run.Command, &run.Executor, &run.Model, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &started, &completed, &run.DurationMillis, &run.TokenUsage, &run.Step, &run.Outcome, &run.Summary)
+	if err != nil {
+		return Run{}, err
+	}
+	run.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
+	run.CompletedAt, _ = time.Parse(time.RFC3339Nano, completed)
+	return run, nil
+}
+
+// LatestRunID returns the most recent run of a job, or sql.ErrNoRows when
+// the job has no runs.
+func (s *Store) LatestRunID(ctx context.Context, jobID string) (string, error) {
+	var runID string
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM runs WHERE job_id=? ORDER BY rowid DESC LIMIT 1`, jobID).Scan(&runID)
+	return runID, err
+}
+
+// Settings returns every stored key/value pair ordered by key.
+func (s *Store) Settings(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT key,value FROM settings ORDER BY key`)
+	if err != nil {
+		return nil, fmt.Errorf("read settings: %w", err)
+	}
+	defer rows.Close()
+	values := map[string]string{}
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return nil, fmt.Errorf("read settings: %w", err)
+		}
+		values[key] = value
+	}
+	return values, rows.Err()
+}
+
+// PutSetting stores one settings key/value pair.
+func (s *Store) PutSetting(ctx context.Context, key, value string) error {
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value); err != nil {
+		return fmt.Errorf("write setting %q: %w", key, err)
+	}
+	return nil
 }
 
 // loadJobStateHistory attaches each job's recorded state transitions, oldest

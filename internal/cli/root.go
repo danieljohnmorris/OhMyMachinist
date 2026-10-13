@@ -77,6 +77,7 @@ func newRootCommand(options *commandOptions) *cobra.Command {
 	worker.AddCommand(newWorkerStartCommand(options))
 	worker.AddCommand(newWorkerValidateCommand(options))
 	root.AddCommand(worker)
+	root.AddCommand(newTokensCommand(options))
 
 	root.AddCommand(&cobra.Command{
 		Use:   "version",
@@ -257,6 +258,9 @@ func newStartCommand(options *commandOptions) *cobra.Command {
 			if options.listen != "" {
 				serverConfig.Listen = options.listen
 			}
+			if err := config.ValidateListenAuth(serverConfig.Auth, serverConfig.Listen); err != nil {
+				return err
+			}
 			token, err := serverConfig.WorkerToken()
 			if err != nil {
 				return err
@@ -266,7 +270,7 @@ func newStartCommand(options *commandOptions) *cobra.Command {
 				return err
 			}
 			defer store.Close()
-			server, err := controlplane.NewServer(store, machinistConfig.Path(), token, serverConfig.ConcurrentJobLimit())
+			server, err := controlplane.NewServer(store, machinistConfig.Path(), token, serverConfig.ConcurrentJobLimit(), serverConfig.Auth)
 			if err != nil {
 				return err
 			}

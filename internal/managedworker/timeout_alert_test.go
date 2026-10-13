@@ -55,7 +55,7 @@ directory = "` + alertsDirectory + `"
 	if _, err := store.CreateJob(t.Context(), "timed out request", "disposable", "plan", command); err != nil {
 		t.Fatal(err)
 	}
-	server, err := controlplane.NewServer(store, definitionPath, "secret", 0)
+	server, err := controlplane.NewServer(store, definitionPath, "secret", 0, config.AuthTokens)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -14,7 +14,7 @@ import (
 // and doubles as the backfill for existing jobs. updated_at is left alone so
 // linking does not reorder the board.
 func (s *Store) linkTicketAttempts(ctx context.Context) error {
-	jobs, err := s.listJobs(ctx)
+	jobs, err := s.listJobs(ctx, "")
 	if err != nil {
 		return fmt.Errorf("list jobs for attempt links: %w", err)
 	}

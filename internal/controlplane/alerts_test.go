@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/owainlewis/machinist/internal/config"
 	"github.com/owainlewis/machinist/internal/protocol"
 )
 
@@ -26,7 +27,7 @@ func newTestHTTPServerWithAlerts(t *testing.T) (*Server, *httptest.Server, strin
 		t.Fatal(err)
 	}
 	store := openTestStore(t, filepath.Join(directory, "machinist.db"))
-	server, err := NewServer(store, definitionPath, "secret", 0)
+	server, err := NewServer(store, definitionPath, "secret", 0, config.AuthTokens)
 	if err != nil {
 		t.Fatal(err)
 	}

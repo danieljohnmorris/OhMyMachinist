@@ -12,8 +12,12 @@ import (
 
 func (s *Server) authorizeArtifact(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if s.authOff() {
+			next(w, r)
+			return
+		}
 		if r.Header.Get("Authorization") != "" {
-			if !s.validBearerRequest(r) {
+			if !s.validBearerRequest(r) && !s.authorizedArtifactBearer(r) {
 				writeUnauthorized(w)
 				return
 			}

@@ -3,6 +3,8 @@
 Start with [your first task workflow](task-guide.md) to run a task, review its files, and approve or request changes.
 
 - [Configuration and migration](configuration.md)
+- [HTTP API](api.md)
+- [MCP server](mcp.md)
 - [Accepted task, stage, and artifact model](task-artifact-model.md)
 - [Current workflow configuration](workflows.md)
 - [Workflow roadmap: scaling AI engineering](workflow-roadmap.md)

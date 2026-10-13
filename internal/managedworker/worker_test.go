@@ -58,7 +58,7 @@ func TestManagedWorkerExecutesControlPlaneRun(t *testing.T) {
 	if _, err := store.CreateJob(t.Context(), "managed request", "machinist", "plan", agent); err != nil {
 		t.Fatal(err)
 	}
-	server, err := controlplane.NewServer(store, definitionPath, "secret", 0)
+	server, err := controlplane.NewServer(store, definitionPath, "secret", 0, config.AuthTokens)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,7 @@ timeout = "5s"
 	if _, err := store.CreateJob(t.Context(), "queued audit", "disposable", "audit", command); err != nil {
 		t.Fatal(err)
 	}
-	server, err := controlplane.NewServer(store, definitionPath, "secret", 0)
+	server, err := controlplane.NewServer(store, definitionPath, "secret", 0, config.AuthTokens)
 	if err != nil {
 		t.Fatal(err)
 	}

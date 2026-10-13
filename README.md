@@ -184,6 +184,8 @@ Commands, executors, workflows, workers and deployment are documented upstream a
 | --- | --- |
 | [Upstream Machinist](https://github.com/owainlewis/machinist#readme) | The core project |
 | [Configuration](docs/configuration.md) | Commands, executors, workers, models, repositories |
+| [HTTP API](docs/api.md) | Versioned `/api/v1` endpoints with scoped bearer tokens |
+| [MCP server](docs/mcp.md) | MCP tools over streamable HTTP at `/mcp` |
 | [Workflows](docs/workflows.md) | Multi-step workflows and approvals |
 | [VM deployment](docs/vm-deployment.md) | Running the control plane and worker as services |
 | [Factory review](deploy/factory/README.md) | The built-in PR review |
