@@ -127,7 +127,9 @@ class ExitCodeTests(unittest.TestCase):
         self.assertEqual(post.EXIT_CODES[post.final_status(False, False)], 0)
         self.assertEqual(post.STATUS_STATES[post.final_status(False, False)], "success")
         self.assertEqual(post.final_status(False, True), "INCOMPLETE")
-        self.assertEqual(post.EXIT_CODES[post.final_status(False, True)], 3)
+        # MACH-31: INCOMPLETE exits 0 (never fails the delivery); the status
+        # state still records "error" on machinist/review.
+        self.assertEqual(post.EXIT_CODES[post.final_status(False, True)], 0)
         self.assertEqual(post.STATUS_STATES[post.final_status(False, True)], "error")
 
 

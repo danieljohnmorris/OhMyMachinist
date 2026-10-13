@@ -19,19 +19,37 @@ from typing import Any
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from deploy.factory.review import core
-from deploy.factory.review.runner import (
-    CommandResult,
-    available,
-    executor_command,
-    run_command,
-    run_executor,
-    timeout_from_env,
-)
+try:
+    from deploy.factory.review import core
+    from deploy.factory.review.runner import (
+        CommandResult,
+        available,
+        executor_command,
+        run_command,
+        run_executor,
+        timeout_from_env,
+    )
+except ModuleNotFoundError:
+    # Flat install: deliver-pr.py, post_pr_review.py and review/ sit side by
+    # side with no deploy package, so import review/ from the script directory.
+    if __package__ in {None, ""}:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from review import core
+    from review.runner import (
+        CommandResult,
+        available,
+        executor_command,
+        run_command,
+        run_executor,
+        timeout_from_env,
+    )
 
 
 STATUS_CONTEXT = "machinist/review"
-EXIT_CODES = {"PASS": 0, "BLOCKED": 2, "INCOMPLETE": 3}
+# MACH-31: INCOMPLETE (crashed review, no executor, timeout) must not fail the
+# delivery job, so it exits 0 like PASS; the machinist/review status and the
+# JSON summary still record the INCOMPLETE verdict. Only BLOCKED returns 2.
+EXIT_CODES = {"PASS": 0, "BLOCKED": 2, "INCOMPLETE": 0}
 STATUS_STATES = {"PASS": "success", "BLOCKED": "failure", "INCOMPLETE": "error"}
 PROMPTS_DIR = Path(__file__).resolve().parent / "review" / "prompts"
 
@@ -831,6 +849,11 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
             )
             if not comment_result.ok or not status_result.ok:
                 raise ReviewError(f"could not publish review: {comment_result.output} {status_result.output}")
+        if status == "INCOMPLETE":
+            print(
+                "post-pr review warning: review incomplete; exiting 0 so the delivery job does not fail",
+                file=sys.stderr,
+            )
         return EXIT_CODES[status], summary
     finally:
         restore_branch(options.repo, starting_branch, options.timeout)
