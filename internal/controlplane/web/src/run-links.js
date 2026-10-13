@@ -18,7 +18,19 @@ function planeTicketId(match) {
   return match[1];
 }
 
+// Jobs started from the native backlog carry their tracker identity on the
+// job payload itself. The stored identity wins over host/prefix inference,
+// which stays as the fallback for legacy jobs.
+export function detectBacklogIssue(job) {
+  if (job?.source_kind !== "backlog") return null;
+  const id = typeof job?.backlog_issue_id === "string" ? job.backlog_issue_id.trim() : "";
+  if (!id) return null;
+  const key = typeof job?.backlog_issue_key === "string" ? job.backlog_issue_key.trim() : "";
+  return { href: `#/backlog?issue=${encodeURIComponent(id)}`, text: key || id.slice(0, 8) };
+}
+
 export function detectPlaneTicket(job, result) {
+  if (detectBacklogIssue(job)) return null;
   const title = job?.task?.title || job?.github_issue_title || "";
   const instructions = [job?.task?.spec, job?.prompt];
   const resultText = [result?.summary, result?.error];
@@ -63,8 +75,10 @@ function pullRequestLink(match) {
 }
 
 export function runSidebarLinks(job, result) {
+  const backlogIssue = detectBacklogIssue(job);
   return {
-    planeTicket: detectPlaneTicket(job, result),
+    planeTicket: backlogIssue ? null : detectPlaneTicket(job, result),
+    backlogIssue,
     pullRequest: detectGitHubPullRequest(job, result),
   };
 }

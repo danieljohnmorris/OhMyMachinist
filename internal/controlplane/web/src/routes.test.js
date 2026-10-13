@@ -11,7 +11,14 @@ test("routeFromHash recognizes task detail routes", () => {
 });
 
 test("routeFromHash falls back to runs for incomplete or malformed routes", () => {
-  assert.deepEqual(routeFromHash("#/runs/"), { view: "runs", jobID: "", tab: "", attempt: "" });
-  assert.deepEqual(routeFromHash("#/runs/%E0%A4%A"), { view: "runs", jobID: "", tab: "", attempt: "" });
-  assert.deepEqual(routeFromHash("#/unknown"), { view: "runs", jobID: "", tab: "", attempt: "" });
+  assert.deepEqual(routeFromHash("#/runs/"), { view: "runs", jobID: "", tab: "", attempt: "", issueID: "" });
+  assert.deepEqual(routeFromHash("#/runs/%E0%A4%A"), { view: "runs", jobID: "", tab: "", attempt: "", issueID: "" });
+  assert.deepEqual(routeFromHash("#/unknown"), { view: "runs", jobID: "", tab: "", attempt: "", issueID: "" });
+});
+
+test("routeFromHash resolves plain pages and their query strings", () => {
+  assert.deepEqual(routeFromHash("#/backlog"), { view: "backlog", jobID: "", tab: "", attempt: "", issueID: "" });
+  assert.deepEqual(routeFromHash("#/backlog?issue=issue_9"), { view: "backlog", jobID: "", tab: "", attempt: "", issueID: "issue_9" });
+  assert.deepEqual(routeFromHash("#/backlog?issue=issue%2F9"), { view: "backlog", jobID: "", tab: "", attempt: "", issueID: "issue/9" });
+  assert.deepEqual(routeFromHash("#/settings"), { view: "settings", jobID: "", tab: "", attempt: "", issueID: "" });
 });

@@ -285,10 +285,17 @@ export function attemptTime(job) {
 
 const ticketKeyPattern = /^([A-Z][A-Z0-9]{1,9}-\d+)\b/;
 
-// Collapse key for one Plane ticket: the issue key leading the displayed title
-// (e.g. SPARK-6), falling back to the persisted source field that identifies
-// the ticket. Empty when the job is not tied to a ticket.
+// Collapse key for one ticket: stored backlog identity wins, then the issue
+// key leading the displayed title (e.g. SPARK-6), falling back to the
+// persisted source field that identifies the ticket. Empty when the job is
+// not tied to a ticket.
 export function jobTicketKey(job) {
+  if (job?.source_kind === "backlog") {
+    const key = typeof job?.backlog_issue_key === "string" ? job.backlog_issue_key.trim() : "";
+    const id = typeof job?.backlog_issue_id === "string" ? job.backlog_issue_id.trim() : "";
+    if (key) return `key:${key}`;
+    if (id) return `id:${id}`;
+  }
   const title = jobDisplayTitle(job);
   const fromTitle = typeof title === "string" ? title.trim().match(ticketKeyPattern)?.[1] : undefined;
   if (fromTitle) return `key:${fromTitle}`;

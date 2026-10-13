@@ -1,4 +1,4 @@
-const pages = new Set(["runs", "analytics", "workers", "triggers", "commands", "workflows", "settings"]);
+const pages = new Set(["runs", "analytics", "workers", "triggers", "commands", "workflows", "settings", "backlog"]);
 
 export function routeFromHash(hash) {
   const value = hash.replace(/^#\//, "");
@@ -13,8 +13,17 @@ export function routeFromHash(hash) {
         attempt: params.get("attempt") || "",
       };
     } catch {
-      return { view: "runs", jobID: "", tab: "", attempt: "" };
+      return { view: "runs", jobID: "", tab: "", attempt: "", issueID: "" };
     }
   }
-  return { view: pages.has(value) ? value : "runs", jobID: "", tab: "", attempt: "" };
+  // Plain pages may carry a query (e.g. #/backlog?issue=<id>); task routes
+  // are handled above and keep their own parsing.
+  const [path, query = ""] = value.split("?");
+  let issueID = "";
+  try {
+    issueID = new URLSearchParams(query).get("issue") || "";
+  } catch {
+    issueID = "";
+  }
+  return { view: pages.has(path) ? path : "runs", jobID: "", tab: "", attempt: "", issueID };
 }

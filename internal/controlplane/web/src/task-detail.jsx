@@ -49,7 +49,7 @@ export function TaskDetail({
   const latest = job.runs.at(-1);
   const lastCompleted = job.runs.findLast((run) => run.outcome === "complete");
   const { result, history, stages } = taskPresentation(job);
-  const { planeTicket, pullRequest } = runSidebarLinks(job, result);
+  const { planeTicket, pullRequest, backlogIssue } = runSidebarLinks(job, result);
   const reviewing = job.state === "awaiting_approval";
   const retriedAs = supersededJob(jobs, job);
   const attempts = ticketAttempts(jobs, job);
@@ -109,6 +109,16 @@ export function TaskDetail({
           <Card className="space-y-4 p-5" aria-label="Job metadata">
             <h2 className="text-lg font-semibold">Metadata</h2>
             <dl className="grid gap-4 text-sm sm:grid-cols-2">
+              {backlogIssue && (
+                <div className="min-w-0">
+                  <dt className="text-xs uppercase tracking-wide text-muted-foreground">Backlog</dt>
+                  <dd className="mt-1 break-words">
+                    <a className="text-primary underline" href={backlogIssue.href}>
+                      {backlogIssue.text}
+                    </a>
+                  </dd>
+                </div>
+              )}
               {planeTicket && (
                 <div className="min-w-0">
                   <dt className="text-xs uppercase tracking-wide text-muted-foreground">Plane</dt>

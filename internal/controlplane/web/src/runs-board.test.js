@@ -374,3 +374,16 @@ test("only plain queued jobs are cancellable", () => {
   assert.equal(canCancelJob({ state: "queued", workflow: { name: "deliver", steps: ["build"], current_step: 0 } }), false);
   assert.equal(canCancelJob({ state: "running", workflow: { name: "deliver" } }), false);
 });
+
+test("jobTicketKey prefers stored backlog identity over title inference", () => {
+  const backlogJob = {
+    title: "OMM-3: Retitled before identity metadata landed",
+    source_kind: "backlog",
+    backlog_issue_id: "issue_9",
+    backlog_issue_key: "OMM-7",
+  };
+  assert.equal(jobTicketKey(backlogJob), "key:OMM-7");
+  assert.equal(jobTicketKey({ source_kind: "backlog", backlog_issue_id: "issue_9" }), "id:issue_9");
+  assert.equal(jobTicketKey({ source_kind: "backlog" }), "");
+  assert.equal(jobTicketKey({ title: "OMM-3: Legacy job without identity" }), "key:OMM-3");
+});
