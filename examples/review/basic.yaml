@@ -1,0 +1,39 @@
+# Minimal worked example: a TypeScript service profile. Install as
+# .machinist/review.yaml in the repository (read at the PR base ref) or paste
+# it into Settings > Review profile for the project.
+name: basic-ts-service
+version: 1
+scope:
+  pin_head_sha: true
+  lanes_from: diff
+  mode: review_only
+checks:
+  blocking: new_failures
+  missing_tool: blocked
+  lanes:
+    - lane: typescript
+      when: ["**/*.ts", "**/*.tsx"]
+      commands:
+        - run: "npx tsc --noEmit"
+          if_exists: tsconfig.json
+        - run: "npm run lint"
+          if_script: lint
+        - run: "npm test"
+          if_script: test
+concurrency: 2
+reviewers:
+  - name: code-reviewer
+    skills: ["feature-dev:code-reviewer"]
+    parallel: true
+    read_only: true
+routing:
+  fallback: [code-reviewer]
+docs:
+  enabled: false
+blocking:
+  severities: [critical, bug]
+  amend_rounds: 0
+output:
+  pr_comment: true
+  commit_status: machinist/review
+  report: [head_sha, findings, checks, passes, blockers]

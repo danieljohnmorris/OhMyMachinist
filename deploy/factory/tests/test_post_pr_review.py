@@ -9,7 +9,7 @@ import unittest
 from unittest import mock
 
 import deploy.factory.post_pr_review as post
-from deploy.factory.review import core
+from deploy.factory.review import core, profile as profile_mod
 from deploy.factory.review.runner import CommandResult
 
 
@@ -43,36 +43,9 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(core.classify_changed_files([]), {"prose": set(), "code": set()})
 
 
-class LanguageTests(unittest.TestCase):
-    def test_language_extras(self) -> None:
-        ts_roles = core.review_roles({"prose": set(), "code": {"a.tsx"}}, small_combined=False)
-        self.assertIn("typescript-code-review", ts_roles)
-        self.assertIn("typescript-jsdoc", ts_roles)
-        rust_roles = core.review_roles({"prose": set(), "code": {"lib.rs"}}, small_combined=False)
-        self.assertEqual(["rust-review" in rust_roles, any(role.startswith("typescript") for role in rust_roles)], [True, False])
-
-    def test_python_no_extras_and_shell_shebang(self) -> None:
-        self.assertEqual(core.review_roles({"prose": set(), "code": {"x.py"}}, small_combined=False), list(core.CODE_REVIEW_ROLES))
-        self.assertEqual(core.detect_language("script", "#!/usr/bin/env bash\n"), "shell")
-
-
-class SizeGateTests(unittest.TestCase):
-    def test_small_combined(self) -> None:
-        diff = "+line\n-line\n" * 25
-        self.assertTrue(core.size_gate(diff, ["a.py", "b.py", "c.py"]))
-
-    def test_sensitive_path_fans_out(self) -> None:
-        diff = "+line\n" * 10
-        self.assertFalse(core.size_gate(diff, ["src/auth/login.py"]))
-
-    def test_many_files_fan_out(self) -> None:
-        diff = "+line\n"
-        self.assertFalse(core.size_gate(diff, [f"file{i}.py" for i in range(10)]))
-
-
 class ClassificationTests(unittest.TestCase):
     def test_new_and_pre_existing(self) -> None:
-        check = post.ReviewCheck("python", "ruff", ["ruff", "check", "bad.py"])
+        check = profile_mod.ReviewCheck("python", "ruff", ["ruff", "check", "bad.py"])
         with mock.patch.object(post, "run_git", return_value=CommandResult(("git",), 0, "", "")) as git_mock, mock.patch.object(
             post, "run_command", return_value=CommandResult(("ruff",), 1, "", "error")
         ) as command_mock:
@@ -98,24 +71,44 @@ class ParserTests(unittest.TestCase):
 
 
 class CommentTests(unittest.TestCase):
-    def test_critical_first_and_roles_exact(self) -> None:
+    def test_critical_first_and_reviewer_names_exact(self) -> None:
+        resolved = _resolved_profile()
         reviewers = [
             {
-                "role": "feature-dev:code-reviewer",
+                "name": "code-reviewer",
+                "skills": ["feature-dev:code-reviewer"],
                 "ran": True,
+                "skipped": False,
                 "findings": [{"severity": "warning", "location": "a.py:1", "message": "later", "unparsed": False}],
             },
             {
-                "role": "pr-review-toolkit:silent-failure-hunter",
+                "name": "silent-failure-hunter",
+                "skills": ["pr-review-toolkit:silent-failure-hunter"],
                 "ran": True,
+                "skipped": False,
                 "findings": [{"severity": "critical", "location": "b.py:1", "message": "critical", "unparsed": False}],
             },
         ]
-        body = post.render_comment("BLOCKED", [], reviewers, {"ran": True, "changed": [], "pr_description_updated": False})
+        merged = profile_mod.reconcile_findings(reviewers, resolved.severities(), ["a.py", "b.py"])
+        body = post.render_comment("BLOCKED", [], reviewers, {"ran": True, "changed": [], "pr_description_updated": False}, resolved, merged, "headsha", [])
         self.assertLess(body.index("## CRITICAL"), body.index("## Checks"))
         self.assertLess(body.index("critical"), body.index("later"))
-        self.assertIn("feature-dev:code-reviewer", body)
-        self.assertIn("pr-review-toolkit:silent-failure-hunter", body)
+        self.assertIn("code-reviewer", body)
+        self.assertIn("silent-failure-hunter", body)
+        self.assertIn("Head SHA: headsha", body)
+
+
+def _resolved_profile() -> profile_mod.ResolvedProfile:
+    body = profile_mod.parse_profile(
+        "name: comment-test\nversion: 1\n"
+        "reviewers:\n  - name: code-reviewer\n    skills: [\"feature-dev:code-reviewer\"]\n"
+        "    read_only: true\n"
+        "  - name: silent-failure-hunter\n    skills: [\"pr-review-toolkit:silent-failure-hunter\"]\n"
+        "    read_only: true\n"
+        "blocking:\n  severities: [critical, bug]\n  amend_rounds: 3\n",
+        "comment-test",
+    )
+    return profile_mod.ResolvedProfile(body=body, raw="", source="test")
 
 
 class ExitCodeTests(unittest.TestCase):
@@ -168,9 +161,11 @@ class EndToEndDryRunTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (bin_dir / "review-executor").write_text("#!/bin/sh\ncat >/dev/null\nprintf 'NO FINDINGS\\n'\n", encoding="utf-8")
+            (bin_dir / "ruff").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             os.chmod(bin_dir / "gh", 0o755)
             os.chmod(bin_dir / "git", 0o755)
             os.chmod(bin_dir / "review-executor", 0o755)
+            os.chmod(bin_dir / "ruff", 0o755)
             gh_log = root / "gh.log"
             git_log = root / "git.log"
             json_out = root / "summary.json"

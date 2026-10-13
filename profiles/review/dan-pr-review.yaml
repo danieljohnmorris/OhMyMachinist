@@ -1,0 +1,122 @@
+# Daniel's review profile, ported from pr-review-skill (SKILL.md). The
+# source URL is documentation only; reviewer skills resolve by name from the
+# installed skills library (MACH-33), not fetched at review time. Set as the
+# default for his projects via config (review.default_profile) or per-project
+# Settings, never in code.
+name: dan-pr-review
+version: 1
+source: https://github.com/danieljohnmorris/pr-review-skill/blob/main/SKILL.md
+scope:
+  pin_head_sha: true
+  lanes_from: diff
+  mode: amend
+checks:
+  blocking: new_failures
+  missing_tool: blocked
+  lanes:
+    - lane: typescript
+      when: ["**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx", "**/*.mjs"]
+      commands:
+        - run: "npx tsc --noEmit"
+          if_exists: tsconfig.json
+        - run: "npm run lint"
+          if_script: lint
+        - run: "npm run build"
+          if_script: build
+    - lane: python
+      when: ["**/*.py"]
+      commands:
+        - run: "ruff check {changed}"
+        - run: "mypy"
+          if_configured: mypy
+        - run: "pytest"
+          if_configured: pytest
+    - lane: rust
+      when: ["**/*.rs", "Cargo.toml"]
+      commands:
+        - run: "cargo build"
+        - run: "cargo clippy -- -D warnings"
+        - run: "cargo fmt --check"
+    - lane: rails
+      when: ["**/*.rb", "Gemfile"]
+      commands:
+        - run: "bin/ci"
+          if_exists: bin/ci
+          else:
+            - "bin/rubocop"
+            - "bin/brakeman --no-pager"
+            - "bin/rails db:test:prepare test"
+        - run: "bin/importmap audit"
+          if_exists: config/importmap.rb
+    - lane: omarchy
+      when: ["**/*.sh", "scripts/**", "**/*.qml", "**/*.lua"]
+      commands:
+        - run: "shellcheck {changed_shell}"
+        - run: "ruff check {changed_py}"
+        - run: "shfmt -d"
+          optional: true
+        - run: "qmllint"
+          optional: true
+        - run: "luacheck"
+          optional: true
+        - run: "omarchy-android-oneplus6t/scripts/check-sync.sh"
+          if_exists: omarchy-android-oneplus6t/scripts/check-sync.sh
+          requires_authorization: deploy
+concurrency: 3
+reviewers:
+  - name: code-reviewer
+    skills: ["feature-dev:code-reviewer"]
+    parallel: true
+    read_only: true
+  - name: silent-failure-hunter
+    skills: ["pr-review-toolkit:silent-failure-hunter"]
+    parallel: true
+    read_only: true
+  - name: test-analyzer
+    skills: ["pr-review-toolkit:pr-test-analyzer"]
+    parallel: true
+    read_only: true
+  - name: ts-review
+    lanes: [typescript]
+    skills: [typescript-code-review, typescript-jsdoc]
+    effort: high
+    parallel: true
+    read_only: true
+    optional: true
+  - name: rust-review
+    lanes: [rust]
+    skills: [rust-review]
+    parallel: true
+    read_only: true
+    optional: true
+  - name: adversarial
+    trigger: on_request
+    prompt: |
+      Adversarial review, requested. Assume the change is wrong until the code
+      proves otherwise. Hunt for: security holes, race conditions, broken
+      invariants, failure modes under load, and misleading names or comments.
+      Report only findings you can ground in the diff; give file:line, severity
+      (critical | bug | warning | nit), and a concrete fix for each.
+  - name: prose
+    skills: [write-as-dan]
+    routing_only: true
+    read_only: true
+routing:
+  fallback: [code-reviewer, silent-failure-hunter, test-analyzer]
+  rules:
+    - when: ["src/content/**/*.md", "src/content/**/*.mdx"]
+      passes: [prose]   # read style guide, editor pass, report phrases considered/rejected/kept
+reconcile:
+  dedupe: true
+  verify_against_code: true
+docs:
+  enabled: true
+  files: [README.md, CLAUDE.md, AGENTS.md, CHANGELOG.md]
+  update_pr_description: true
+blocking:
+  severities: [critical, bug]
+  amend_rounds: 3
+output:
+  pr_comment: true
+  commit_status: machinist/review
+  report: [head_sha, findings, checks, passes, docs, blockers]
