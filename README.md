@@ -29,9 +29,12 @@ It keeps the upstream control plane, worker model and executors. Everything belo
 
 **Intake**
 
+- Plane, Linear, or the built-in backlog: choose per repository
 - Plane intake by label poll or webhook, with project-to-repository mapping
-- One job per ticket (deduplicated), with Plane and PR links on every run
-- Tickets resolve automatically when the ticket or its linked PR completes
+- Linear intake by label/project poll, with `resolved_state` on completion
+- Built-in backlog: lightweight issue tracker in the control plane database — create and edit issues that save without enqueueing, then start a run from an issue when ready
+- One job per ticket (deduplicated), with tracker and PR links on every run
+- Tickets resolve automatically when the ticket or its linked PR completes: Plane moves to Done, Linear to the configured resolved state, backlog resolutions are recorded on the job without changing issue state
 
 **Delivery**
 
@@ -133,8 +136,7 @@ Shipped profiles live in [`profiles/review/`](profiles/review/) (`default`, and 
 
 ## In progress
 
-- **Pluggable trackers.** Plane today, Linear planned.
-- **Per-project choice** of tracker, coding agent and models in Settings (MACH-37).
+- **Per-project choice** of coding agent and models in Settings (MACH-37).
 
 ## Example setup
 
