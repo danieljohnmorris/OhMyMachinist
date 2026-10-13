@@ -90,16 +90,41 @@ test("runs default to board view and share filters when switching views", async 
   await eventually(() => assert.equal(button("Board").getAttribute("aria-pressed"), "true"));
   assert.match(document.body.textContent, /Waiting to start/);
 
-  button("Failed").click();
-  await eventually(() => assert.doesNotMatch(document.body.textContent, /Succeeded fixture/));
+  // Default membership is active + failed only; the Show succeeded tickbox is off.
+  const showSucceeded = document.querySelector('input[type="checkbox"]');
+  assert.ok(showSucceeded, "Show succeeded tickbox renders");
+  assert.equal(showSucceeded.checked, false);
+  assert.equal(window.location.hash, "#/runs");
   assert.match(document.body.textContent, /Failed fixture/);
+  assert.doesNotMatch(document.body.textContent, /Succeeded fixture/);
+
+  // Ticking it shows succeeded and resolved tickets and updates the URL.
+  showSucceeded.click();
+  await eventually(() => assert.match(document.body.textContent, /Succeeded fixture/));
+  assert.equal(window.location.hash, "#/runs?succeeded=1");
 
   button("List").click();
   await eventually(() => assert.equal(button("List").getAttribute("aria-pressed"), "true"));
-  assert.equal(button("Failed").getAttribute("aria-pressed"), "true");
+  assert.equal(window.location.hash, "#/runs?succeeded=1&view=list");
   assert.ok(document.querySelector('a[href="#/runs/job_failed"]'), "list links to task");
   assert.match(document.body.textContent, /Failed fixture/);
-  assert.doesNotMatch(document.body.textContent, /Succeeded fixture/);
+  assert.match(document.body.textContent, /Succeeded fixture/);
+
+  // Browser back/forward restores filters from the URL hash.
+  window.history.back();
+  await eventually(() => assert.equal(button("List").getAttribute("aria-pressed"), "false"));
+  assert.equal(window.location.hash, "#/runs?succeeded=1");
+  assert.equal(document.querySelector('input[type="checkbox"]').checked, true);
+  assert.match(document.body.textContent, /Succeeded fixture/);
+
+  window.history.back();
+  await eventually(() => assert.equal(window.location.hash, "#/runs"));
+  await eventually(() => assert.doesNotMatch(document.body.textContent, /Succeeded fixture/));
+  assert.equal(document.querySelector('input[type="checkbox"]').checked, false);
+
+  showSucceeded.click();
+  await eventually(() => assert.equal(window.location.hash, "#/runs?succeeded=1"));
+  assert.match(document.body.textContent, /Failed fixture/);
 
   window.location.hash = "#/runs/job_detail";
   await eventually(() => assert.match(document.body.textContent, /Task with files/));

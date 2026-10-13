@@ -66,6 +66,186 @@ func TestIssueTriggerCreatesSubjectDeduplicatedJobs(t *testing.T) {
 	}
 }
 
+// newIssueTriggerServer wires a store and issue poller for trigger tests. The
+// returned poller records posted comments so tests can assert intake replies.
+func newIssueTriggerServer(t *testing.T, trigger config.ResolvedTrigger, pollIssues *[]issues.Issue) (*Server, *recordingIssuePoller) {
+	t.Helper()
+	store := openTestStore(t, t.TempDir()+"/db")
+	poller := &recordingIssuePoller{issues: pollIssues}
+	server := &Server{store: store, now: time.Now, issueSources: map[string]issuePoller{
+		trigger.Identity: poller,
+	}}
+	if err := store.SyncTriggers(t.Context(), []TriggerDefinition{{
+		Identity: trigger.Identity, Family: trigger.Family, ConfigSignature: trigger.Signature,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	return server, poller
+}
+
+type recordingIssuePoller struct {
+	issues   *[]issues.Issue
+	comments []string
+}
+
+func (f *recordingIssuePoller) Poll(context.Context, string) ([]issues.Issue, error) {
+	return *f.issues, nil
+}
+
+func (f *recordingIssuePoller) PostComment(_ context.Context, key, body string) error {
+	f.comments = append(f.comments, key+": "+body)
+	return nil
+}
+
+func planeIssueTrigger() config.ResolvedTrigger {
+	return config.ResolvedTrigger{
+		Identity: "issue/platform", Family: "issue", Name: "platform", Repository: "machinist",
+		Signature: "signature", Label: "factory", SourceKind: "plane", SourceProject: "Platform",
+		Command: testAgent("build", "{{machinist.prompt}}"),
+	}
+}
+
+func processIssue(t *testing.T, server *Server, trigger config.ResolvedTrigger) {
+	t.Helper()
+	if err := server.processIssueTrigger(t.Context(), trigger, mustTriggerGeneration(t, server.store, trigger.Identity)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestIssueTriggerUpdatesQueuedJobAndCommentsOnEdit(t *testing.T) {
+	trigger := planeIssueTrigger()
+	found := []issues.Issue{{
+		Key: "MACH-22", Title: "Dedupe intake", Description: "First spec.",
+		URL: "https://plane.example.app/MACH-22", Labels: []string{"factory"}, TeamID: "team",
+	}}
+	server, poller := newIssueTriggerServer(t, trigger, &found)
+	processIssue(t, server, trigger)
+	found[0].Description = "Edited spec."
+	processIssue(t, server, trigger)
+
+	snapshot, err := server.store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Jobs) != 1 {
+		t.Fatalf("jobs = %#v", snapshot.Jobs)
+	}
+	job := snapshot.Jobs[0]
+	if job.Prompt != "Edited spec." || job.Task == nil || job.Task.Spec != "Edited spec." {
+		t.Fatalf("queued job spec not updated: %#v", job)
+	}
+	var rendered string
+	if err := server.store.db.QueryRow(`SELECT rendered_prompt FROM runs WHERE job_id=?`, job.ID).Scan(&rendered); err != nil {
+		t.Fatal(err)
+	}
+	if rendered != "Edited spec." {
+		t.Fatalf("queued run prompt = %q", rendered)
+	}
+	if len(poller.comments) != 1 || poller.comments[0] != "MACH-22: spec updated on queued "+job.ID {
+		t.Fatalf("comments = %#v", poller.comments)
+	}
+}
+
+func TestIssueTriggerIgnoresEditWhileRunning(t *testing.T) {
+	trigger := planeIssueTrigger()
+	found := []issues.Issue{{
+		Key: "MACH-22", Title: "Dedupe intake", Description: "First spec.",
+		URL: "https://plane.example.app/MACH-22", Labels: []string{"factory"}, TeamID: "team",
+	}}
+	server, poller := newIssueTriggerServer(t, trigger, &found)
+	processIssue(t, server, trigger)
+	if _, err := server.store.db.Exec(`UPDATE jobs SET state='running'`); err != nil {
+		t.Fatal(err)
+	}
+	found[0].Description = "Edited spec."
+	processIssue(t, server, trigger)
+
+	snapshot, err := server.store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Jobs) != 1 {
+		t.Fatalf("jobs = %#v", snapshot.Jobs)
+	}
+	if snapshot.Jobs[0].Prompt != "First spec." {
+		t.Fatalf("running job prompt changed: %q", snapshot.Jobs[0].Prompt)
+	}
+	if len(poller.comments) != 0 {
+		t.Fatalf("comments = %#v", poller.comments)
+	}
+}
+
+func TestIssueTriggerCreatesNewJobAfterTerminalState(t *testing.T) {
+	trigger := planeIssueTrigger()
+	found := []issues.Issue{{
+		Key: "MACH-22", Title: "Dedupe intake", Description: "First spec.",
+		URL: "https://plane.example.app/MACH-22", Labels: []string{"factory"}, TeamID: "team",
+	}}
+	server, poller := newIssueTriggerServer(t, trigger, &found)
+	processIssue(t, server, trigger)
+	if _, err := server.store.db.Exec(`UPDATE jobs SET state='succeeded'`); err != nil {
+		t.Fatal(err)
+	}
+	found[0].Description = "Edited spec."
+	processIssue(t, server, trigger)
+
+	snapshot, err := server.store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Jobs) != 2 {
+		t.Fatalf("jobs = %#v", snapshot.Jobs)
+	}
+	queued := 0
+	for _, job := range snapshot.Jobs {
+		// The fresh job may carry prior-attempt context in its prompt; the edited
+		// content lives in the task spec.
+		if job.State == "queued" && job.Task != nil && job.Task.Spec == "Edited spec." {
+			queued++
+		}
+	}
+	if queued != 1 {
+		t.Fatalf("expected one fresh queued job with edited spec, snapshot = %#v", snapshot.Jobs)
+	}
+	if len(poller.comments) != 0 {
+		t.Fatalf("comments = %#v", poller.comments)
+	}
+}
+
+func TestIssueTriggerDeduplicatesWebhookKeyedJobByTicketKey(t *testing.T) {
+	trigger := planeIssueTrigger()
+	found := []issues.Issue{{
+		Key: "MACH-22", Title: "Dedupe intake", Description: "Edited spec.",
+		URL: "https://plane.example.app/MACH-22", Labels: []string{"factory"}, TeamID: "team",
+	}}
+	server, poller := newIssueTriggerServer(t, trigger, &found)
+	// A webhook intake admitted work for the ticket key before the poller ran.
+	if _, _, err := server.store.CreateTriggeredJob(t.Context(), TriggerAdmission{
+		Identity: trigger.Identity, Family: trigger.Family, ConfigSignature: trigger.Signature,
+		ConfigGeneration: mustTriggerGeneration(t, server.store, trigger.Identity), OccurrenceKey: "MACH-22",
+		Subject: "MACH-22", Title: "MACH-22: Dedupe intake", ScheduledAt: server.now().UTC(),
+		Prompt: "Webhook spec.", Repository: trigger.Repository, SelectionName: trigger.SelectionName,
+		Command: testAgent("build", "Webhook spec."), Task: &protocol.Task{Title: "MACH-22: Dedupe intake", Spec: "Webhook spec."},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	processIssue(t, server, trigger)
+
+	snapshot, err := server.store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Jobs) != 1 {
+		t.Fatalf("jobs = %#v", snapshot.Jobs)
+	}
+	if snapshot.Jobs[0].Prompt != "Edited spec." {
+		t.Fatalf("prompt = %q", snapshot.Jobs[0].Prompt)
+	}
+	if len(poller.comments) != 1 {
+		t.Fatalf("comments = %#v", poller.comments)
+	}
+}
+
 type fakeGitHubTriggerClient struct {
 	candidates       []GitHubCandidate
 	details          GitHubIssueDetails

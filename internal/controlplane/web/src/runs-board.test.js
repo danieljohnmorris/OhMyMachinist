@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { attemptDurationMillis, attemptStart, attemptTime, boardCardTimestamp, boardColumnForState, boardDateFilters, boardDateWindow, collapseIssueAttempts, collapseJobsByTicket, filterJobs, filterJobsByDate, githubIssueReference, groupJobsByBoardColumn, jobCounts, jobDisplayTitle, jobTicketKey, needsAttention, priorAttempts, resolutionLabel, supersededJob, ticketAttempts } from "./runs-board.js";
+import { attemptDurationMillis, attemptStart, attemptTime, boardCardTimestamp, boardColumnForState, boardDateFilters, boardDateWindow, boardFiltersFromHash, boardFiltersFromParams, boardHash, boardParamsFromFilters, canCancelJob, collapseIssueAttempts, collapseJobsByTicket, filterBoardJobs, filterJobs, filterJobsByDate, githubIssueReference, groupJobsByBoardColumn, jobCounts, jobDisplayTitle, jobTicketKey, needsAttention, priorAttempts, resolutionLabel, supersededJob, ticketAttempts } from "./runs-board.js";
 
 test("board card timestamps prefer run completion for finished jobs and last update otherwise", () => {
   const finishedJob = {
@@ -81,6 +81,38 @@ test("board and table filters use the same filtered job set", () => {
   const visibleJobs = filterJobs(jobs, "active");
   const grouped = groupJobsByBoardColumn(visibleJobs);
   assert.equal(grouped.queued.length + grouped.running.length + grouped.finished.length, visibleJobs.length);
+});
+
+test("board shows active and failed by default; Show succeeded adds succeeded and resolved", () => {
+  const jobs = ["queued", "running", "failed", "timed_out", "succeeded", "resolved", "cancelled"]
+    .map((state) => ({ id: state, state }));
+
+  assert.deepEqual(filterBoardJobs(jobs, false).map(({ id }) => id), ["queued", "running", "failed", "timed_out"]);
+  assert.deepEqual(filterBoardJobs(jobs, true).map(({ id }) => id), ["queued", "running", "failed", "timed_out", "succeeded", "resolved", "cancelled"]);
+});
+
+test("board filters parse from and serialize to the URL hash, omitting defaults", () => {
+  const defaults = { showSucceeded: false, runsView: "board", dateFilter: "all", boardLayout: "all" };
+
+  assert.equal(boardHash(defaults), "#/runs");
+  assert.deepEqual(boardFiltersFromHash("#/runs"), defaults);
+  assert.deepEqual(boardFiltersFromHash(""), defaults);
+
+  const all = { showSucceeded: true, runsView: "table", dateFilter: "last7", boardLayout: "projects" };
+  assert.equal(boardHash(all), "#/runs?succeeded=1&view=list&range=last7&group=projects");
+  assert.deepEqual(boardFiltersFromHash("#/runs?succeeded=1&view=list&range=last7&group=projects"), all);
+
+  // Only non-defaults serialize; each flag can appear alone.
+  assert.deepEqual([...boardParamsFromFilters({ ...all, showSucceeded: false, runsView: "board", boardLayout: "all" }).entries()], [["range", "last7"]]);
+  assert.deepEqual(boardFiltersFromHash("#/runs?succeeded=1"), { ...defaults, showSucceeded: true });
+  assert.deepEqual(boardFiltersFromHash("#/runs?view=list"), { ...defaults, runsView: "table" });
+  assert.deepEqual(boardFiltersFromHash("#/runs?range=last7"), { ...defaults, dateFilter: "last7" });
+  assert.deepEqual(boardFiltersFromHash("#/runs?group=projects"), { ...defaults, boardLayout: "projects" });
+
+  // Invalid values fall back to defaults, and task hashes carry no board filters.
+  assert.deepEqual(boardFiltersFromHash("#/runs?view=bogus&range=nope&group=wat"), defaults);
+  assert.deepEqual(boardFiltersFromHash("#/runs/job_1?tab=history"), defaults);
+  assert.deepEqual(boardFiltersFromParams(new URLSearchParams("succeeded=0")), defaults);
 });
 
 test("board date filters offer exactly today, yesterday, last 7 days and all", () => {
@@ -332,4 +364,13 @@ test("latest attempt is the newest created, even when an older one was updated l
   const [entry] = collapseJobsByTicket(jobs);
   assert.equal(entry.latest.id, "real");
   assert.deepEqual(entry.priors.map(({ id }) => id), ["stale"]);
+});
+
+test("only plain queued jobs are cancellable", () => {
+  assert.equal(canCancelJob({ state: "queued" }), true);
+  for (const state of ["running", "succeeded", "failed", "timed_out", "cancelled", "awaiting_approval"]) {
+    assert.equal(canCancelJob({ state }), false);
+  }
+  assert.equal(canCancelJob({ state: "queued", workflow: { name: "deliver", steps: ["build"], current_step: 0 } }), false);
+  assert.equal(canCancelJob({ state: "running", workflow: { name: "deliver" } }), false);
 });

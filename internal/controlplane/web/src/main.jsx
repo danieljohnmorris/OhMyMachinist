@@ -12,7 +12,7 @@ import { Card } from "@/components/ui/card";
 import { PageHeading } from "@/components/ui/page-heading";
 import { cn } from "@/lib/utils";
 import { routeFromHash } from "@/routes";
-import { attemptTime, boardCardTimestamp, boardColumns, boardDateFilters, collapseIssueAttempts, collapseJobsByTicket, currentRun, filterJobs, filterJobsByDate, groupEntriesByBoardColumn, groupJobsByBoardColumn, jobCounts, jobDisplayTitle, resolutionLabel } from "@/runs-board";
+import { attemptTime, boardCardTimestamp, boardColumns, boardDateFilters, boardFiltersFromHash, boardHash, canCancelJob, collapseIssueAttempts, collapseJobsByTicket, currentRun, filterBoardJobs, filterJobsByDate, groupEntriesByBoardColumn, groupJobsByBoardColumn, jobCounts, jobDisplayTitle, resolutionLabel } from "@/runs-board";
 import { groupEntriesByProject, groupJobsByProject } from "@/project";
 import { concurrencyLabel } from "@/concurrency";
 import { createStatusLoader } from "@/status-loader";
@@ -35,10 +35,9 @@ function App() {
   const [deletingJob, setDeletingJob] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [composerOpen, setComposerOpen] = useState(false);
-  const [filter, setFilter] = useState("all");
-  const [dateFilter, setDateFilter] = useState("all");
-  const [runsView, setRunsView] = useState("board");
-  const [boardLayout, setBoardLayout] = useState(() => localStorage.getItem("machinist-board-layout") === "projects" ? "projects" : "all");
+  // Board filters restore from the URL hash query so refresh and
+  // back/forward keep them; defaults are omitted from the URL.
+  const [filters, setFilters] = useState(() => boardFiltersFromHash(window.location.hash));
   const [dark, setDark] = useState(() => localStorage.getItem("machinist-theme") !== "light");
   const [route, setRoute] = useState(() => routeFromHash(window.location.hash));
   const view = route.view;
@@ -71,10 +70,6 @@ function App() {
   }, [dark]);
 
   useEffect(() => {
-    localStorage.setItem("machinist-board-layout", boardLayout);
-  }, [boardLayout]);
-
-  useEffect(() => {
     const updateView = () => {
       setTaskActionError("");
       setRoute(routeFromHash(window.location.hash));
@@ -82,6 +77,12 @@ function App() {
     window.addEventListener("hashchange", updateView);
     return () => window.removeEventListener("hashchange", updateView);
   }, []);
+
+  // Board filters follow the URL: browser back/forward and hash edits restore them.
+  useEffect(() => {
+    if (view !== "runs") return;
+    setFilters(boardFiltersFromHash(window.location.hash));
+  }, [route]);
 
   useEffect(() => {
     let stopped = false;
@@ -104,14 +105,13 @@ function App() {
 
   const displayJobs = useMemo(() => collapseIssueAttempts(status.jobs), [status.jobs]);
   const counts = useMemo(() => jobCounts(displayJobs), [displayJobs]);
-  const visibleJobs = useMemo(() => filterJobs(displayJobs, filter), [filter, displayJobs]);
-  const datedJobs = useMemo(() => filterJobsByDate(visibleJobs, dateFilter), [dateFilter, visibleJobs]);
+  const visibleJobs = useMemo(() => filterBoardJobs(displayJobs, filters.showSucceeded), [filters.showSucceeded, displayJobs]);
   // Board: one card per Plane ticket (latest attempt); date/state filters apply to the latest.
   const boardEntries = useMemo(() => {
-    const datedIds = new Set(filterJobsByDate(status.jobs, dateFilter).map((job) => job.id));
+    const datedIds = new Set(filterJobsByDate(status.jobs, filters.dateFilter).map((job) => job.id));
     return collapseJobsByTicket(status.jobs).filter((entry) =>
-      datedIds.has(entry.latest.id) && filterJobs([entry.latest], filter).length > 0);
-  }, [dateFilter, filter, status.jobs]);
+      datedIds.has(entry.latest.id) && filterBoardJobs([entry.latest], filters.showSucceeded).length > 0);
+  }, [filters.dateFilter, filters.showSucceeded, status.jobs]);
 
   const connectedWorkers = status.workers.filter((worker) => worker.connected).length;
   const selectedJob = route.jobID ? status.jobs.find((job) => job.id === route.jobID) : undefined;
@@ -159,6 +159,17 @@ function App() {
     } catch (error) { setTaskActionError(error.message); }
   }
 
+  async function cancelJob(job) {
+    setTaskActionError("");
+    try {
+      const response = await fetch(`/api/v1/jobs/${encodeURIComponent(job.id)}/cancel`, {
+        method: "POST", headers: { "X-Machinist-CSRF": status.csrf_token },
+      });
+      if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.error || "Unable to cancel job"); }
+      await statusLoader.current.refresh();
+    } catch (error) { setTaskActionError(error.message); }
+  }
+
   async function deleteJob(job) {
     if (!window.confirm(`Delete task ${shortId(job.id)} and all of its stored run data?`)) return;
     setDeletingJob(job.id);
@@ -201,6 +212,14 @@ function App() {
     setRoute({ ...route, attempt: next });
   }
 
+  // Filter changes update the URL hash (a history entry, so back/forward work)
+  // and the state immediately; the hashchange listener then confirms them.
+  function updateBoardFilters(next) {
+    const merged = { ...filters, ...next };
+    setFilters(merged);
+    window.location.hash = boardHash(merged);
+  }
+
   return (
     <div className="app-shell min-h-screen bg-background text-foreground md:flex">
       <aside className="app-sidebar sticky top-0 z-20 flex shrink-0 items-center border-b border-border bg-sidebar px-3 py-2 md:h-screen md:w-56 md:flex-col md:items-stretch md:border-b-0 md:border-r md:px-4 md:py-5">
@@ -227,7 +246,7 @@ function App() {
       </aside>
 
       <main className="workshop min-w-0 flex-1">
-        {view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={displayJob} jobs={status.jobs} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} onAttemptChange={selectTaskAttempt} tab={route.tab} onTabChange={selectTaskTab} /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : view === "workers" ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} /> : view === "triggers" ? <TriggersPage triggers={status.triggers || []} loaded={statusLoaded} error={statusError} /> : ["commands", "workflows"].includes(view) ? <CommandsPage /> : <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
+        {view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={displayJob} jobs={status.jobs} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} onCancelJob={cancelJob} onAttemptChange={selectTaskAttempt} tab={route.tab} onTabChange={selectTaskTab} /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : view === "workers" ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} /> : view === "triggers" ? <TriggersPage triggers={status.triggers || []} loaded={statusLoaded} error={statusError} /> : ["commands", "workflows"].includes(view) ? <CommandsPage /> : <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
           <PageHeading title="Tasks" description="Describe the work. Review the result.">
             <div className="flex items-center gap-2">
               <Button className="text-xs!" onClick={() => setComposerOpen(true)}><Plus className="size-4" />New task</Button>
@@ -239,31 +258,30 @@ function App() {
 
           <section>
             <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-              <div className="flex flex-wrap items-center gap-1" role="group" aria-label="Filter runs">
-                {[["all", "All"], ["active", "Active"], ["failed", "Failed"], ["succeeded", "Succeeded"], ["resolved", "Resolved"]].map(([value, label]) => (
-                  <Button key={value} variant="ghost" size="sm" aria-pressed={filter === value} onClick={() => setFilter(value)} className={cn("text-xs!", filter === value && "bg-muted text-foreground")}>{label}<span className="text-muted-foreground">{counts[value]}</span></Button>
-                ))}
-              </div>
+              <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <input type="checkbox" className="size-3.5 accent-primary" checked={filters.showSucceeded} onChange={(event) => updateBoardFilters({ showSucceeded: event.target.checked })} />
+                Show succeeded
+              </label>
               <div className="flex flex-wrap items-center justify-between gap-3 lg:justify-end">
                 <p className="text-xs text-muted-foreground">{counts.all} task{counts.all === 1 ? "" : "s"}</p>
                 <div className="inline-flex rounded-lg bg-muted/60 p-1" role="group" aria-label="Runs view">
-                  <Button variant="ghost" size="sm" className={cn("h-7 border-transparent px-2.5 text-xs!", runsView === "board" && "bg-surface text-foreground shadow-xs")} aria-pressed={runsView === "board"} onClick={() => setRunsView("board")}><LayoutDashboard className="size-3.5" />Board</Button>
-                  <Button variant="ghost" size="sm" className={cn("h-7 border-transparent px-2.5 text-xs!", runsView === "table" && "bg-surface text-foreground shadow-xs")} aria-pressed={runsView === "table"} onClick={() => setRunsView("table")}><Table2 className="size-3.5" />List</Button>
+                  <Button variant="ghost" size="sm" className={cn("h-7 border-transparent px-2.5 text-xs!", filters.runsView === "board" && "bg-surface text-foreground shadow-xs")} aria-pressed={filters.runsView === "board"} onClick={() => updateBoardFilters({ runsView: "board" })}><LayoutDashboard className="size-3.5" />Board</Button>
+                  <Button variant="ghost" size="sm" className={cn("h-7 border-transparent px-2.5 text-xs!", filters.runsView === "table" && "bg-surface text-foreground shadow-xs")} aria-pressed={filters.runsView === "table"} onClick={() => updateBoardFilters({ runsView: "table" })}><Table2 className="size-3.5" />List</Button>
                 </div>
-                {runsView === "board" && <div className="inline-flex rounded-lg bg-muted/60 p-1" role="group" aria-label="Board date filter">
+                {filters.runsView === "board" && <div className="inline-flex rounded-lg bg-muted/60 p-1" role="group" aria-label="Board date filter">
                   {boardDateFilters.map(({ id, label }) => (
-                    <Button key={id} variant="ghost" size="sm" className={cn("h-7 border-transparent px-2.5 text-xs!", dateFilter === id && "bg-surface text-foreground shadow-xs")} aria-pressed={dateFilter === id} onClick={() => setDateFilter(id)}>{label}</Button>
+                    <Button key={id} variant="ghost" size="sm" className={cn("h-7 border-transparent px-2.5 text-xs!", filters.dateFilter === id && "bg-surface text-foreground shadow-xs")} aria-pressed={filters.dateFilter === id} onClick={() => updateBoardFilters({ dateFilter: id })}>{label}</Button>
                   ))}
                 </div>}
                 <div className="inline-flex rounded-lg bg-muted/60 p-1" role="group" aria-label="Board layout">
-                  <Button variant="ghost" size="sm" className={cn("h-7 border-transparent px-2.5 text-xs!", boardLayout === "all" && "bg-surface text-foreground shadow-xs")} aria-pressed={boardLayout === "all"} onClick={() => setBoardLayout("all")}>All</Button>
-                  <Button variant="ghost" size="sm" className={cn("h-7 border-transparent px-2.5 text-xs!", boardLayout === "projects" && "bg-surface text-foreground shadow-xs")} aria-pressed={boardLayout === "projects"} onClick={() => setBoardLayout("projects")}>By project</Button>
+                  <Button variant="ghost" size="sm" className={cn("h-7 border-transparent px-2.5 text-xs!", filters.boardLayout === "all" && "bg-surface text-foreground shadow-xs")} aria-pressed={filters.boardLayout === "all"} onClick={() => updateBoardFilters({ boardLayout: "all" })}>All</Button>
+                  <Button variant="ghost" size="sm" className={cn("h-7 border-transparent px-2.5 text-xs!", filters.boardLayout === "projects" && "bg-surface text-foreground shadow-xs")} aria-pressed={filters.boardLayout === "projects"} onClick={() => updateBoardFilters({ boardLayout: "projects" })}>By project</Button>
                 </div>
               </div>
             </div>
 
-            {runsView === "board" ? (boardLayout === "projects" ? <ProjectRunBoard entries={boardEntries} /> : <RunBoard entries={boardEntries} />) : <Card className="overflow-hidden">
-              {visibleJobs.length ? visibleJobs.map((job) => <RunRow key={job.id} job={job} />) : <EmptyRuns filtered={filter !== "all"} openComposer={() => setComposerOpen(true)} />}
+            {filters.runsView === "board" ? (filters.boardLayout === "projects" ? <ProjectRunBoard entries={boardEntries} onCancelJob={cancelJob} /> : <RunBoard entries={boardEntries} onCancelJob={cancelJob} />) : <Card className="overflow-hidden">
+              {visibleJobs.length ? visibleJobs.map((job) => <RunRow key={job.id} job={job} onCancelJob={cancelJob} />) : <EmptyRuns filtered={!filters.showSucceeded} openComposer={() => setComposerOpen(true)} />}
             </Card>}
           </section>
 
@@ -295,14 +313,14 @@ function RunComposer({ title,setTitle,sourceURL,setSourceURL,choices,repositorie
   </Card>;
 }
 
-function RunBoard({ entries }) {
+function RunBoard({ entries, onCancelJob }) {
   const groupedEntries = groupEntriesByBoardColumn(entries);
   return <div className="grid min-w-0 gap-4 md:grid-cols-2 xl:grid-cols-4">
-    {boardColumns.map((column) => <RunColumn key={column.id} column={column} entries={groupedEntries[column.id]} idPrefix="board" />)}
+    {boardColumns.map((column) => <RunColumn key={column.id} column={column} entries={groupedEntries[column.id]} idPrefix="board" onCancelJob={onCancelJob} />)}
   </div>;
 }
 
-function ProjectRunBoard({ entries }) {
+function ProjectRunBoard({ entries, onCancelJob }) {
   const projectGroups = groupEntriesByProject(entries);
   return <div className="grid min-w-0 gap-6">
     {projectGroups.map(([project, projectEntries]) => {
@@ -313,21 +331,21 @@ function ProjectRunBoard({ entries }) {
           <Badge className="shrink-0 border-border bg-surface text-muted-foreground" aria-label={`${projectEntries.length} visible ${project} runs`}>{projectEntries.length}</Badge>
         </header>
         <div className="grid min-w-0 gap-4 md:grid-cols-2 xl:grid-cols-4">
-          {boardColumns.map((column) => <RunColumn key={column.id} column={column} entries={groupedEntries[column.id]} idPrefix={`project-${project}`} />)}
+          {boardColumns.map((column) => <RunColumn key={column.id} column={column} entries={groupedEntries[column.id]} idPrefix={`project-${project}`} onCancelJob={onCancelJob} />)}
         </div>
       </section>;
     })}
   </div>;
 }
 
-function RunColumn({ column, entries, idPrefix }) {
+function RunColumn({ column, entries, idPrefix, onCancelJob }) {
   return <section className="run-column min-w-0 border border-border bg-muted/20" aria-labelledby={`${idPrefix}-${column.id}`}>
     <header className="flex items-center justify-between gap-3 border-b border-border px-3 py-2.5">
       <div className="min-w-0"><h2 id={`${idPrefix}-${column.id}`} className="text-sm font-semibold">{column.title}</h2><p className="break-words text-xs text-muted-foreground">{column.description}</p></div>
       <Badge className="shrink-0 border-border bg-surface text-muted-foreground" aria-label={`${entries.length} visible ${column.title.toLowerCase()} runs`}>{entries.length}</Badge>
     </header>
     <div className="grid min-w-0 gap-2 p-2">
-      {entries.length ? entries.map((entry) => <RunCard key={entry.latest.id} job={entry.latest} priors={entry.priors} />) : <p className="px-2 py-8 text-center text-xs text-muted-foreground">No runs</p>}
+      {entries.length ? entries.map((entry) => <RunCard key={entry.latest.id} job={entry.latest} priors={entry.priors} onCancelJob={onCancelJob} />) : <p className="px-2 py-8 text-center text-xs text-muted-foreground">No runs</p>}
     </div>
   </section>;
 }
@@ -340,7 +358,7 @@ function attemptBadges(job) {
   </div>;
 }
 
-function RunCard({ job, priors = [] }) {
+function RunCard({ job, priors = [], onCancelJob }) {
   const title = jobDisplayTitle(job);
   const run = currentRun(job);
   const timestamp = boardCardTimestamp(job);
@@ -358,14 +376,14 @@ function RunCard({ job, priors = [] }) {
     </a>{priors.length > 0 && <div className="flex flex-wrap items-center gap-1.5 border-t border-border px-4 py-2.5">
       <Badge className="border-border bg-surface text-muted-foreground" aria-label={`${attemptCount} attempts`}>{attemptCount} attempts</Badge>
       {priors.map((prior) => <a key={prior.id} href={`#/runs/${encodeURIComponent(prior.id)}`} className="text-xs text-muted-foreground underline hover:text-foreground" aria-label={`Open prior attempt ${stateLabel(prior.state)} ${relativeTime(attemptTime(prior))}`}>{stateLabel(prior.state)} · {relativeTime(attemptTime(prior))}</a>)}
-    </div>}</Card>;
+    </div>}{canCancelJob(job) && <div className="flex justify-end px-4 pb-4"><Button size="sm" variant="outline" aria-label={`Cancel task ${title}`} onClick={() => onCancelJob(job)}>Cancel</Button></div>}</Card>;
 }
 
-function RunRow({ job }) {
+function RunRow({ job, onCancelJob }) {
   const title=jobDisplayTitle(job);
   const run=currentRun(job);
   const resolution=resolutionLabel(job);
-  return <article className="border-b border-border last:border-b-0"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="flex items-center justify-between gap-4 px-5 py-4 hover:bg-muted/35" aria-label={`Open task ${title}`}><div className="min-w-0"><p className="break-words text-sm font-medium" title={title}>{title}</p><p className="mt-1 text-xs text-muted-foreground">{job.repository} · {friendlyName(run?.command || job.command)}</p>{resolution && <p className="mt-1 text-xs text-success">{resolution}</p>}{attemptBadges(job)}</div><div className="flex shrink-0 flex-col items-end gap-1"><State value={job.state} /><time className="text-xs text-muted-foreground" dateTime={job.created_at}>{relativeTime(job.created_at)}</time></div></a></article>;
+  return <article className="border-b border-border last:border-b-0"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="flex items-center justify-between gap-4 px-5 py-4 hover:bg-muted/35" aria-label={`Open task ${title}`}><div className="min-w-0"><p className="break-words text-sm font-medium" title={title}>{title}</p><p className="mt-1 text-xs text-muted-foreground">{job.repository} · {friendlyName(run?.command || job.command)}</p>{resolution && <p className="mt-1 text-xs text-success">{resolution}</p>}{attemptBadges(job)}</div><div className="flex shrink-0 flex-col items-end gap-1"><State value={job.state} /><time className="text-xs text-muted-foreground" dateTime={job.created_at}>{relativeTime(job.created_at)}</time>{canCancelJob(job) && <Button size="sm" variant="outline" aria-label={`Cancel task ${title}`} onClick={() => onCancelJob(job)}>Cancel</Button>}</div></a></article>;
 }
 
 function EmptyRuns({ filtered, openComposer }) {

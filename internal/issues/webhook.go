@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -39,11 +40,43 @@ type webhookIssue struct {
 	StateName   string          `json:"state_name"`
 }
 
+type webhookActivity struct {
+	Field    string          `json:"field"`
+	NewValue json.RawMessage `json:"new_value"`
+	OldValue json.RawMessage `json:"old_value"`
+}
+
 type webhookEnvelope struct {
-	Data struct {
-		Issue webhookIssue `json:"issue"`
-	} `json:"data"`
-	Issue webhookIssue `json:"issue"`
+	Event    string           `json:"event"`
+	Action   string           `json:"action"`
+	Data     json.RawMessage  `json:"data"`
+	Issue    webhookIssue     `json:"issue"`
+	Activity *webhookActivity `json:"activity"`
+}
+
+// ErrNoOpEvent is returned by ParseIssueWebhook when the payload does not change
+// the issue name, description, or labels — state moves, comments, deletions, and
+// other metadata-only updates. Callers should acknowledge and skip submission.
+var ErrNoOpEvent = errors.New("issue webhook event does not change issue content")
+
+// noOpEvent reports whether the webhook leaves the intake-relevant issue content
+// (name, description, labels) untouched.
+func (envelope webhookEnvelope) noOpEvent() bool {
+	if envelope.Action == "delete" {
+		return true
+	}
+	if strings.EqualFold(envelope.Event, "issue_comment") {
+		return true
+	}
+	if envelope.Activity != nil && envelope.Activity.Field != "" {
+		switch strings.ToLower(envelope.Activity.Field) {
+		case "name", "description", "labels", "label":
+			return false
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 // ParseIssueWebhook extracts a source-neutral issue from either Plane's root
@@ -61,9 +94,24 @@ func ParseIssueWebhookState(body []byte) (Issue, PlaneIssueState, error) {
 	if err := json.Unmarshal(body, &envelope); err != nil {
 		return Issue{}, PlaneIssueState{}, fmt.Errorf("parse issue webhook: %w", err)
 	}
+	if envelope.noOpEvent() {
+		return Issue{}, PlaneIssueState{}, ErrNoOpEvent
+	}
 	payload := envelope.Issue
-	if payload.ID == "" && payload.Identifier == "" && payload.Key == "" {
-		payload = envelope.Data.Issue
+	if payload.ID == "" && payload.Identifier == "" && payload.Key == "" && len(envelope.Data) > 0 {
+		// Linear nests the issue as data.issue; Plane sends the issue itself
+		// under "data".
+		var nested struct {
+			Issue webhookIssue `json:"issue"`
+		}
+		if err := json.Unmarshal(envelope.Data, &nested); err == nil && (nested.Issue.ID != "" || nested.Issue.Identifier != "" || nested.Issue.Key != "") {
+			payload = nested.Issue
+		} else {
+			var flat webhookIssue
+			if err := json.Unmarshal(envelope.Data, &flat); err == nil {
+				payload = flat
+			}
+		}
 	}
 	key := firstNonEmpty(payload.Identifier, payload.ID, payload.Key)
 	title := firstNonEmpty(payload.Title, payload.Name)
@@ -120,6 +168,10 @@ func (h WebhookHandler) ServeHTTP(response http.ResponseWriter, request *http.Re
 		return
 	}
 	issue, err := ParseIssueWebhook(body)
+	if errors.Is(err, ErrNoOpEvent) {
+		response.WriteHeader(http.StatusAccepted)
+		return
+	}
 	if err != nil {
 		http.Error(response, err.Error(), http.StatusBadRequest)
 		return

@@ -210,3 +210,43 @@ func TestTitleIncludesIssueKey(t *testing.T) {
 		t.Fatalf("title = %q", got)
 	}
 }
+
+func TestParseIssueWebhookIgnoresNoOpEvents(t *testing.T) {
+	noOps := []string{
+		// Plane state-only update: activity names the changed field.
+		`{"event":"issue","action":"update","data":{"id":"issue-1","name":"Add archive page"},"activity":{"field":"state","old_value":"Todo","new_value":"Done"}}`,
+		// Comment-only event carries no issue content.
+		`{"event":"issue_comment","action":"create","data":{"comment_html":"<p>ping</p>"}}`,
+		// Deletions never submit work.
+		`{"event":"issue","action":"delete","data":{"id":"issue-1"}}`,
+		// Assignee churn is not intake content.
+		`{"event":"issue","action":"update","data":{"id":"issue-1","name":"Add archive page"},"activity":{"field":"assignees","new_value":["u2"]}}`,
+	}
+	for _, body := range noOps {
+		if _, err := ParseIssueWebhook([]byte(body)); !errors.Is(err, ErrNoOpEvent) {
+			t.Fatalf("ParseIssueWebhook(%s) = %v, want ErrNoOpEvent", body, err)
+		}
+	}
+	// Content updates still parse, including Plane's flat data payload.
+	content := []byte(`{"event":"issue","action":"update","data":{"id":"issue-1","name":"Add archive page","description":"Build it."},"activity":{"field":"description","old_value":"old","new_value":"Build it."}}`)
+	issue, err := ParseIssueWebhook(content)
+	if err != nil || issue.Key != "issue-1" || issue.Title != "Add archive page" || issue.Description != "Build it." {
+		t.Fatalf("issue = %#v, err = %v", issue, err)
+	}
+}
+
+func TestWebhookHandlerAcknowledgesNoOpEventsWithoutSubmit(t *testing.T) {
+	submissions := 0
+	handler := WebhookHandler{Secret: "secret", Submit: func(Issue) error { submissions++; return nil }}
+	body := []byte(`{"event":"issue","action":"update","data":{"id":"issue-1","name":"Add archive page"},"activity":{"field":"state","old_value":"Todo","new_value":"Done"}}`)
+	request := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(string(body)))
+	request.Header.Set("X-Signature", "sha256="+hmacSHA256("secret", body))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("no-op response = %d", recorder.Code)
+	}
+	if submissions != 0 {
+		t.Fatalf("submissions = %d", submissions)
+	}
+}
