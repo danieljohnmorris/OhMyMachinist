@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -197,14 +198,50 @@ func (p *PlaneClient) endpoint(parts ...string) string {
 	return base
 }
 
+// request performs one Plane API call. HTTP 429 responses are retried after
+// the X-RateLimit-Reset time (capped) so bulk reconciles ride out Plane's
+// per-key rate limit instead of failing.
 func (p *PlaneClient) request(ctx context.Context, method, endpoint string, body []byte, output any) error {
+	for attempt := 0; ; attempt++ {
+		wait, err := p.requestOnce(ctx, method, endpoint, body, output)
+		if wait <= 0 || attempt >= planeRateLimitRetries {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+}
+
+const planeRateLimitRetries = 3
+
+// planeRetryAfter is how long to wait before retrying a rate-limited call.
+var planeRetryAfter = func(response *http.Response) time.Duration {
+	const fallback, ceiling = 15 * time.Second, 65 * time.Second
+	reset, err := strconv.ParseInt(response.Header.Get("X-RateLimit-Reset"), 10, 64)
+	if err != nil {
+		return fallback
+	}
+	wait := time.Until(time.Unix(reset, 0))
+	if wait > ceiling {
+		return ceiling
+	}
+	if wait <= 0 {
+		return time.Second
+	}
+	return wait + time.Second
+}
+
+func (p *PlaneClient) requestOnce(ctx context.Context, method, endpoint string, body []byte, output any) (time.Duration, error) {
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewReader(body)
 	}
 	request, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("X-API-Key", p.config.APIKey)
@@ -213,20 +250,23 @@ func (p *PlaneClient) request(ctx context.Context, method, endpoint string, body
 	}
 	response, err := p.client.Do(request)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer response.Body.Close()
 	payload, err := io.ReadAll(io.LimitReader(response.Body, 16<<20))
 	if err != nil {
-		return err
+		return 0, err
+	}
+	if response.StatusCode == http.StatusTooManyRequests {
+		return planeRetryAfter(response), fmt.Errorf("plane request %s: HTTP %d: %s", method, response.StatusCode, strings.TrimSpace(string(payload)))
 	}
 	if response.StatusCode < 200 || response.StatusCode > 299 {
-		return fmt.Errorf("plane request %s: HTTP %d: %s", method, response.StatusCode, strings.TrimSpace(string(payload)))
+		return 0, fmt.Errorf("plane request %s: HTTP %d: %s", method, response.StatusCode, strings.TrimSpace(string(payload)))
 	}
 	if output == nil {
-		return nil
+		return 0, nil
 	}
-	return json.Unmarshal(payload, output)
+	return 0, json.Unmarshal(payload, output)
 }
 
 type planeLabel struct {
