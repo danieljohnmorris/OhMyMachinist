@@ -326,7 +326,7 @@ func (s *Server) routes() (http.Handler, error) {
 	mux.HandleFunc("GET /api/v1/catalog", s.catalog)
 	mux.HandleFunc("GET /api/v1/definitions", s.definitions)
 	mux.HandleFunc("POST /api/v1/jobs/{id}/{action}", s.authorizeSubmission(s.workflowAction))
-	mux.HandleFunc("POST /api/v1/jobs", s.authorizeSubmission(s.submit))
+	mux.HandleFunc("POST /api/v1/jobs", s.authorizeSubmission(s.linkAttemptsAfter(s.submit)))
 	mux.HandleFunc("DELETE /api/v1/jobs/{id}", s.authorizeSubmission(s.deleteJob))
 	mux.HandleFunc("POST /api/v1/workers/poll", s.authorizeWorker(s.poll))
 	mux.HandleFunc("POST /api/v1/webhooks/issues", s.issueWebhook)
@@ -791,4 +791,15 @@ func (s *Server) workflowAction(response http.ResponseWriter, request *http.Requ
 		return
 	}
 	writeJSON(response, http.StatusOK, map[string]string{"status": "accepted"})
+}
+
+// linkAttemptsAfter relinks ticket attempts once a submission is stored, so a
+// requeue shows up in the attempt picker immediately.
+func (s *Server) linkAttemptsAfter(next http.HandlerFunc) http.HandlerFunc {
+	return func(response http.ResponseWriter, request *http.Request) {
+		next(response, request)
+		if err := s.store.linkTicketAttempts(context.WithoutCancel(request.Context())); err != nil {
+			log.Printf("link ticket attempts: %v", err)
+		}
+	}
 }

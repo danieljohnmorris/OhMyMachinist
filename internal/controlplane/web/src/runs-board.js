@@ -277,8 +277,10 @@ export function currentRun(job) {
 }
 
 
+// Attempts are ordered by when they were created: a cancel or late status
+// change must not make an older attempt look like the latest.
 export function attemptTime(job) {
-  return job.updated_at || job.created_at || "";
+  return job.created_at || job.updated_at || "";
 }
 
 const ticketKeyPattern = /^([A-Z][A-Z0-9]{1,9}-\d+)\b/;

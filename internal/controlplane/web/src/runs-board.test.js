@@ -251,7 +251,7 @@ test("ticket keys come from the title first, then the persisted source field", (
 });
 
 test("attempts of one ticket collapse to the latest with priors linked", () => {
-  const spark = (id, state, updated) => ({ id, state, title: "SPARK-6: Board collapse", created_at: "2026-10-01T00:00:00Z", updated_at: updated, runs: [] });
+  const spark = (id, state, updated) => ({ id, state, title: "SPARK-6: Board collapse", created_at: updated, updated_at: updated, runs: [] });
   const entries = collapseJobsByTicket([
     spark("spark_cancelled", "cancelled", "2026-10-02T00:00:00Z"),
     spark("spark_latest", "succeeded", "2026-10-11T00:00:00Z"),
@@ -269,8 +269,8 @@ test("attempts of one ticket collapse to the latest with priors linked", () => {
 test("collapse groups by the persisted source field when titles have no key", () => {
   const source = { task: { source_url: "https://plane.example/tickets/SPARK-6/" }, prompt: "retry", created_at: "2026-10-01T00:00:00Z", runs: [] };
   const entries = collapseJobsByTicket([
-    { ...source, id: "old", updated_at: "2026-10-02T00:00:00Z" },
-    { ...source, id: "new", updated_at: "2026-10-09T00:00:00Z" },
+    { ...source, id: "old", created_at: "2026-10-02T00:00:00Z", updated_at: "2026-10-02T00:00:00Z" },
+    { ...source, id: "new", created_at: "2026-10-09T00:00:00Z", updated_at: "2026-10-09T00:00:00Z" },
   ]);
   assert.equal(entries.length, 1);
   assert.equal(entries[0].latest.id, "new");
@@ -278,7 +278,8 @@ test("collapse groups by the persisted source field when titles have no key", ()
 });
 
 test("attempt time prefers the last update and falls back to creation", () => {
-  assert.equal(attemptTime({ updated_at: "2026-10-11T00:00:00Z", created_at: "2026-10-01T00:00:00Z" }), "2026-10-11T00:00:00Z");
+  assert.equal(attemptTime({ updated_at: "2026-10-11T00:00:00Z", created_at: "2026-10-01T00:00:00Z" }), "2026-10-01T00:00:00Z");
+  assert.equal(attemptTime({ updated_at: "2026-10-11T00:00:00Z" }), "2026-10-11T00:00:00Z");
   assert.equal(attemptTime({ created_at: "2026-10-01T00:00:00Z" }), "2026-10-01T00:00:00Z");
   assert.equal(attemptTime({}), "");
 });
@@ -353,6 +354,16 @@ test("attemptDurationMillis measures wall clock, elapsed for in-progress attempt
   );
   assert.equal(attemptDurationMillis({ state: "failed", runs: [{ started_at: "2026-10-01T00:00:00Z" }] }, now), undefined, "terminal without completion times has no duration");
   assert.equal(attemptDurationMillis({ state: "queued", runs: [] }, now), undefined, "no timestamps at all has no duration");
+});
+
+test("latest attempt is the newest created, even when an older one was updated later", () => {
+  const jobs = [
+    { id: "stale", title: "MACH-22: x", state: "cancelled", created_at: "2026-10-13T11:31:50Z", updated_at: "2026-10-13T11:34:10Z", runs: [] },
+    { id: "real", title: "MACH-22: x", state: "queued", created_at: "2026-10-13T11:32:35Z", updated_at: "2026-10-13T11:32:35Z", runs: [] },
+  ];
+  const [entry] = collapseJobsByTicket(jobs);
+  assert.equal(entry.latest.id, "real");
+  assert.deepEqual(entry.priors.map(({ id }) => id), ["stale"]);
 });
 
 test("only plain queued jobs are cancellable", () => {
