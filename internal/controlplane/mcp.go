@@ -28,10 +28,10 @@ type mcpRequest struct {
 
 // mcpResponse is one outgoing JSON-RPC message.
 type mcpResponse struct {
-	JSONRPC string        `json:"jsonrpc"`
+	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id,omitempty"`
-	Result  any           `json:"result,omitempty"`
-	Error   *mcpError     `json:"error,omitempty"`
+	Result  any             `json:"result,omitempty"`
+	Error   *mcpError       `json:"error,omitempty"`
 }
 
 type mcpError struct {
@@ -80,7 +80,7 @@ var mcpToolList = []mcpTool{
 		"source_url": map[string]any{"type": "string"}, "workflow": map[string]any{"type": "string"},
 		"command": map[string]any{"type": "string"}, "prompt": map[string]any{"type": "string"},
 		"repository": map[string]any{"type": "string"}, "model": map[string]any{"type": "string"},
-		"project":    map[string]any{"type": "string"},
+		"project": map[string]any{"type": "string"},
 	}, "repository")},
 	{Name: "cancel_job", Description: "Cancel a job and its latest run.", InputSchema: mcpSchema(map[string]any{"job_id": map[string]any{"type": "string"}}, "job_id")},
 	{Name: "requeue_job", Description: "Requeue (retry) a failed, blocked, interrupted or cancelled job. Set previous_process_stopped=true to confirm the prior process is stopped.", InputSchema: mcpSchema(map[string]any{
