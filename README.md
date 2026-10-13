@@ -2,6 +2,25 @@
   <img src="docs/assets/logo-dark-padded.png" alt="oh my machinist" width="420">
 </p>
 
+## About this fork
+
+This is a fork of [Machinist](https://github.com/owainlewis/machinist). It keeps the upstream control plane and worker model, and adds factory features for tracker-driven delivery.
+
+What this fork adds today:
+
+- Plane intake (label poll and webhook), project-to-repository mapping, and Plane/PR links on runs
+- Tasks board: one card per ticket with prior attempts, active/failed by default, Show succeeded, URL-persisted filters, and project/date filters
+- Run page: attempt picker, transcript tab, full-height transcript, and activity sidebar with state timings
+- Retries that inject the prior attempt transcript into the next coder prompt
+- Job timeouts with fail alerts, and Plane-driven resolve when a ticket or linked PR completes
+- Fresh fetch of lane checkouts before each run
+- Built-in PR review after a pull request opens (checks, reviewers, commit status)
+
+The coding agent is whatever executor you configure on the worker: omp, Codex, Claude Code, or another command that reads a prompt on stdin. Models are chosen through that executor configuration (local or cloud). One example setup is DGX Sparks running a local GLM via omp.
+
+Pluggable trackers (Plane or Linear) and per-project agent and model choice are in progress, not done yet.
+
+
 <p align="center">
   <img src=".github/assets/machinist-lockup.svg" width="520" alt="Machinist">
 </p>
