@@ -12,7 +12,7 @@ import { Card } from "@/components/ui/card";
 import { PageHeading } from "@/components/ui/page-heading";
 import { cn } from "@/lib/utils";
 import { routeFromHash } from "@/routes";
-import { attemptTime, boardCardTimestamp, boardColumns, boardDateFilters, collapseIssueAttempts, collapseJobsByTicket, currentRun, filterJobs, filterJobsByDate, groupEntriesByBoardColumn, groupJobsByBoardColumn, jobCounts, jobDisplayTitle } from "@/runs-board";
+import { attemptTime, boardCardTimestamp, boardColumns, boardDateFilters, collapseIssueAttempts, collapseJobsByTicket, currentRun, filterJobs, filterJobsByDate, groupEntriesByBoardColumn, groupJobsByBoardColumn, jobCounts, jobDisplayTitle, resolutionLabel } from "@/runs-board";
 import { groupEntriesByProject, groupJobsByProject } from "@/project";
 import { concurrencyLabel } from "@/concurrency";
 import { createStatusLoader } from "@/status-loader";
@@ -240,7 +240,7 @@ function App() {
           <section>
             <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
               <div className="flex flex-wrap items-center gap-1" role="group" aria-label="Filter runs">
-                {[["all", "All"], ["active", "Active"], ["failed", "Failed"], ["succeeded", "Succeeded"]].map(([value, label]) => (
+                {[["all", "All"], ["active", "Active"], ["failed", "Failed"], ["succeeded", "Succeeded"], ["resolved", "Resolved"]].map(([value, label]) => (
                   <Button key={value} variant="ghost" size="sm" aria-pressed={filter === value} onClick={() => setFilter(value)} className={cn("text-xs!", filter === value && "bg-muted text-foreground")}>{label}<span className="text-muted-foreground">{counts[value]}</span></Button>
                 ))}
               </div>
@@ -344,6 +344,7 @@ function RunCard({ job, priors = [] }) {
   const title = jobDisplayTitle(job);
   const run = currentRun(job);
   const timestamp = boardCardTimestamp(job);
+  const resolution = resolutionLabel(job);
   const attemptCount = priors.length > 0 ? priors.length + 1 : (job.attempt_count || 0);
   return <Card className="overflow-hidden"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="block min-w-0 space-y-3 p-4 transition hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50" aria-label={`Open task ${title}`}>
       <p className="break-words text-sm font-medium leading-5" title={title}>{title}</p>
@@ -352,6 +353,7 @@ function RunCard({ job, priors = [] }) {
         <State value={job.state} />
         <time className="text-xs text-muted-foreground" dateTime={timestamp} title={timestamp ? new Date(timestamp).toLocaleString() : undefined}>{relativeTime(timestamp)}</time>
       </div>
+      {resolution && <p className="text-xs text-success">{resolution}</p>}
       {priors.length === 0 && attemptBadges(job)}
     </a>{priors.length > 0 && <div className="flex flex-wrap items-center gap-1.5 border-t border-border px-4 py-2.5">
       <Badge className="border-border bg-surface text-muted-foreground" aria-label={`${attemptCount} attempts`}>{attemptCount} attempts</Badge>
@@ -362,7 +364,8 @@ function RunCard({ job, priors = [] }) {
 function RunRow({ job }) {
   const title=jobDisplayTitle(job);
   const run=currentRun(job);
-  return <article className="border-b border-border last:border-b-0"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="flex items-center justify-between gap-4 px-5 py-4 hover:bg-muted/35" aria-label={`Open task ${title}`}><div className="min-w-0"><p className="break-words text-sm font-medium" title={title}>{title}</p><p className="mt-1 text-xs text-muted-foreground">{job.repository} · {friendlyName(run?.command || job.command)}</p>{attemptBadges(job)}</div><div className="flex shrink-0 flex-col items-end gap-1"><State value={job.state} /><time className="text-xs text-muted-foreground" dateTime={job.created_at}>{relativeTime(job.created_at)}</time></div></a></article>;
+  const resolution=resolutionLabel(job);
+  return <article className="border-b border-border last:border-b-0"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="flex items-center justify-between gap-4 px-5 py-4 hover:bg-muted/35" aria-label={`Open task ${title}`}><div className="min-w-0"><p className="break-words text-sm font-medium" title={title}>{title}</p><p className="mt-1 text-xs text-muted-foreground">{job.repository} · {friendlyName(run?.command || job.command)}</p>{resolution && <p className="mt-1 text-xs text-success">{resolution}</p>}{attemptBadges(job)}</div><div className="flex shrink-0 flex-col items-end gap-1"><State value={job.state} /><time className="text-xs text-muted-foreground" dateTime={job.created_at}>{relativeTime(job.created_at)}</time></div></a></article>;
 }
 
 function EmptyRuns({ filtered, openComposer }) {

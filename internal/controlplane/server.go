@@ -14,12 +14,14 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/owainlewis/machinist/internal/config"
+	"github.com/owainlewis/machinist/internal/issues"
 	"github.com/owainlewis/machinist/internal/protocol"
 )
 
@@ -35,21 +37,29 @@ const workerAvailabilityWindow = 15 * time.Second
 var webAssets embed.FS
 
 type Server struct {
-	store             *Store
-	definitionPath    string
-	triggers          []config.ResolvedTrigger
-	github            githubTriggerClient
-	issueSources      map[string]issuePoller
-	schedulerEvery    time.Duration
-	now               func() time.Time
-	schedulerError    func(error)
-	shutdownTimeout   time.Duration
-	maxConcurrentJobs int
-	workerToken       string
-	failAlerts        *failAlertWriter
-	csrfToken         string
-	handler           http.Handler
+	store              *Store
+	definitionPath     string
+	triggers           []config.ResolvedTrigger
+	github             githubTriggerClient
+	issueSources       map[string]issuePoller
+	planeClients       map[string]*issues.PlaneClient
+	githubRepositories map[string]string
+	webhookSecret      string
+	resolutionEvery    time.Duration
+	schedulerEvery     time.Duration
+	now                func() time.Time
+	schedulerError     func(error)
+	shutdownTimeout    time.Duration
+	maxConcurrentJobs  int
+	workerToken        string
+	failAlerts         *failAlertWriter
+	csrfToken          string
+	handler            http.Handler
 }
+
+// defaultResolutionEvery is the ticket reconciliation cadence: fast enough to
+// close cards shortly after external work lands, slow enough to stay cheap.
+const defaultResolutionEvery = 10 * time.Minute
 
 type statusResponse struct {
 	Workflows []string `json:"workflows"`
@@ -135,15 +145,29 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 	if err := store.SyncTriggers(context.Background(), definitions); err != nil {
 		return nil, fmt.Errorf("restore managed triggers: %w", err)
 	}
-	issueSources, e := loadIssueSources(definitionPath)
+	issueSources, planeClients, e := loadIssueSources(definitionPath)
 	if e != nil {
 		return nil, e
+	}
+	if len(planeClients) == 0 {
+		// Jobs submitted by an external Plane intake have no issue trigger.
+		// A workspace client from PLANE_URL/PLANE_WORKSPACE/PLANE_API_KEY
+		// still lets the reconciler resolve their tickets by key.
+		if client, err := issues.NewPlaneWorkspaceClient(issues.PlaneConfig{
+			URL: os.Getenv("PLANE_URL"), Workspace: os.Getenv("PLANE_WORKSPACE"), APIKey: os.Getenv("PLANE_API_KEY"),
+		}); err == nil {
+			planeClients = map[string]*issues.PlaneClient{"": client}
+		}
 	}
 	server := &Server{
 		store: store, definitionPath: definitionPath, triggers: managedTriggers,
 		github: NewGitHubCLI("gh", 30*time.Second), now: time.Now,
-		issueSources:   issueSources,
-		schedulerEvery: 30 * time.Second, shutdownTimeout: 5 * time.Second,
+		issueSources:       issueSources,
+		planeClients:       planeClients,
+		githubRepositories: definition.GitHub.Repositories,
+		webhookSecret:      definition.IssueSources.WebhookSecretValue(),
+		resolutionEvery:    defaultResolutionEvery,
+		schedulerEvery:     30 * time.Second, shutdownTimeout: 5 * time.Second,
 		schedulerError:    func(err error) { log.Printf("scheduler: %v", err) },
 		failAlerts:        &failAlertWriter{directory: alertsDirectory},
 		maxConcurrentJobs: maxConcurrentJobs, workerToken: workerToken, csrfToken: csrfToken,
@@ -229,31 +253,35 @@ func (s *Server) Serve(ctx context.Context, listen string, onListening func(net.
 
 func (s *Server) runScheduler(ctx context.Context) error {
 	var schedulers sync.WaitGroup
-	loop := func(delayFirst bool, work func(context.Context) error) {
+	loop := func(interval time.Duration, delayFirst bool, work func(context.Context) error) {
+		if interval <= 0 {
+			return
+		}
 		schedulers.Add(1)
 		go func() {
 			defer schedulers.Done()
-			if delayFirst && !sleep(ctx, s.schedulerEvery) {
+			if delayFirst && !sleep(ctx, interval) {
 				return
 			}
 			for {
 				s.reportSchedulerError(work(ctx))
-				if !sleep(ctx, s.schedulerEvery) {
+				if !sleep(ctx, interval) {
 					return
 				}
 			}
 		}()
 	}
 	for _, trigger := range s.triggers {
-		loop(false, func(ctx context.Context) error {
+		loop(s.schedulerEvery, false, func(ctx context.Context) error {
 			if err := s.processManagedTrigger(ctx, trigger); err != nil {
 				return fmt.Errorf("trigger %q: %w", trigger.Identity, err)
 			}
 			return nil
 		})
 	}
-	loop(true, s.maintainState)
-	loop(true, s.store.CleanupArtifacts)
+	loop(s.schedulerEvery, true, s.maintainState)
+	loop(s.schedulerEvery, true, s.store.CleanupArtifacts)
+	loop(s.resolutionEvery, false, s.reconcileTicketOutcomes)
 	<-ctx.Done()
 	schedulers.Wait()
 	return nil
@@ -299,6 +327,7 @@ func (s *Server) routes() (http.Handler, error) {
 	mux.HandleFunc("POST /api/v1/jobs", s.authorizeSubmission(s.submit))
 	mux.HandleFunc("DELETE /api/v1/jobs/{id}", s.authorizeSubmission(s.deleteJob))
 	mux.HandleFunc("POST /api/v1/workers/poll", s.authorizeWorker(s.poll))
+	mux.HandleFunc("POST /api/v1/webhooks/issues", s.issueWebhook)
 	mux.HandleFunc("POST /api/v1/runs/{id}/heartbeat", s.authorizeWorker(s.heartbeat))
 	mux.HandleFunc("POST /api/v1/runs/{id}/complete", s.authorizeWorker(s.complete))
 	mux.HandleFunc("POST /api/v1/runs/{id}/events", s.authorizeWorker(s.liveEvents))

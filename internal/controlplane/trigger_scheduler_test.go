@@ -85,6 +85,10 @@ type fakeGitHubTriggerClient struct {
 	permissionActors []string
 }
 
+func (f *fakeGitHubTriggerClient) MergedPullRequests(context.Context, string, int) ([]GitHubPullRequest, error) {
+	return nil, nil
+}
+
 func (f *fakeGitHubTriggerClient) SearchRequestedIssues(ctx context.Context, _ []string, label string, limit int) ([]GitHubCandidate, error) {
 	if f.searchStarted != nil {
 		select {

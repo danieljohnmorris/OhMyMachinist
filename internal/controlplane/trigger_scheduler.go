@@ -21,6 +21,7 @@ type githubTriggerClient interface {
 	IssueDetails(context.Context, string, int, string) (GitHubIssueDetails, error)
 	Permission(context.Context, string, string) (string, error)
 	AcknowledgeRequest(context.Context, string, int, string, string, bool) error
+	MergedPullRequests(context.Context, string, int) ([]GitHubPullRequest, error)
 }
 
 func (s *Server) processManagedTrigger(ctx context.Context, trigger config.ResolvedTrigger) error {
@@ -95,7 +96,7 @@ func (s *Server) processIssueTrigger(ctx context.Context, trigger config.Resolve
 				Identity: trigger.Identity, Family: trigger.Family, ConfigSignature: trigger.Signature,
 				ConfigGeneration: generation, OccurrenceKey: subject, Subject: subject, Title: title, ScheduledAt: s.now().UTC(),
 				Prompt: prompt, Repository: trigger.Repository, SelectionName: trigger.SelectionName,
-				Command: command, Task: &task,
+				Command: command, Task: &task, IssueKey: issue.Key,
 			})
 			if admissionErr != nil {
 				failures = append(failures, fmt.Errorf("%s: %w", issue.Key, admissionErr))

@@ -7,6 +7,7 @@ export const boardColumns = [
 
 const activeStates = new Set(["queued", "running"]);
 const failedStates = new Set(["failed", "timed_out"]);
+const succeededStates = new Set(["succeeded", "resolved"]);
 
 export function boardColumnForState(state) {
   if (state === "queued") return "queued";
@@ -29,7 +30,7 @@ export function boardCardTimestamp(job) {
 }
 
 export function needsAttention(state) {
-  return !activeStates.has(state) && state !== "succeeded";
+  return !activeStates.has(state) && !succeededStates.has(state);
 }
 
 export function issueKey(job) {
@@ -160,6 +161,7 @@ export function filterJobs(jobs, filter) {
     if (filter === "active") return activeStates.has(job.state);
     if (filter === "failed") return failedStates.has(job.state);
     if (filter === "succeeded") return job.state === "succeeded";
+    if (filter === "resolved") return job.state === "resolved";
     return true;
   });
 }
@@ -217,9 +219,17 @@ export function jobCounts(jobs) {
     result.all += 1;
     if (activeStates.has(job.state)) result.active += 1;
     if (failedStates.has(job.state)) result.failed += 1;
-    if (job.state === "succeeded") result.succeeded += 1;
+    if (succeededStates.has(job.state)) result.succeeded += 1;
+    if (job.state === "resolved") result.resolved += 1;
     return result;
-  }, { all: 0, active: 0, failed: 0, succeeded: 0 });
+  }, { all: 0, active: 0, failed: 0, succeeded: 0, resolved: 0 });
+}
+
+// resolutionLabel describes how a resolved ticket was closed, e.g.
+// "Resolved via PR #12 (merged by dan)" or "Resolved via Plane Done".
+export function resolutionLabel(job) {
+  const detail = typeof job?.resolution_detail === "string" ? job.resolution_detail.trim() : "";
+  return job?.state === "resolved" && detail ? `Resolved via ${detail}` : "";
 }
 
 export function currentRun(job) {

@@ -9,7 +9,7 @@ import { Transcript } from "./transcript.jsx";
 import { taskPresentation } from "./task-presentation.js";
 import { linkifyText } from "./linkify.js";
 import { Markdown } from "./markdown.js";
-import { jobDisplayTitle, supersededJob, ticketAttempts, attemptStart, attemptDurationMillis } from "./runs-board.js";
+import { jobDisplayTitle, resolutionLabel, supersededJob, ticketAttempts, attemptStart, attemptDurationMillis } from "./runs-board.js";
 import { runSidebarLinks } from "./run-links.js";
 import { formatDurationMillis, formatTokenUsage } from "./run-metrics.js";
 import { activityRows } from "./run-activity.js";
@@ -67,6 +67,9 @@ export function TaskDetail({
           </h1>
           <State value={job.state} />
         </div>
+        {resolutionLabel(job) && (
+          <p className="text-sm text-success" data-testid="resolution-label">{resolutionLabel(job)}</p>
+        )}
         <p className="text-sm text-muted-foreground">
           {job.repository} · {friendlyName(job.workflow?.name || job.command)}
         </p>

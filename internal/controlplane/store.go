@@ -60,6 +60,10 @@ type Job struct {
 	Attempt          int               `json:"attempt"`
 	PreviousJobID    string            `json:"previous_job_id,omitempty"`
 	SupersededBy     string            `json:"superseded_by,omitempty"`
+	IssueKey         string            `json:"issue_key,omitempty"`
+	ResolutionKind   string            `json:"resolution_kind,omitempty"`
+	ResolutionDetail string            `json:"resolution_detail,omitempty"`
+	ResolvedAt       *time.Time        `json:"resolved_at,omitempty"`
 	CreatedAt        time.Time         `json:"created_at"`
 	UpdatedAt        time.Time         `json:"updated_at"`
 	StateHistory     []StateTransition `json:"state_history,omitempty"`
@@ -138,6 +142,7 @@ type TriggerAdmission struct {
 	GitHubIssueTitle  string
 	RequestActor      string
 	RequestLabel      string
+	IssueKey          string
 }
 
 type TriggerStatus struct {
@@ -177,8 +182,9 @@ type RunOutput struct {
 }
 
 type CreateJobOptions struct {
-	Title   string
-	Project string
+	Title    string
+	Project  string
+	IssueKey string
 }
 
 func OpenStore(path string) (*Store, error) {
@@ -210,7 +216,7 @@ func OpenStore(path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) initialize(ctx context.Context) error {
-	const schemaVersion = 7
+	const schemaVersion = 8
 	var version int
 	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		return fmt.Errorf("read database schema version: %w", err)
@@ -239,6 +245,8 @@ CREATE TABLE IF NOT EXISTS jobs (
  trigger_identity TEXT NOT NULL DEFAULT '', trigger_config_signature TEXT NOT NULL DEFAULT '',
  trigger_generation_id TEXT NOT NULL DEFAULT '', occurrence_key TEXT NOT NULL DEFAULT '',
  trigger_subject TEXT NOT NULL DEFAULT '', github_issue_title TEXT NOT NULL DEFAULT '',
+ issue_key TEXT NOT NULL DEFAULT '', resolution_kind TEXT NOT NULL DEFAULT '', resolution_detail TEXT NOT NULL DEFAULT '',
+ resolved_at TEXT,
  fixed_trigger INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
  previous_job_id TEXT NOT NULL DEFAULT '', attempt INTEGER NOT NULL DEFAULT 1, superseded_by TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS runs (
@@ -287,8 +295,37 @@ END;`
 			return fmt.Errorf("upgrade database schema to version 7: %w", err)
 		}
 	}
-	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+jobMetadataSchema+"PRAGMA user_version=7;")
+	if version < 8 {
+		if err := s.addJobResolution(ctx); err != nil {
+			return fmt.Errorf("upgrade database schema to version 8: %w", err)
+		}
+	}
+	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+jobMetadataSchema+"PRAGMA user_version=8;")
 	return err
+}
+
+// addJobResolution adds the ticket-resolution columns to jobs. Existing rows
+// keep empty resolution fields, so the reconciler backfills them.
+func (s *Store) addJobResolution(ctx context.Context) error {
+	for _, column := range []string{
+		"issue_key TEXT NOT NULL DEFAULT ''",
+		"resolution_kind TEXT NOT NULL DEFAULT ''",
+		"resolution_detail TEXT NOT NULL DEFAULT ''",
+		"resolved_at TEXT",
+	} {
+		name, _, _ := strings.Cut(column, " ")
+		var present int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name=?`, name).Scan(&present); err != nil {
+			return err
+		}
+		if present > 0 {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN `+column); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) addJobTitle(ctx context.Context) error {
@@ -318,7 +355,7 @@ func (s *Store) addJobAttemptColumns(ctx context.Context) error {
 		if present > 0 {
 			continue
 		}
-		if _, err := s.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN ` + column.name + ` ` + column.definition); err != nil {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN `+column.name+` `+column.definition); err != nil {
 			return err
 		}
 	}
@@ -397,7 +434,7 @@ func (s *Store) CreateJobWithOptions(ctx context.Context, prompt, repository, na
 		return "", err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO jobs(id,title,prompt,repository,command,state,created_at,updated_at) VALUES(?,?,?,?,?,'queued',?,?)`, jobID, options.Title, prompt, repository, name, now, now); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO jobs(id,title,prompt,repository,command,issue_key,state,created_at,updated_at) VALUES(?,?,?,?,?,?,'queued',?,?)`, jobID, options.Title, prompt, repository, name, options.IssueKey, now, now); err != nil {
 		return "", fmt.Errorf("insert job: %w", err)
 	}
 	if options.Project != "" {
@@ -633,7 +670,7 @@ WHERE github_trigger_requests.state='pending'`, admission.Identity, admission.Oc
 		return "", false, err
 	}
 	now := s.now().UTC().Format(time.RFC3339Nano)
-	if _, err := tx.ExecContext(ctx, `INSERT INTO jobs(id,prompt,repository,command,trigger_identity,trigger_config_signature,trigger_generation_id,occurrence_key,trigger_subject,github_issue_title,fixed_trigger,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'queued',?,?)`, jobID, admission.Prompt, admission.Repository, admission.SelectionName, admission.Identity, admission.ConfigSignature, admission.ConfigGeneration, admission.OccurrenceKey, admission.Subject, admission.GitHubIssueTitle, fixed, now, now); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO jobs(id,prompt,repository,command,trigger_identity,trigger_config_signature,trigger_generation_id,occurrence_key,trigger_subject,github_issue_title,issue_key,fixed_trigger,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?)`, jobID, admission.Prompt, admission.Repository, admission.SelectionName, admission.Identity, admission.ConfigSignature, admission.ConfigGeneration, admission.OccurrenceKey, admission.Subject, admission.GitHubIssueTitle, admission.IssueKey, fixed, now, now); err != nil {
 		return "", false, fmt.Errorf("insert triggered job: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET title=? WHERE id=?`, admission.Title, jobID); err != nil {
@@ -1307,7 +1344,7 @@ func (s *Store) RunOutput(ctx context.Context, runID string) (RunOutput, error) 
 }
 
 func (s *Store) listJobs(ctx context.Context) ([]Job, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT j.id,j.title,j.prompt,j.repository,j.github_issue_title,j.command,j.trigger_identity,j.occurrence_key,j.trigger_subject,j.state,j.previous_job_id,j.attempt,COALESCE(j.superseded_by,''),j.created_at,j.updated_at,
+	rows, err := s.db.QueryContext(ctx, `SELECT j.id,j.title,j.prompt,j.repository,j.github_issue_title,j.command,j.trigger_identity,j.occurrence_key,j.trigger_subject,j.state,j.previous_job_id,j.attempt,COALESCE(j.superseded_by,''),j.issue_key,j.resolution_kind,j.resolution_detail,COALESCE(j.resolved_at,''),j.created_at,j.updated_at,
 COALESCE(r.id,''),COALESCE(r.command,''),COALESCE(r.executor,''),COALESCE(r.model,''),COALESCE(r.state,''),COALESCE(NULLIF(r.worker_name,''),w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,''),r.duration_millis,r.token_usage,a.step,COALESCE(a.outcome,''),COALESCE(NULLIF(a.summary,''),CASE WHEN json_valid(r.result) THEN json_extract(r.result,'$.final_message') END,'')
 FROM jobs j LEFT JOIN runs r ON r.job_id=j.id LEFT JOIN workers w ON w.instance_id=r.worker_instance LEFT JOIN workflow_attempts a ON a.run_id=r.id ORDER BY j.created_at DESC,j.id,r.rowid`)
 	if err != nil {
@@ -1319,9 +1356,17 @@ FROM jobs j LEFT JOIN runs r ON r.job_id=j.id LEFT JOIN workers w ON w.instance_
 		job := Job{Runs: []Run{}}
 		var run Run
 		var created, updated, started, completed string
-		if err := rows.Scan(&job.ID, &job.Title, &job.Prompt, &job.Repository, &job.GitHubIssueTitle, &job.Command, &job.TriggerID, &job.OccurrenceKey, &job.TriggerSubject, &job.State, &job.PreviousJobID, &job.Attempt, &job.SupersededBy, &created, &updated,
+		var resolutionKind, resolutionDetail, resolvedAt string
+		if err := rows.Scan(&job.ID, &job.Title, &job.Prompt, &job.Repository, &job.GitHubIssueTitle, &job.Command, &job.TriggerID, &job.OccurrenceKey, &job.TriggerSubject, &job.State, &job.PreviousJobID, &job.Attempt, &job.SupersededBy, &job.IssueKey, &resolutionKind, &resolutionDetail, &resolvedAt, &created, &updated,
 			&run.ID, &run.Command, &run.Executor, &run.Model, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &started, &completed, &run.DurationMillis, &run.TokenUsage, &run.Step, &run.Outcome, &run.Summary); err != nil {
 			return nil, err
+		}
+		job.ResolutionKind = resolutionKind
+		job.ResolutionDetail = resolutionDetail
+		if resolvedAt != "" {
+			if parsed, err := time.Parse(time.RFC3339Nano, resolvedAt); err == nil {
+				job.ResolvedAt = &parsed
+			}
 		}
 		job.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 		job.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
@@ -1520,7 +1565,50 @@ func terminalRunState(state string) bool {
 }
 
 func terminalJobState(state string) bool {
-	return state == "succeeded" || state == "failed" || state == "cancelled"
+	return state == "succeeded" || state == "failed" || state == "cancelled" || state == "timed_out" || state == "resolved"
+}
+
+// resolutionStates are the job states a resolution may be applied to. Queued
+// and running jobs wait until they finish; already resolved jobs are skipped.
+const resolutionStates = `('succeeded','failed','timed_out','cancelled')`
+
+// MarkJobResolved moves one terminal job into the resolved state and records
+// how it was resolved.
+func (s *Store) MarkJobResolved(ctx context.Context, jobID, kind, detail string, resolvedAt time.Time) error {
+	if kind != "pr" && kind != "plane" {
+		return fmt.Errorf("unknown resolution kind %q", kind)
+	}
+	if strings.TrimSpace(detail) == "" {
+		return errors.New("resolution detail is required")
+	}
+	now := s.now().UTC()
+	result, err := s.db.ExecContext(ctx, `UPDATE jobs SET state='resolved',resolution_kind=?,resolution_detail=?,resolved_at=?,updated_at=? WHERE id=? AND state IN `+resolutionStates, kind, detail, resolvedAt.UTC().Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), jobID)
+	if err != nil {
+		return fmt.Errorf("resolve job %s: %w", jobID, err)
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		return fmt.Errorf("job %s is not in a resolvable state", jobID)
+	}
+	return nil
+}
+
+// ResolveTicketsForIssue resolves every terminal job tied to an issue key,
+// matched against the stored key, the title or the trigger subject. It returns
+// the number of jobs resolved.
+func (s *Store) ResolveTicketsForIssue(ctx context.Context, key, kind, detail string, resolvedAt time.Time) (int64, error) {
+	if strings.TrimSpace(key) == "" {
+		return 0, errors.New("issue key is required")
+	}
+	if kind != "pr" && kind != "plane" {
+		return 0, fmt.Errorf("unknown resolution kind %q", kind)
+	}
+	now := s.now().UTC()
+	result, err := s.db.ExecContext(ctx, `UPDATE jobs SET state='resolved',resolution_kind=?,resolution_detail=?,resolved_at=?,updated_at=? WHERE state IN `+resolutionStates+` AND resolution_kind='' AND (issue_key=? OR title LIKE ? OR trigger_subject LIKE ?)`,
+		kind, detail, resolvedAt.UTC().Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), key, "%"+key+"%", "%"+key+"%")
+	if err != nil {
+		return 0, fmt.Errorf("resolve tickets for %s: %w", key, err)
+	}
+	return result.RowsAffected()
 }
 
 func validateOutcome(state string, exitCode int) error {

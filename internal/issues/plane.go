@@ -98,6 +98,12 @@ func (p *PlaneClient) PostComment(ctx context.Context, key, body string) error {
 	if err := requiresBody(body); err != nil {
 		return err
 	}
+	if ref, ok, err := p.resolveKey(ctx, key); ok {
+		if err != nil {
+			return err
+		}
+		return p.keyedComment(ctx, ref, body)
+	}
 	payload, _ := json.Marshal(map[string]any{"issue": key, "comment_html": body})
 	return p.request(ctx, http.MethodPost, p.endpoint("issues/", key, "/comments/"), payload, nil)
 }
@@ -109,11 +115,76 @@ func (p *PlaneClient) SetState(ctx context.Context, key, state string) error {
 	if err := requiresValue(state, "state"); err != nil {
 		return err
 	}
+	if ref, ok, err := p.resolveKey(ctx, key); ok {
+		if err != nil {
+			return err
+		}
+		return p.keyedSetState(ctx, ref, state)
+	}
 	payload, _ := json.Marshal(map[string]string{"state": state})
 	return p.request(ctx, http.MethodPatch, p.endpoint("issues/", key, "/"), payload, nil)
 }
 
 func (p *PlaneClient) IssueURL(key string) string { return p.endpoint("issues/", key, "/") }
+
+// PlaneIssueState is the state an issue currently sits in. Plane groups states
+// into triage, backlog, started, completed and cancelled.
+type PlaneIssueState struct {
+	Name  string
+	Group string
+}
+
+// IssueState fetches the current state of an issue by key.
+func (p *PlaneClient) IssueState(ctx context.Context, key string) (PlaneIssueState, error) {
+	if err := requiresValue(key, "issue key"); err != nil {
+		return PlaneIssueState{}, err
+	}
+	if ref, ok, err := p.resolveKey(ctx, key); ok {
+		if err != nil {
+			return PlaneIssueState{}, err
+		}
+		return p.keyedIssueState(ctx, ref)
+	}
+	var response struct {
+		State     json.RawMessage `json:"state"`
+		StateName string          `json:"state_name"`
+	}
+	if err := p.request(ctx, http.MethodGet, p.endpoint("issues/", key, "/"), nil, &response); err != nil {
+		return PlaneIssueState{}, err
+	}
+	state := PlaneIssueState{Name: response.StateName}
+	if len(response.State) > 0 {
+		var named struct {
+			Name  string `json:"name"`
+			Group string `json:"group"`
+		}
+		if err := json.Unmarshal(response.State, &named); err == nil {
+			state.Name = firstNonEmpty(named.Name, state.Name)
+			state.Group = named.Group
+		} else {
+			var name string
+			if err := json.Unmarshal(response.State, &name); err == nil {
+				state.Name = firstNonEmpty(name, state.Name)
+			}
+		}
+	}
+	if state.Name == "" && state.Group == "" {
+		return PlaneIssueState{}, fmt.Errorf("plane issue %s has no state", key)
+	}
+	return state, nil
+}
+
+// IsCompletedPlaneState reports whether an issue state sits in Plane's
+// completed group (Done) or is literally named Done.
+func IsCompletedPlaneState(state PlaneIssueState) bool {
+	if strings.EqualFold(state.Group, "completed") {
+		return true
+	}
+	return strings.EqualFold(state.Name, "done")
+}
+
+// CompletedPlaneState is the state name Machinist moves delivered tickets to.
+const CompletedPlaneState = "Done"
 
 func (p *PlaneClient) endpoint(parts ...string) string {
 	base := strings.TrimRight(p.config.URL, "/")

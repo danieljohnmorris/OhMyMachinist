@@ -28,13 +28,15 @@ func VerifyHMAC(secret string, body []byte, signature string) bool {
 }
 
 type webhookIssue struct {
-	ID          string `json:"id"`
-	Identifier  string `json:"identifier"`
-	Key         string `json:"key"`
-	Name        string `json:"name"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	URL         string `json:"url"`
+	ID          string          `json:"id"`
+	Identifier  string          `json:"identifier"`
+	Key         string          `json:"key"`
+	Name        string          `json:"name"`
+	Title       string          `json:"title"`
+	Description string          `json:"description"`
+	URL         string          `json:"url"`
+	State       json.RawMessage `json:"state"`
+	StateName   string          `json:"state_name"`
 }
 
 type webhookEnvelope struct {
@@ -48,9 +50,16 @@ type webhookEnvelope struct {
 // issue payload or Linear's nested data payload. Callers must verify the
 // signature before invoking it.
 func ParseIssueWebhook(body []byte) (Issue, error) {
+	issue, _, err := ParseIssueWebhookState(body)
+	return issue, err
+}
+
+// ParseIssueWebhookState behaves like ParseIssueWebhook and additionally
+// returns the issue state carried by the payload, when present.
+func ParseIssueWebhookState(body []byte) (Issue, PlaneIssueState, error) {
 	var envelope webhookEnvelope
 	if err := json.Unmarshal(body, &envelope); err != nil {
-		return Issue{}, fmt.Errorf("parse issue webhook: %w", err)
+		return Issue{}, PlaneIssueState{}, fmt.Errorf("parse issue webhook: %w", err)
 	}
 	payload := envelope.Issue
 	if payload.ID == "" && payload.Identifier == "" && payload.Key == "" {
@@ -59,9 +68,25 @@ func ParseIssueWebhook(body []byte) (Issue, error) {
 	key := firstNonEmpty(payload.Identifier, payload.ID, payload.Key)
 	title := firstNonEmpty(payload.Title, payload.Name)
 	if key == "" || title == "" {
-		return Issue{}, fmt.Errorf("issue webhook is missing key or title")
+		return Issue{}, PlaneIssueState{}, fmt.Errorf("issue webhook is missing key or title")
 	}
-	return Issue{Key: key, Title: title, Description: payload.Description, URL: payload.URL}, nil
+	state := PlaneIssueState{Name: payload.StateName}
+	if len(payload.State) > 0 {
+		var named struct {
+			Name  string `json:"name"`
+			Group string `json:"group"`
+		}
+		if err := json.Unmarshal(payload.State, &named); err == nil {
+			state.Name = firstNonEmpty(named.Name, state.Name)
+			state.Group = named.Group
+		} else {
+			var name string
+			if err := json.Unmarshal(payload.State, &name); err == nil {
+				state.Name = firstNonEmpty(name, state.Name)
+			}
+		}
+	}
+	return Issue{Key: key, Title: title, Description: payload.Description, URL: payload.URL}, state, nil
 }
 
 // WebhookHandler verifies a request before passing the issue to the submitter.

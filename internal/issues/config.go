@@ -2,12 +2,14 @@ package issues
 
 import (
 	"os"
+	"strings"
 )
 
 type Config struct {
-	Label string `toml:"label"`
-	Plane map[string]PlaneProject `toml:"plane"`
-	Linear map[string]LinearProject `toml:"linear"`
+	Label         string                   `toml:"label"`
+	WebhookSecret string                   `toml:"webhook_secret"`
+	Plane         map[string]PlaneProject  `toml:"plane"`
+	Linear        map[string]LinearProject `toml:"linear"`
 }
 
 type PlaneProject struct {
@@ -23,6 +25,15 @@ func DefaultLabel() string {
 		return label
 	}
 	return "factory"
+}
+
+// WebhookSecretValue returns the configured webhook secret, falling back to
+// MACHINIST_ISSUE_WEBHOOK_SECRET for machine-local secrets kept out of TOML.
+func (c Config) WebhookSecretValue() string {
+	if secret := strings.TrimSpace(c.WebhookSecret); secret != "" {
+		return secret
+	}
+	return os.Getenv("MACHINIST_ISSUE_WEBHOOK_SECRET")
 }
 
 // PlaneProjects maps configured project IDs to repositories and loads shared

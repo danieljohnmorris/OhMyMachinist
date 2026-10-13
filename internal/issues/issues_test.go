@@ -73,6 +73,56 @@ func TestPlaneClientFetchesPostsAndPolls(t *testing.T) {
 	}
 }
 
+func TestPlaneClientIssueState(t *testing.T) {
+	handler := func(request *http.Request) *http.Response {
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/issues/issue-1/"):
+			return fixtureResponse(`{"id":"issue-1","name":"Add archive page","state":{"name":"Done","group":"completed"}}`)
+		case strings.HasSuffix(request.URL.Path, "/issues/issue-2/"):
+			return fixtureResponse(`{"id":"issue-2","name":"Wip","state":"In Progress"}`)
+		default:
+			return nil
+		}
+	}
+	client := &PlaneClient{config: PlaneConfig{URL: "plane://fixture", Workspace: "platform", ProjectID: "platform-project", APIKey: "key"}, client: &http.Client{Transport: fixtureTransport{handler: handler}}}
+
+	state, err := client.IssueState(t.Context(), "issue-1")
+	if err != nil || state.Name != "Done" || state.Group != "completed" {
+		t.Fatalf("state = %#v, err = %v", state, err)
+	}
+	if !IsCompletedPlaneState(state) {
+		t.Fatal("completed group state not recognized")
+	}
+	state, err = client.IssueState(t.Context(), "issue-2")
+	if err != nil || state.Name != "In Progress" {
+		t.Fatalf("state = %#v, err = %v", state, err)
+	}
+	if IsCompletedPlaneState(state) {
+		t.Fatal("started state recognized as completed")
+	}
+	if !IsCompletedPlaneState(PlaneIssueState{Name: "done"}) {
+		t.Fatal("literal Done state not recognized")
+	}
+}
+
+func TestParseIssueWebhookState(t *testing.T) {
+	issue, state, err := ParseIssueWebhookState([]byte(`{"issue":{"identifier":"MACH-5","name":"Fix sidebar","state":{"name":"Done","group":"completed"}}}`))
+	if err != nil || issue.Key != "MACH-5" || state.Name != "Done" || state.Group != "completed" {
+		t.Fatalf("issue = %#v, state = %#v, err = %v", issue, state, err)
+	}
+	if !IsCompletedPlaneState(state) {
+		t.Fatal("completed webhook state not recognized")
+	}
+	issue, state, err = ParseIssueWebhookState([]byte(`{"issue":{"identifier":"MACH-5","name":"Fix sidebar","state_name":"In Progress"}}`))
+	if err != nil || state.Name != "In Progress" || IsCompletedPlaneState(state) {
+		t.Fatalf("issue = %#v, state = %#v, err = %v", issue, state, err)
+	}
+	issue, state, err = ParseIssueWebhookState([]byte(`{"data":{"issue":{"identifier":"ABC-12","title":"Add archive page"}}}`))
+	if err != nil || issue.Key != "ABC-12" || (state.Name != "" && IsCompletedPlaneState(state)) {
+		t.Fatalf("issue = %#v, state = %#v, err = %v", issue, state, err)
+	}
+}
+
 func TestLinearClientFetchesPostsAndPolls(t *testing.T) {
 	var sawAuth bool
 	handler := func(request *http.Request) *http.Response {
