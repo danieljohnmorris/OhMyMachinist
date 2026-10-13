@@ -166,6 +166,45 @@ export function filterJobs(jobs, filter) {
   });
 }
 
+// Board membership: active and failed jobs by default. The "Show succeeded"
+// tickbox additionally includes succeeded and resolved tickets.
+export function filterBoardJobs(jobs, showSucceeded) {
+  if (showSucceeded) return jobs;
+  return jobs.filter((job) => activeStates.has(job.state) || failedStates.has(job.state));
+}
+
+// Board filters round-trip through the URL hash query (e.g. #/runs?succeeded=1&range=last7)
+// so refresh and browser back/forward restore them. Defaults are omitted.
+export function boardFiltersFromParams(params) {
+  return {
+    showSucceeded: params.get("succeeded") === "1",
+    runsView: params.get("view") === "list" ? "table" : "board",
+    dateFilter: boardDateFilters.some(({ id }) => id === params.get("range")) ? params.get("range") : "all",
+    boardLayout: params.get("group") === "projects" ? "projects" : "all",
+  };
+}
+
+export function boardFiltersFromHash(hash) {
+  const value = hash.replace(/^#\/runs\b/, "");
+  const queryStart = value.indexOf("?");
+  const query = queryStart === -1 ? "" : value.slice(queryStart + 1);
+  return boardFiltersFromParams(new URLSearchParams(query));
+}
+
+export function boardParamsFromFilters(filters) {
+  const params = new URLSearchParams();
+  if (filters.showSucceeded) params.set("succeeded", "1");
+  if (filters.runsView === "table") params.set("view", "list");
+  if (filters.dateFilter && filters.dateFilter !== "all") params.set("range", filters.dateFilter);
+  if (filters.boardLayout && filters.boardLayout !== "all") params.set("group", filters.boardLayout);
+  return params;
+}
+
+export function boardHash(filters) {
+  const params = boardParamsFromFilters(filters).toString();
+  return `#/runs${params ? `?${params}` : ""}`;
+}
+
 export const boardDateFilters = [
   { id: "today", label: "Today" },
   { id: "yesterday", label: "Yesterday" },
