@@ -355,7 +355,7 @@ func (s *Store) addJobAttemptColumns(ctx context.Context) error {
 		if present > 0 {
 			continue
 		}
-		if _, err := s.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN ` + column.name + ` ` + column.definition); err != nil {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN `+column.name+` `+column.definition); err != nil {
 			return err
 		}
 	}

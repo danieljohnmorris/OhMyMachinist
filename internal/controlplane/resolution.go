@@ -112,7 +112,7 @@ func (s *Server) mergedTicketPullRequest(ctx context.Context, job Job, key strin
 	}
 	planeIssueURL := ""
 	if client != nil {
-		planeIssueURL = client.IssueURL(key)
+		planeIssueURL = client.BrowseURL(key)
 	}
 	for _, pullRequest := range pullRequests {
 		if pullRequestMatchesTicket(pullRequest, key, planeIssueURL) {

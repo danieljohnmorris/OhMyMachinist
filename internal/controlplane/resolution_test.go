@@ -36,19 +36,37 @@ func newPlaneFixture(t *testing.T) (*issues.PlaneClient, *[]planeRequest) {
 		mu.Lock()
 		requests = append(requests, planeRequest{Method: request.Method, Path: request.URL.Path, Body: string(body)})
 		mu.Unlock()
-		if request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/issues/SPARK-10/") {
+		// Emulates real Plane: keys resolve only through the workspace-level
+		// endpoint, issues carry a state UUID, and states live per project.
+		const doneID, startedID = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
+		path := request.URL.Path
+		write := func(body string) {
 			response.Header().Set("Content-Type", "application/json")
-			_, _ = response.Write([]byte(`{"id":"SPARK-10","name":"Hand finished","state":{"name":"Done","group":"completed"}}`))
+			_, _ = response.Write([]byte(body))
+		}
+		if request.Method == http.MethodGet && strings.HasPrefix(path, "/api/v1/workspaces/platform/issues/") {
+			key := strings.TrimSuffix(strings.TrimPrefix(path, "/api/v1/workspaces/platform/issues/"), "/")
+			state := doneID
+			if key == "MACH-6" {
+				state = startedID
+			}
+			write(`{"id":"uuid-` + key + `","project":"proj","state":"` + state + `"}`)
 			return
 		}
-		if request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/issues/MACH-6/") {
-			response.Header().Set("Content-Type", "application/json")
-			_, _ = response.Write([]byte(`{"id":"MACH-6","name":"Still open","state":{"name":"In Progress","group":"started"}}`))
+		if request.Method == http.MethodGet && path == "/api/v1/workspaces/platform/projects/proj/states/" {
+			write(`{"results":[{"id":"` + startedID + `","name":"In Progress","group":"started"},{"id":"` + doneID + `","name":"Done","group":"completed"}]}`)
 			return
 		}
-		if request.Method == http.MethodGet && strings.Contains(request.URL.Path, "/issues/") {
-			response.Header().Set("Content-Type", "application/json")
-			_, _ = response.Write([]byte(`{"id":"any","name":"Done elsewhere","state":{"name":"Done","group":"completed"}}`))
+		if request.Method == http.MethodGet && strings.HasSuffix(path, "/states/"+doneID+"/") {
+			write(`{"id":"` + doneID + `","name":"Done","group":"completed"}`)
+			return
+		}
+		if request.Method == http.MethodGet && strings.HasSuffix(path, "/states/"+startedID+"/") {
+			write(`{"id":"` + startedID + `","name":"In Progress","group":"started"}`)
+			return
+		}
+		if request.Method == http.MethodGet && strings.Contains(path, "/projects/proj/issues/") {
+			response.WriteHeader(http.StatusNotFound)
 			return
 		}
 		response.WriteHeader(http.StatusOK)
@@ -214,13 +232,13 @@ func TestReconcileResolvesMergedPullRequestAndMovesPlaneTicket(t *testing.T) {
 	var patch, comment *planeRequest
 	for _, request := range *requests {
 		switch {
-		case request.Method == http.MethodPatch && strings.HasSuffix(request.Path, "/issues/MACH-5/"):
+		case request.Method == http.MethodPatch && strings.HasSuffix(request.Path, "/projects/proj/issues/uuid-MACH-5/"):
 			patch = &request
-		case request.Method == http.MethodPost && strings.HasSuffix(request.Path, "/issues/MACH-5/comments/"):
+		case request.Method == http.MethodPost && strings.HasSuffix(request.Path, "/projects/proj/issues/uuid-MACH-5/comments/"):
 			comment = &request
 		}
 	}
-	if patch == nil || !strings.Contains(patch.Body, `"state":"Done"`) {
+	if patch == nil || !strings.Contains(patch.Body, `"state":"11111111-1111-1111-1111-111111111111"`) {
 		t.Fatalf("plane state patch missing: %+v", patch)
 	}
 	if comment == nil || !strings.Contains(comment.Body, "PR #12") || !strings.Contains(comment.Body, "@kim") {

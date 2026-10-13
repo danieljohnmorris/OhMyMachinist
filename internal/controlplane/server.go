@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -147,6 +148,16 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 	issueSources, planeClients, e := loadIssueSources(definitionPath)
 	if e != nil {
 		return nil, e
+	}
+	if len(planeClients) == 0 {
+		// Jobs submitted by an external Plane intake have no issue trigger.
+		// A workspace client from PLANE_URL/PLANE_WORKSPACE/PLANE_API_KEY
+		// still lets the reconciler resolve their tickets by key.
+		if client, err := issues.NewPlaneWorkspaceClient(issues.PlaneConfig{
+			URL: os.Getenv("PLANE_URL"), Workspace: os.Getenv("PLANE_WORKSPACE"), APIKey: os.Getenv("PLANE_API_KEY"),
+		}); err == nil {
+			planeClients = map[string]*issues.PlaneClient{"": client}
+		}
 	}
 	server := &Server{
 		store: store, definitionPath: definitionPath, triggers: managedTriggers,
