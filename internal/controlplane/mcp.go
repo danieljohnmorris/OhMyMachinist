@@ -305,16 +305,21 @@ func (s *Server) invokeMCPTool(ctx context.Context, identity TokenIdentity, name
 		if err := args(&input); err != nil {
 			return nil, err
 		}
-		runID, err := s.store.LatestRunID(ctx, input.JobID)
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, errors.New("job not found")
-		}
-		if err != nil {
-			return nil, err
-		}
 		action := "cancel"
 		if name == "requeue_job" {
 			action = "retry"
+		}
+		runID, err := s.store.LatestRunID(ctx, input.JobID)
+		switch {
+		case errors.Is(err, sql.ErrNoRows) && action == "cancel":
+			// Plain jobs can sit queued without ever having run. Like the
+			// HTTP path, pass the empty run token so WorkflowAction routes
+			// to cancelPlainJob.
+			runID = ""
+		case errors.Is(err, sql.ErrNoRows):
+			return nil, errors.New("job not found")
+		case err != nil:
+			return nil, err
 		}
 		if err := s.store.WorkflowAction(ctx, input.JobID, runID, action, input.PreviousProcessStopped); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {

@@ -43,7 +43,7 @@ scope.
 | `get_settings` | read | — | All settings key/value pairs. |
 | `get_setting` | read | `key` | One setting; errors if missing. |
 | `queue_job` | write | `repository` (required), `command?`, `workflow?`, `title?`, `spec?`, `source_url?`, `prompt?`, `model?`, `project?` | Queue a job; returns the job id. |
-| `cancel_job` | write | `job_id` | Cancel the job and its latest run. |
+| `cancel_job` | write | `job_id` | Cancel the job and its latest run, or a queued job that has no runs yet. |
 | `requeue_job` | write | `job_id`, `previous_process_stopped?` | Retry a failed/blocked/interrupted/cancelled job. |
 | `set_setting` | write | `key`, `value` | Write one settings key/value pair. |
 
