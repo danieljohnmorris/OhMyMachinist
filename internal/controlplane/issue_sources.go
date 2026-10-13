@@ -12,6 +12,12 @@ type issuePoller interface {
 	Poll(ctx context.Context, label string) ([]issues.Issue, error)
 }
 
+// issueCommenter is implemented by issue sources that can post comments back to
+// the ticket (both Plane and Linear clients do).
+type issueCommenter interface {
+	PostComment(ctx context.Context, key, body string) error
+}
+
 type planePoller struct {
 	client *issues.PlaneClient
 }
@@ -20,12 +26,20 @@ func (p planePoller) Poll(ctx context.Context, label string) ([]issues.Issue, er
 	return p.client.IssuesWithLabel(ctx, label)
 }
 
+func (p planePoller) PostComment(ctx context.Context, key, body string) error {
+	return p.client.PostComment(ctx, key, body)
+}
+
 type linearPoller struct {
 	client *issues.LinearClient
 }
 
 func (l linearPoller) Poll(ctx context.Context, label string) ([]issues.Issue, error) {
 	return l.client.IssuesWithLabel(ctx, label, l.client.Project())
+}
+
+func (l linearPoller) PostComment(ctx context.Context, key, body string) error {
+	return l.client.PostComment(ctx, key, body)
 }
 
 func loadIssueSources(path string) (map[string]issuePoller, map[string]*issues.PlaneClient, error) {

@@ -148,6 +148,9 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	if err := log.append("run.started", "", fmt.Sprintf("command=%s repository=%s", options.Command.Name, repository)); err != nil {
 		return result, &RuntimeError{Cause: err}
 	}
+	if err := prepareLaneCheckout(log, repository); err != nil {
+		return completeFailure(&result, log, runDirectory, err)
+	}
 	executorCommand := structuredCommand(options.Command.Executor, options.Command.Command)
 	_, claudeAgent := claudeCommandInfo(options.Command.Executor, executorCommand)
 	agentExecutor := codexExecIndex(options.Command.Executor, executorCommand) >= 1 || claudeAgent
@@ -482,6 +485,80 @@ func ResolveRepository(value string) (string, error) {
 		return "", fmt.Errorf("Git returned an empty repository root for %q", absPath)
 	}
 	return filepath.Clean(root), nil
+}
+
+// prepareLaneCheckout refreshes a worker lane checkout so runs build on the
+// latest base branch instead of a stale local state. Git failures are recorded
+// as events and tolerated, except a dirty checkout, which returns an error so
+// the run is refused before any work happens.
+func prepareLaneCheckout(log *eventLog, repository string) error {
+	// Untracked leftovers are normal after agent runs; only modifications to
+	// tracked files make the checkout dirty.
+	status := exec.Command("git", "-C", repository, "status", "--porcelain", "-uno")
+	status.Env = sanitizedEnvironment(os.Environ())
+	if output, err := status.Output(); err == nil && len(strings.TrimSpace(string(output))) > 0 {
+		return fmt.Errorf("lane checkout is dirty; refusing to fetch: %s", strings.TrimSpace(string(output)))
+	}
+	fetch := exec.Command("git", "-C", repository, "fetch", "origin")
+	fetch.Env = sanitizedEnvironment(os.Environ())
+	if output, err := fetch.CombinedOutput(); err != nil {
+		return log.append("lane.fetch.skipped", "", laneGitFailure("git fetch origin", output, err))
+	}
+	base, ok := laneBaseBranch(repository)
+	if !ok {
+		return log.append("lane.fetch.skipped", "", "unable to determine base branch")
+	}
+	current := exec.Command("git", "-C", repository, "rev-parse", "--abbrev-ref", "HEAD")
+	current.Env = sanitizedEnvironment(os.Environ())
+	output, err := current.Output()
+	if err != nil {
+		return log.append("lane.fetch.skipped", "", laneGitFailure("git rev-parse --abbrev-ref HEAD", output, err))
+	}
+	if branch := strings.TrimSpace(string(output)); branch != base {
+		checkout := exec.Command("git", "-C", repository, "checkout", base)
+		checkout.Env = sanitizedEnvironment(os.Environ())
+		if output, err := checkout.CombinedOutput(); err != nil {
+			return log.append("lane.fetch.skipped", "", laneGitFailure(fmt.Sprintf("git checkout %s", base), output, err))
+		}
+	}
+	merge := exec.Command("git", "-C", repository, "merge", "--ff-only", "origin/"+base)
+	merge.Env = sanitizedEnvironment(os.Environ())
+	if output, err := merge.CombinedOutput(); err != nil {
+		return log.append("lane.fetch.skipped", "", laneGitFailure(fmt.Sprintf("git merge --ff-only origin/%s", base), output, err))
+	}
+	return log.append("lane.fetch", "", fmt.Sprintf("fast-forwarded %s to origin/%s", base, base))
+}
+
+// laneBaseBranch returns the branch origin advertises as its default, first
+// via the remote HEAD symbolic ref and then the checked-out branch name.
+func laneBaseBranch(repository string) (string, bool) {
+	command := exec.Command("git", "-C", repository, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+	command.Env = sanitizedEnvironment(os.Environ())
+	if output, err := command.Output(); err == nil {
+		if branch := strings.TrimSpace(string(output)); branch != "" {
+			return strings.TrimPrefix(branch, "origin/"), true
+		}
+	}
+	fallback := exec.Command("git", "-C", repository, "rev-parse", "--abbrev-ref", "HEAD")
+	fallback.Env = sanitizedEnvironment(os.Environ())
+	if output, err := fallback.Output(); err == nil {
+		if branch := strings.TrimSpace(string(output)); branch != "" && branch != "HEAD" {
+			return branch, true
+		}
+	}
+	return "", false
+}
+
+// laneGitFailure summarizes a failed git command for event logging.
+func laneGitFailure(command string, output []byte, err error) string {
+	message := strings.TrimSpace(string(output))
+	if message == "" {
+		if err == nil {
+			return command
+		}
+		return fmt.Sprintf("%s: %v", command, err)
+	}
+	return fmt.Sprintf("%s: %s", command, message)
 }
 
 func pumpStream(group *sync.WaitGroup, source *os.File, destination io.Writer, stream string, log *eventLog, errorsChannel chan<- error) {
