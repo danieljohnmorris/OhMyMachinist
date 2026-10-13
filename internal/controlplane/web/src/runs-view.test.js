@@ -6,6 +6,8 @@ import { createServer } from "vite";
 
 const jobs = [
   { id: "job_failed", state: "failed", prompt: "Failed fixture", repository: "example/repo", command: "codex", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-05T00:00:00Z", runs: [{ id: "run_failed", state: "failed", command: "codex", completed_at: "2026-01-01T06:00:00Z" }] },
+  { id: "job_retried", state: "running", prompt: "MACH-99 Retried fixture", repository: "example/repo", command: "codex", created_at: "2026-01-04T10:00:00Z", updated_at: "2026-01-05T00:00:00Z", runs: [{ id: "run_second", state: "running", command: "codex" }] },
+  { id: "job_retried_old", state: "failed", prompt: "MACH-99 Retried fixture", repository: "example/repo", command: "codex", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-04T09:00:00Z", runs: [{ id: "run_first", state: "failed", command: "codex", completed_at: "2026-01-04T09:00:00Z" }] },
   { id: "job_succeeded", state: "succeeded", prompt: "Succeeded fixture", repository: "example/repo", command: "codex", created_at: "2026-01-01T00:00:00Z", runs: [{ id: "run_succeeded", state: "succeeded", command: "codex" }] },
 ];
 
@@ -72,6 +74,16 @@ test("runs default to board view and share filters when switching views", async 
   const failedCardTime = document.querySelector('a[href="#/runs/job_failed"] time');
   assert.equal(failedCardTime?.getAttribute("datetime"), "2026-01-01T06:00:00Z", "board card prefers finish time over last update");
   assert.match(failedCardTime?.textContent ?? "", /ago|just now/);
+
+  const retriedCard = [...document.querySelectorAll(".crafted-card")].find((card) => card.textContent.includes("Retried fixture"));
+  assert.ok(retriedCard, "retried job renders a board card");
+  const attemptsRow = retriedCard.querySelector('a[href="#/runs/job_retried_old"]');
+  assert.ok(attemptsRow, "prior attempt link renders");
+  assert.ok(retriedCard.contains(attemptsRow), "attempts row is a descendant of the card element");
+  assert.ok(retriedCard.querySelector('[aria-label="2 attempts"]'), "attempts pill renders in the card");
+  const singleCard = [...document.querySelectorAll(".crafted-card")].find((card) => card.textContent.includes("Failed fixture"));
+  assert.ok(singleCard && !singleCard.querySelector('[aria-label$=" attempts"]'), "single-attempt cards show no attempts row");
+
   assert.equal(button("List").getAttribute("aria-pressed"), "false");
 
   button("Board").click();

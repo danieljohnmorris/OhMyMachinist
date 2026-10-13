@@ -345,8 +345,7 @@ function RunCard({ job, priors = [] }) {
   const run = currentRun(job);
   const timestamp = boardCardTimestamp(job);
   const attemptCount = priors.length > 0 ? priors.length + 1 : (job.attempt_count || 0);
-  return <div className="min-w-0 space-y-1">
-    <Card className="overflow-hidden"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="block min-w-0 space-y-3 p-4 transition hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50" aria-label={`Open task ${title}`}>
+  return <Card className="overflow-hidden"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="block min-w-0 space-y-3 p-4 transition hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50" aria-label={`Open task ${title}`}>
       <p className="break-words text-sm font-medium leading-5" title={title}>{title}</p>
       <p className="text-xs text-muted-foreground">{job.repository} · {friendlyName(run?.command || job.command)}</p>
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -354,12 +353,10 @@ function RunCard({ job, priors = [] }) {
         <time className="text-xs text-muted-foreground" dateTime={timestamp} title={timestamp ? new Date(timestamp).toLocaleString() : undefined}>{relativeTime(timestamp)}</time>
       </div>
       {priors.length === 0 && attemptBadges(job)}
-    </a></Card>
-    {priors.length > 0 && <div className="flex flex-wrap items-center gap-1.5 px-1">
+    </a>{priors.length > 0 && <div className="flex flex-wrap items-center gap-1.5 border-t border-border px-4 py-2.5">
       <Badge className="border-border bg-surface text-muted-foreground" aria-label={`${attemptCount} attempts`}>{attemptCount} attempts</Badge>
       {priors.map((prior) => <a key={prior.id} href={`#/runs/${encodeURIComponent(prior.id)}`} className="text-xs text-muted-foreground underline hover:text-foreground" aria-label={`Open prior attempt ${stateLabel(prior.state)} ${relativeTime(attemptTime(prior))}`}>{stateLabel(prior.state)} · {relativeTime(attemptTime(prior))}</a>)}
-    </div>}
-  </div>;
+    </div>}</Card>;
 }
 
 function RunRow({ job }) {
