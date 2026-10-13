@@ -86,8 +86,13 @@ func resolutionDetail(pullRequest GitHubPullRequest) string {
 
 // planeClientFor returns the Plane client for a job's issue trigger, falling
 // back to the only configured client so single-project factories reconcile
-// jobs submitted without a trigger.
+// jobs submitted without a trigger. Jobs belonging to other providers
+// (linear, backlog) never get a Plane client, even when their human key
+// looks like a Plane key.
 func (s *Server) planeClientFor(job Job) *issues.PlaneClient {
+	if job.SourceKind != "" && job.SourceKind != "plane" {
+		return nil
+	}
 	if client, ok := s.planeClients[job.TriggerID]; ok {
 		return client
 	}
@@ -103,7 +108,7 @@ func (s *Server) planeClientFor(job Job) *issues.PlaneClient {
 // to the ticket, searching the job's GitHub repository. Repositories without
 // a configured GitHub slug have no searchable PRs. Listings are cached per
 // repository for one reconcile pass.
-func (s *Server) mergedTicketPullRequest(ctx context.Context, job Job, key string, client *issues.PlaneClient, cache map[string][]GitHubPullRequest) (GitHubPullRequest, bool, error) {
+func (s *Server) mergedTicketPullRequest(ctx context.Context, job Job, key, issueURL string, cache map[string][]GitHubPullRequest) (GitHubPullRequest, bool, error) {
 	slug := s.githubRepositories[job.Repository]
 	if slug == "" {
 		return GitHubPullRequest{}, false, nil
@@ -117,12 +122,8 @@ func (s *Server) mergedTicketPullRequest(ctx context.Context, job Job, key strin
 		}
 		cache[slug] = pullRequests
 	}
-	planeIssueURL := ""
-	if client != nil {
-		planeIssueURL = client.BrowseURL(key)
-	}
 	for _, pullRequest := range pullRequests {
-		if pullRequestMatchesTicket(pullRequest, key, planeIssueURL) {
+		if pullRequestMatchesTicket(pullRequest, key, issueURL) {
 			return pullRequest, true, nil
 		}
 	}
@@ -130,16 +131,45 @@ func (s *Server) mergedTicketPullRequest(ctx context.Context, job Job, key strin
 }
 
 // resolveTicket moves every finished job of one ticket to resolved when the
-// ticket is done. A merged pull request also moves the Plane ticket to Done
-// and posts one comment, but only when the ticket is not already completed,
-// so backfills and repeat passes do not spam the ticket. Plane is touched
-// before jobs are marked, so a failed attempt retries on the next pass.
+// ticket is done. The provider is taken from the first job's source kind
+// (jobs in a group share a ticket key, so they nearly always share a
+// provider). A merged pull request also moves the external ticket to its
+// resolved state and posts one comment, but only when the ticket is not
+// already resolved, so backfills and repeat passes do not spam the ticket.
+// The provider is touched before jobs are marked, so a failed attempt
+// retries on the next pass. Native backlog issues are never auto-state-
+// changed: the resolution is recorded on the job only.
 func (s *Server) resolveTicket(ctx context.Context, jobs []Job, key string, cache map[string][]GitHubPullRequest) error {
+	switch jobs[0].SourceKind {
+	case "linear":
+		return s.resolveLinearTicket(ctx, jobs, key, cache)
+	case "backlog":
+		return s.resolveBacklogTicket(ctx, jobs, key, cache)
+	default: // "plane" and legacy jobs without a recorded source kind
+		return s.resolvePlaneTicket(ctx, jobs, key, cache)
+	}
+}
+
+// markResolved records one resolution kind and detail on every job.
+func (s *Server) markResolved(ctx context.Context, jobs []Job, kind, detail string) error {
+	var failures []error
+	for _, job := range jobs {
+		failures = append(failures, s.store.MarkJobResolved(ctx, job.ID, kind, detail, s.now().UTC()))
+	}
+	return errors.Join(failures...)
+}
+
+// resolvePlaneTicket resolves a ticket tracked in Plane.
+func (s *Server) resolvePlaneTicket(ctx context.Context, jobs []Job, key string, cache map[string][]GitHubPullRequest) error {
 	client := s.planeClientFor(jobs[0])
 	var merged GitHubPullRequest
 	found := false
 	for _, job := range jobs {
-		pullRequest, ok, err := s.mergedTicketPullRequest(ctx, job, key, client, cache)
+		issueURL := ""
+		if client != nil {
+			issueURL = client.BrowseURL(key)
+		}
+		pullRequest, ok, err := s.mergedTicketPullRequest(ctx, job, key, issueURL, cache)
 		if err != nil {
 			return fmt.Errorf("search merged pull requests for %s: %w", key, err)
 		}
@@ -155,7 +185,6 @@ func (s *Server) resolveTicket(ctx context.Context, jobs []Job, key string, cach
 			return fmt.Errorf("read ticket %s state: %w", key, err)
 		}
 	}
-	kind, detail := "", ""
 	switch {
 	case found:
 		if client != nil && !issues.IsCompletedPlaneState(state) {
@@ -166,17 +195,82 @@ func (s *Server) resolveTicket(ctx context.Context, jobs []Job, key string, cach
 				return fmt.Errorf("comment on ticket %s: %w", key, err)
 			}
 		}
-		kind, detail = "pr", resolutionDetail(merged)
+		return s.markResolved(ctx, jobs, "pr", resolutionDetail(merged))
 	case client != nil && issues.IsCompletedPlaneState(state):
-		kind, detail = "plane", "Plane "+firstNonEmptyString(state.Name, issues.CompletedPlaneState)
+		return s.markResolved(ctx, jobs, "plane", "Plane "+firstNonEmptyString(state.Name, issues.CompletedPlaneState))
 	default:
 		return nil
 	}
-	var failures []error
-	for _, job := range jobs {
-		failures = append(failures, s.store.MarkJobResolved(ctx, job.ID, kind, detail, s.now().UTC()))
+}
+
+// resolveLinearTicket resolves a ticket tracked in Linear. Linear state
+// names have no semantic groups in the API, so completion is the configured
+// resolved state name compared case-insensitively.
+func (s *Server) resolveLinearTicket(ctx context.Context, jobs []Job, key string, cache map[string][]GitHubPullRequest) error {
+	client := s.linearClientFor(jobs[0])
+	if client == nil {
+		return nil
 	}
-	return errors.Join(failures...)
+	resolvedState := client.ResolvedState()
+	var merged GitHubPullRequest
+	found := false
+	for _, job := range jobs {
+		pullRequest, ok, err := s.mergedTicketPullRequest(ctx, job, key, "", cache)
+		if err != nil {
+			return fmt.Errorf("search merged pull requests for %s: %w", key, err)
+		}
+		if ok {
+			merged, found = pullRequest, true
+			break
+		}
+	}
+	state, err := client.IssueState(ctx, key)
+	if err != nil {
+		return fmt.Errorf("read ticket %s state: %w", key, err)
+	}
+	switch {
+	case found:
+		if !strings.EqualFold(state, resolvedState) {
+			if err := client.SetState(ctx, key, resolvedState); err != nil {
+				return fmt.Errorf("move ticket %s to %s: %w", key, resolvedState, err)
+			}
+			if err := client.PostComment(ctx, key, resolutionComment(merged)); err != nil {
+				return fmt.Errorf("comment on ticket %s: %w", key, err)
+			}
+		}
+		return s.markResolved(ctx, jobs, "pr", resolutionDetail(merged))
+	case strings.EqualFold(state, resolvedState):
+		return s.markResolved(ctx, jobs, "linear", "Linear "+state)
+	default:
+		return nil
+	}
+}
+
+// resolveBacklogTicket records the resolution on jobs whose work item is
+// native. It never changes the backlog issue's state: completion there is a
+// human decision. Merged pull requests are still a resolution signal for
+// the job itself.
+func (s *Server) resolveBacklogTicket(ctx context.Context, jobs []Job, key string, cache map[string][]GitHubPullRequest) error {
+	for _, job := range jobs {
+		pullRequest, ok, err := s.mergedTicketPullRequest(ctx, job, key, "", cache)
+		if err != nil {
+			return fmt.Errorf("search merged pull requests for %s: %w", key, err)
+		}
+		if ok {
+			return s.markResolved(ctx, jobs, "pr", resolutionDetail(pullRequest))
+		}
+	}
+	return nil
+}
+
+// linearClientFor returns the Linear client for a job's issue trigger.
+// Legacy jobs without a source kind have no Linear client, matching the
+// Plane fallback rule introduced with source kinds.
+func (s *Server) linearClientFor(job Job) *issues.LinearClient {
+	if job.SourceKind != "linear" {
+		return nil
+	}
+	return s.linearClients[job.TriggerID]
 }
 
 // reconcileTicketOutcomes resolves finished jobs whose tickets completed

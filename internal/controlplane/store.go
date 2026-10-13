@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/owainlewis/machinist/internal/artifacts"
+	"github.com/owainlewis/machinist/internal/backlog"
 	"github.com/owainlewis/machinist/internal/config"
 	"github.com/owainlewis/machinist/internal/protocol"
 	_ "modernc.org/sqlite"
@@ -61,6 +62,9 @@ type Job struct {
 	PreviousJobID    string            `json:"previous_job_id,omitempty"`
 	SupersededBy     string            `json:"superseded_by,omitempty"`
 	IssueKey         string            `json:"issue_key,omitempty"`
+	SourceKind       string            `json:"source_kind,omitempty"`
+	BacklogIssueID   string            `json:"backlog_issue_id,omitempty"`
+	BacklogIssueKey  string            `json:"backlog_issue_key,omitempty"`
 	ResolutionKind   string            `json:"resolution_kind,omitempty"`
 	ResolutionDetail string            `json:"resolution_detail,omitempty"`
 	ResolvedAt       *time.Time        `json:"resolved_at,omitempty"`
@@ -143,6 +147,9 @@ type TriggerAdmission struct {
 	RequestActor      string
 	RequestLabel      string
 	IssueKey          string
+	// SourceKind records the provider the job came from ('plane' or
+	// 'linear'); empty means the job has no tracker provider.
+	SourceKind string
 }
 
 type TriggerStatus struct {
@@ -216,7 +223,7 @@ func OpenStore(path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) initialize(ctx context.Context) error {
-	const schemaVersion = 8
+	const schemaVersion = 9
 	var version int
 	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		return fmt.Errorf("read database schema version: %w", err)
@@ -265,6 +272,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS jobs_trigger_occurrence ON jobs(trigger_identi
 CREATE UNIQUE INDEX IF NOT EXISTS jobs_active_fixed_trigger ON jobs(trigger_identity) WHERE fixed_trigger=1 AND state IN ('queued','running');
 CREATE UNIQUE INDEX IF NOT EXISTS jobs_active_trigger_subject ON jobs(trigger_subject) WHERE trigger_subject<>'' AND state IN ('queued','running');
 CREATE INDEX IF NOT EXISTS github_trigger_requests_reconciliation ON github_trigger_requests(trigger_identity,needs_reconciliation,requested_at);
+CREATE TABLE IF NOT EXISTS backlog_issues (
+ id TEXT PRIMARY KEY, project TEXT NOT NULL, key TEXT NOT NULL, title TEXT NOT NULL,
+ spec TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'backlog', revision INTEGER NOT NULL DEFAULT 1,
+ url TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_backlog_issues_project_key ON backlog_issues(project, key);
+CREATE INDEX IF NOT EXISTS idx_backlog_issues_project_state ON backlog_issues(project, state);
 CREATE TABLE IF NOT EXISTS job_state_history (
  job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
  state TEXT NOT NULL, changed_at TEXT NOT NULL);
@@ -320,8 +333,40 @@ END;`
 			return fmt.Errorf("upgrade database schema to version 8: %w", err)
 		}
 	}
-	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+jobMetadataSchema+"PRAGMA user_version=8;")
+	if _, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+jobMetadataSchema); err != nil {
+		return fmt.Errorf("initialize database: %w", err)
+	}
+	// job_metadata must exist (and carry its current columns on fresh
+	// databases) before the idempotent ALTER runs against older databases.
+	if err := s.addJobSourceColumns(ctx); err != nil {
+		return fmt.Errorf("upgrade database schema to version 9: %w", err)
+	}
+	_, err := s.db.ExecContext(ctx, `PRAGMA user_version=9;`)
 	return err
+}
+
+// addJobSourceColumns records where a job came from: the trigger provider kind
+// ('plane', 'linear', or 'backlog') and, for native issues, the issue a started
+// run belongs to. Existing rows keep empty fields, so legacy jobs stay
+// reconcilable through the workspace fallback.
+func (s *Store) addJobSourceColumns(ctx context.Context) error {
+	for _, column := range []string{
+		"source_kind TEXT NOT NULL DEFAULT ''",
+		"backlog_issue_id TEXT",
+	} {
+		name, _, _ := strings.Cut(column, " ")
+		var present int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('job_metadata') WHERE name=?`, name).Scan(&present); err != nil {
+			return err
+		}
+		if present > 0 {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE job_metadata ADD COLUMN `+column); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // addJobResolution adds the ticket-resolution columns to jobs. Existing rows
@@ -710,6 +755,11 @@ WHERE github_trigger_requests.state='pending'`, admission.Identity, admission.Oc
 	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET title=? WHERE id=?`, admission.Title, jobID); err != nil {
 		return "", false, fmt.Errorf("insert triggered job title: %w", err)
 	}
+	if admission.SourceKind != "" {
+		if err := stampJobSource(ctx, tx, jobID, admission.SourceKind, ""); err != nil {
+			return "", false, err
+		}
+	}
 	previous, err := s.linkPriorAttempt(ctx, tx, jobID, admission.Subject, admission.Repository)
 	if err != nil {
 		return "", false, err
@@ -829,6 +879,11 @@ func (s *Store) UpdateQueuedTriggerJob(ctx context.Context, jobID string, admiss
 	if _, err := tx.ExecContext(ctx, `UPDATE runs SET command=?,command_hash=?,executor=?,model=?,rendered_prompt=? WHERE job_id=? AND state='queued'`,
 		admission.Command.Name, admission.Command.Hash, admission.Command.Executor, admission.Command.Model, admission.Command.Prompt, jobID); err != nil {
 		return fmt.Errorf("update queued run spec: %w", err)
+	}
+	if admission.SourceKind != "" {
+		if err := stampJobSource(ctx, tx, jobID, admission.SourceKind, ""); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -1672,10 +1727,21 @@ func terminalJobState(state string) bool {
 // and running jobs wait until they finish; already resolved jobs are skipped.
 const resolutionStates = `('succeeded','failed','timed_out','cancelled')`
 
+// validResolutionKind reports whether kind is an accepted resolution origin:
+// a merged pull request, a provider state change (Plane or Linear), or a
+// native backlog issue.
+func validResolutionKind(kind string) bool {
+	switch kind {
+	case "pr", "plane", "linear", "backlog":
+		return true
+	}
+	return false
+}
+
 // MarkJobResolved moves one terminal job into the resolved state and records
 // how it was resolved.
 func (s *Store) MarkJobResolved(ctx context.Context, jobID, kind, detail string, resolvedAt time.Time) error {
-	if kind != "pr" && kind != "plane" {
+	if !validResolutionKind(kind) {
 		return fmt.Errorf("unknown resolution kind %q", kind)
 	}
 	if strings.TrimSpace(detail) == "" {
@@ -1699,7 +1765,7 @@ func (s *Store) ResolveTicketsForIssue(ctx context.Context, key, kind, detail st
 	if strings.TrimSpace(key) == "" {
 		return 0, errors.New("issue key is required")
 	}
-	if kind != "pr" && kind != "plane" {
+	if !validResolutionKind(kind) {
 		return 0, fmt.Errorf("unknown resolution kind %q", kind)
 	}
 	now := s.now().UTC()
@@ -1709,6 +1775,136 @@ func (s *Store) ResolveTicketsForIssue(ctx context.Context, key, kind, detail st
 		return 0, fmt.Errorf("resolve tickets for %s: %w", key, err)
 	}
 	return result.RowsAffected()
+}
+
+// CreateBacklogIssue persists a new native issue with the next per-project
+// sequence key. The key is allocated inside the create transaction from the
+// highest numeric suffix already used by the project.
+func (s *Store) CreateBacklogIssue(ctx context.Context, project, title, spec, issueURL string) (backlog.Issue, error) {
+	issue := backlog.Issue{Project: project, Title: title, Spec: spec, URL: issueURL, State: backlog.StateBacklog, Revision: 1}
+	if err := issue.Validate(); err != nil {
+		return backlog.Issue{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return backlog.Issue{}, err
+	}
+	defer tx.Rollback()
+	var highest int
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(CAST(SUBSTR(key,?) AS INTEGER)),0) FROM backlog_issues WHERE project=?`, len(project)+2, project).Scan(&highest); err != nil {
+		return backlog.Issue{}, fmt.Errorf("read backlog key sequence for %s: %w", project, err)
+	}
+	issue.Key = fmt.Sprintf("%s-%d", project, highest+1)
+	id, err := randomID("issue", 12)
+	if err != nil {
+		return backlog.Issue{}, err
+	}
+	now := s.now().UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO backlog_issues(id,project,key,title,spec,state,revision,url,created_at,updated_at) VALUES(?,?,?,?,?,?,1,?,?,?)`,
+		id, issue.Project, issue.Key, issue.Title, issue.Spec, issue.State, issue.URL, now, now); err != nil {
+		return backlog.Issue{}, fmt.Errorf("insert backlog issue: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return backlog.Issue{}, fmt.Errorf("commit backlog issue: %w", err)
+	}
+	issue.ID, issue.CreatedAt, issue.UpdatedAt = id, now, now
+	return issue, nil
+}
+
+// GetBacklogIssue returns one native issue; sql.ErrNoRows means it does not exist.
+func (s *Store) GetBacklogIssue(ctx context.Context, id string) (backlog.Issue, error) {
+	return scanBacklogIssue(s.db.QueryRowContext(ctx, `SELECT id,project,key,title,spec,state,revision,url,created_at,updated_at FROM backlog_issues WHERE id=?`, id))
+}
+
+// ListBacklogIssues returns issues filtered by project, state, and a substring
+// match on title or key, ordered by project and key.
+func (s *Store) ListBacklogIssues(ctx context.Context, project, state, q string) ([]backlog.Issue, error) {
+	query := `SELECT id,project,key,title,spec,state,revision,url,created_at,updated_at FROM backlog_issues`
+	var conditions []string
+	var args []any
+	if project != "" {
+		conditions = append(conditions, "project=?")
+		args = append(args, project)
+	}
+	if state != "" {
+		if !backlog.ValidState(state) {
+			return nil, fmt.Errorf("unknown issue state %q", state)
+		}
+		conditions = append(conditions, "state=?")
+		args = append(args, state)
+	}
+	if q != "" {
+		conditions = append(conditions, "(title LIKE ? OR key LIKE ?)")
+		args = append(args, "%"+q+"%", "%"+q+"%")
+	}
+	if len(conditions) > 0 {
+		query += " WHERE " + strings.Join(conditions, " AND ")
+	}
+	query += ` ORDER BY project,key`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list backlog issues: %w", err)
+	}
+	defer rows.Close()
+	var issues []backlog.Issue
+	for rows.Next() {
+		issue, err := scanBacklogIssue(rows)
+		if err != nil {
+			return nil, err
+		}
+		issues = append(issues, issue)
+	}
+	return issues, rows.Err()
+}
+
+// UpdateBacklogIssue applies a partial edit and bumps the revision so later
+// readers can detect that the issue changed after a run was started from it.
+func (s *Store) UpdateBacklogIssue(ctx context.Context, id string, update backlog.Update) (backlog.Issue, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return backlog.Issue{}, err
+	}
+	defer tx.Rollback()
+	issue, err := scanBacklogIssue(tx.QueryRowContext(ctx, `SELECT id,project,key,title,spec,state,revision,url,created_at,updated_at FROM backlog_issues WHERE id=?`, id))
+	if err != nil {
+		return backlog.Issue{}, err
+	}
+	issue = issue.Apply(update)
+	if err := issue.Validate(); err != nil {
+		return backlog.Issue{}, err
+	}
+	issue.Revision++
+	now := s.now().UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `UPDATE backlog_issues SET title=?,spec=?,state=?,revision=?,updated_at=? WHERE id=?`,
+		issue.Title, issue.Spec, issue.State, issue.Revision, now, id); err != nil {
+		return backlog.Issue{}, fmt.Errorf("update backlog issue %s: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return backlog.Issue{}, fmt.Errorf("commit backlog issue update: %w", err)
+	}
+	issue.UpdatedAt = now
+	return issue, nil
+}
+
+// MarkBacklogStartedOnce moves a backlog or todo issue to started exactly once.
+// Later starts leave the state alone so humans keep control of it. The state
+// flip is a mutation, so it bumps the revision like any other edit.
+func (s *Store) MarkBacklogStartedOnce(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE backlog_issues SET state=?,revision=revision+1,updated_at=? WHERE id=? AND state IN (?,?)`,
+		backlog.StateStarted, s.now().UTC().Format(time.RFC3339Nano), id, backlog.StateBacklog, backlog.StateTodo)
+	if err != nil {
+		return fmt.Errorf("mark backlog issue %s started: %w", id, err)
+	}
+	return nil
+}
+
+func scanBacklogIssue(row interface{ Scan(dest ...any) error }) (backlog.Issue, error) {
+	var issue backlog.Issue
+	err := row.Scan(&issue.ID, &issue.Project, &issue.Key, &issue.Title, &issue.Spec, &issue.State, &issue.Revision, &issue.URL, &issue.CreatedAt, &issue.UpdatedAt)
+	if err != nil {
+		return backlog.Issue{}, err
+	}
+	return issue, nil
 }
 
 func validateOutcome(state string, exitCode int) error {

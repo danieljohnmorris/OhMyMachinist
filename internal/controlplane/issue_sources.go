@@ -42,19 +42,20 @@ func (l linearPoller) PostComment(ctx context.Context, key, body string) error {
 	return l.client.PostComment(ctx, key, body)
 }
 
-func loadIssueSources(path string) (map[string]issuePoller, map[string]*issues.PlaneClient, error) {
+func loadIssueSources(path string) (map[string]issuePoller, map[string]*issues.PlaneClient, map[string]*issues.LinearClient, error) {
 	definition, err := config.LoadDefinitions(path)
 	if err != nil {
-		return nil, nil, fmt.Errorf("load issue sources: %w", err)
+		return nil, nil, nil, fmt.Errorf("load issue sources: %w", err)
 	}
 	triggers, err := config.LoadTriggers(path)
 	if err != nil {
-		return nil, nil, fmt.Errorf("load issue source triggers: %w", err)
+		return nil, nil, nil, fmt.Errorf("load issue source triggers: %w", err)
 	}
 	planeConnections := definition.IssueSources.PlaneProjects()
 	linearConnections := definition.IssueSources.LinearProjects()
 	result := map[string]issuePoller{}
 	planeClients := map[string]*issues.PlaneClient{}
+	linearClients := map[string]*issues.LinearClient{}
 	for _, trigger := range triggers {
 		if trigger.Family != "issue" {
 			continue
@@ -62,24 +63,25 @@ func loadIssueSources(path string) (map[string]issuePoller, map[string]*issues.P
 		if trigger.SourceKind == "plane" {
 			_, ok := definition.IssueSources.Plane[trigger.Repository]
 			if !ok {
-				return nil, nil, fmt.Errorf("issue trigger %q has no Plane project", trigger.Identity)
+				return nil, nil, nil, fmt.Errorf("issue trigger %q has no Plane project", trigger.Identity)
 			}
 			client, err := issues.NewPlaneConnection(planeConnections[trigger.Repository])
 			if err != nil {
-				return nil, nil, fmt.Errorf("issue trigger %q: %w", trigger.Identity, err)
+				return nil, nil, nil, fmt.Errorf("issue trigger %q: %w", trigger.Identity, err)
 			}
 			result[trigger.Identity] = planePoller{client: client}
 			planeClients[trigger.Identity] = client
 			continue
 		}
 		if _, ok := definition.IssueSources.Linear[trigger.Repository]; trigger.SourceKind == "linear" && !ok {
-			return nil, nil, fmt.Errorf("issue trigger %q has no Linear project", trigger.Identity)
+			return nil, nil, nil, fmt.Errorf("issue trigger %q has no Linear project", trigger.Identity)
 		}
 		client, err := issues.NewLinearConnection(linearConnections[trigger.Repository])
 		if err != nil {
-			return nil, nil, fmt.Errorf("issue trigger %q: %w", trigger.Identity, err)
+			return nil, nil, nil, fmt.Errorf("issue trigger %q: %w", trigger.Identity, err)
 		}
 		result[trigger.Identity] = linearPoller{client: client}
+		linearClients[trigger.Identity] = client
 	}
-	return result, planeClients, nil
+	return result, planeClients, linearClients, nil
 }

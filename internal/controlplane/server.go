@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/owainlewis/machinist/internal/backlog"
 	"github.com/owainlewis/machinist/internal/config"
 	"github.com/owainlewis/machinist/internal/issues"
 	"github.com/owainlewis/machinist/internal/protocol"
@@ -43,6 +44,7 @@ type Server struct {
 	github               githubTriggerClient
 	issueSources         map[string]issuePoller
 	planeClients         map[string]*issues.PlaneClient
+	linearClients        map[string]*issues.LinearClient
 	githubRepositories   map[string]string
 	webhookSecret        string
 	resolutionEvery      time.Duration
@@ -147,7 +149,7 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 	if err := store.SyncTriggers(context.Background(), definitions); err != nil {
 		return nil, fmt.Errorf("restore managed triggers: %w", err)
 	}
-	issueSources, planeClients, e := loadIssueSources(definitionPath)
+	issueSources, planeClients, linearClients, e := loadIssueSources(definitionPath)
 	if e != nil {
 		return nil, e
 	}
@@ -166,6 +168,7 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 		github: NewGitHubCLI("gh", 30*time.Second), now: time.Now,
 		issueSources:       issueSources,
 		planeClients:       planeClients,
+		linearClients:      linearClients,
 		githubRepositories: definition.GitHub.Repositories,
 		webhookSecret:      definition.IssueSources.WebhookSecretValue(),
 		resolutionEvery:    defaultResolutionEvery,
@@ -329,6 +332,11 @@ func (s *Server) routes() (http.Handler, error) {
 	mux.HandleFunc("GET /api/v1/definitions", s.definitions)
 	mux.HandleFunc("POST /api/v1/jobs/{id}/{action}", s.authorizeSubmission(s.workflowAction))
 	mux.HandleFunc("POST /api/v1/jobs", s.authorizeSubmission(s.linkAttemptsAfter(s.submit)))
+	mux.HandleFunc("GET /api/v1/backlog", s.backlogList)
+	mux.HandleFunc("POST /api/v1/backlog", s.authorizeSubmission(s.backlogCreate))
+	mux.HandleFunc("GET /api/v1/backlog/{id}", s.backlogGet)
+	mux.HandleFunc("PATCH /api/v1/backlog/{id}", s.authorizeSubmission(s.backlogPatch))
+	mux.HandleFunc("POST /api/v1/backlog/{id}/start", s.authorizeSubmission(s.backlogStart))
 	mux.HandleFunc("DELETE /api/v1/jobs/{id}", s.authorizeSubmission(s.deleteJob))
 	mux.HandleFunc("POST /api/v1/workers/poll", s.authorizeWorker(s.poll))
 	mux.HandleFunc("POST /api/v1/webhooks/issues", s.issueWebhook)
@@ -800,6 +808,202 @@ func (s *Server) workflowAction(response http.ResponseWriter, request *http.Requ
 		return
 	}
 	writeJSON(response, http.StatusOK, map[string]string{"status": "accepted"})
+}
+
+type backlogCreateRequest struct {
+	Project string `json:"project"`
+	Title   string `json:"title"`
+	Spec    string `json:"spec"`
+	URL     string `json:"url"`
+}
+
+type backlogPatchRequest struct {
+	Title *string `json:"title"`
+	Spec  *string `json:"spec"`
+	State *string `json:"state"`
+}
+
+type backlogStartRequest struct {
+	Repository string `json:"repository"`
+	Workflow   string `json:"workflow"`
+	Command    string `json:"command"`
+	Model      string `json:"model"`
+}
+
+func (s *Server) backlogList(response http.ResponseWriter, request *http.Request) {
+	found, err := s.store.ListBacklogIssues(request.Context(), request.URL.Query().Get("project"), request.URL.Query().Get("state"), request.URL.Query().Get("q"))
+	if err != nil {
+		writeError(response, http.StatusBadRequest, err)
+		return
+	}
+	if found == nil {
+		found = []backlog.Issue{}
+	}
+	writeJSON(response, http.StatusOK, found)
+}
+
+func (s *Server) backlogCreate(response http.ResponseWriter, request *http.Request) {
+	if !limitRequestBody(response, request, maxRequestBytes) {
+		return
+	}
+	var input backlogCreateRequest
+	if err := decodeJSON(request, &input); err != nil {
+		writeDecodeError(response, err)
+		return
+	}
+	project, err := ResolveProjectKey(strings.TrimSpace(input.Project), input.Title)
+	if err != nil {
+		writeError(response, http.StatusBadRequest, err)
+		return
+	}
+	issue, err := s.store.CreateBacklogIssue(request.Context(), project, input.Title, input.Spec, strings.TrimSpace(input.URL))
+	if err != nil {
+		writeError(response, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(response, http.StatusCreated, issue)
+}
+
+func (s *Server) backlogGet(response http.ResponseWriter, request *http.Request) {
+	issue, err := s.store.GetBacklogIssue(request.Context(), request.PathValue("id"))
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(response, http.StatusNotFound, errors.New("issue not found"))
+		return
+	}
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, issue)
+}
+
+func (s *Server) backlogPatch(response http.ResponseWriter, request *http.Request) {
+	if !limitRequestBody(response, request, maxRequestBytes) {
+		return
+	}
+	var input backlogPatchRequest
+	if err := decodeJSON(request, &input); err != nil {
+		writeDecodeError(response, err)
+		return
+	}
+	issue, err := s.store.UpdateBacklogIssue(request.Context(), request.PathValue("id"), backlog.Update{Title: input.Title, Spec: input.Spec, State: input.State})
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(response, http.StatusNotFound, errors.New("issue not found"))
+		return
+	}
+	if err != nil {
+		writeError(response, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, issue)
+}
+
+// backlogStart creates a workflow or command job from a native issue with the
+// issue's current spec pinned into the job: later issue edits never rewrite
+// the queued run. Saving an issue never enqueues; this is the only path from
+// an issue to a job.
+func (s *Server) backlogStart(response http.ResponseWriter, request *http.Request) {
+	if !limitRequestBody(response, request, maxRequestBytes) {
+		return
+	}
+	var input backlogStartRequest
+	if err := decodeJSON(request, &input); err != nil {
+		writeDecodeError(response, err)
+		return
+	}
+	issue, err := s.store.GetBacklogIssue(request.Context(), request.PathValue("id"))
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(response, http.StatusNotFound, errors.New("issue not found"))
+		return
+	}
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	if strings.TrimSpace(input.Repository) == "" {
+		writeError(response, http.StatusBadRequest, errors.New("repository is required"))
+		return
+	}
+	repositories, repositoryErr := s.store.KnownRepositories(request.Context())
+	if repositoryErr != nil {
+		writeError(response, http.StatusInternalServerError, repositoryErr)
+		return
+	}
+	if !slices.Contains(repositories, input.Repository) {
+		writeError(response, http.StatusBadRequest, fmt.Errorf("repository %q is not defined in the control plane", input.Repository))
+		return
+	}
+	input.Model = strings.TrimSpace(input.Model)
+	if len(input.Model) > 128 || strings.ContainsAny(input.Model, "\x00\r\n") {
+		writeError(response, http.StatusBadRequest, errors.New("model must be at most 128 characters on one line"))
+		return
+	}
+	title := fmt.Sprintf("%s: %s", issue.Key, issue.Title)
+	var jobID string
+	switch {
+	case input.Workflow != "":
+		if input.Command != "" {
+			writeError(response, http.StatusBadRequest, errors.New("choose either workflow or command"))
+			return
+		}
+		definition, err := config.LoadDefinitions(s.definitionPath)
+		if err != nil {
+			writeError(response, http.StatusBadRequest, err)
+			return
+		}
+		steps, err := definition.ResolveTaskWorkflow(input.Workflow, input.Model)
+		if err != nil {
+			writeError(response, http.StatusBadRequest, err)
+			return
+		}
+		task := protocol.Task{Title: title, Spec: issue.Spec}
+		if err := task.Validate(); err != nil {
+			writeError(response, http.StatusBadRequest, err)
+			return
+		}
+		jobID, err = s.store.CreateTaskJob(request.Context(), task, input.Repository, input.Workflow, issue.Project, steps)
+		if err != nil {
+			writeError(response, http.StatusInternalServerError, err)
+			return
+		}
+	case input.Command != "":
+		if strings.TrimSpace(issue.Spec) == "" {
+			writeError(response, http.StatusBadRequest, errors.New("backlog issue has no spec to start"))
+			return
+		}
+		command, err := config.LoadCommand(s.definitionPath, input.Command)
+		if err != nil {
+			writeError(response, http.StatusBadRequest, err)
+			return
+		}
+		command, err = config.RenderPrompt(command, issue.Spec)
+		if err != nil {
+			writeError(response, http.StatusBadRequest, err)
+			return
+		}
+		command.Model = input.Model
+		jobID, err = s.store.CreateJobWithOptions(request.Context(), issue.Spec, input.Repository, input.Command, command, CreateJobOptions{Title: title, Project: issue.Project, IssueKey: issue.Key})
+		if err != nil {
+			writeError(response, http.StatusInternalServerError, err)
+			return
+		}
+	default:
+		writeError(response, http.StatusBadRequest, errors.New("workflow or command is required"))
+		return
+	}
+	if err := s.store.StampJobSource(request.Context(), jobID, "backlog", issue.ID); err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	if err := s.store.MarkBacklogStartedOnce(request.Context(), issue.ID); err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	// Serve the persisted snapshot so state and revision agree.
+	if refreshed, err := s.store.GetBacklogIssue(request.Context(), issue.ID); err == nil {
+		issue = refreshed
+	}
+	writeJSON(response, http.StatusCreated, map[string]any{"job_id": jobID, "issue": issue})
 }
 
 // linkAttemptsAfter relinks ticket attempts once a submission is stored, so a

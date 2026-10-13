@@ -17,7 +17,9 @@ var projectTitlePattern = regexp.MustCompile(`^([A-Z][A-Z0-9]{1,9})-\d+\b`)
 const jobMetadataSchema = `
 CREATE TABLE IF NOT EXISTS job_metadata (
  job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
- metadata TEXT NOT NULL);`
+ metadata TEXT NOT NULL,
+ source_kind TEXT NOT NULL DEFAULT '',
+ backlog_issue_id TEXT);`
 
 type JobScreenshot struct {
 	Label        string `json:"label,omitempty"`
@@ -146,7 +148,7 @@ ON CONFLICT(job_id) DO UPDATE SET metadata=excluded.metadata`, jobID, string(bod
 func loadJobMetadata(ctx context.Context, q interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }, jobs []Job) error {
-	rows, err := q.QueryContext(ctx, `SELECT job_id,metadata FROM job_metadata`)
+	rows, err := q.QueryContext(ctx, `SELECT job_id,metadata,source_kind,backlog_issue_id FROM job_metadata`)
 	if err != nil {
 		return err
 	}
@@ -155,9 +157,11 @@ func loadJobMetadata(ctx context.Context, q interface {
 	for index := range jobs {
 		byID[jobs[index].ID] = &jobs[index]
 	}
+	backlogKeys := map[string]string{}
 	for rows.Next() {
-		var jobID, raw string
-		if err := rows.Scan(&jobID, &raw); err != nil {
+		var jobID, raw, sourceKind string
+		var backlogIssueID sql.NullString
+		if err := rows.Scan(&jobID, &raw, &sourceKind, &backlogIssueID); err != nil {
 			return err
 		}
 		if job := byID[jobID]; job != nil {
@@ -166,9 +170,70 @@ func loadJobMetadata(ctx context.Context, q interface {
 				return fmt.Errorf("decode job metadata: %w", err)
 			}
 			job.Metadata = &metadata
+			job.SourceKind = sourceKind
+			if backlogIssueID.Valid {
+				job.BacklogIssueID = backlogIssueID.String
+			}
 		}
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	// Resolve the human key of any linked native issue so cards can group by it.
+	keyRows, err := q.QueryContext(ctx, `SELECT id,key FROM backlog_issues`)
+	if err != nil {
+		return err
+	}
+	defer keyRows.Close()
+	for keyRows.Next() {
+		var id, key string
+		if err := keyRows.Scan(&id, &key); err != nil {
+			return err
+		}
+		backlogKeys[id] = key
+	}
+	if err := keyRows.Err(); err != nil {
+		return err
+	}
+	for index := range jobs {
+		if jobs[index].BacklogIssueID != "" {
+			jobs[index].BacklogIssueKey = backlogKeys[jobs[index].BacklogIssueID]
+		}
+	}
+	return nil
+}
+
+// stampJobSource records where a job came from inside the caller's
+// transaction: the trigger provider kind and, for native issues, the issue a
+// started run belongs to.
+func stampJobSource(ctx context.Context, tx *sql.Tx, jobID, sourceKind, backlogIssueID string) error {
+	if sourceKind != "plane" && sourceKind != "linear" && sourceKind != "backlog" {
+		return fmt.Errorf("unknown job source kind %q", sourceKind)
+	}
+	var issueID any
+	if backlogIssueID != "" {
+		issueID = backlogIssueID
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO job_metadata(job_id,metadata,source_kind,backlog_issue_id) VALUES(?,'{}',?,?)
+ON CONFLICT(job_id) DO UPDATE SET source_kind=excluded.source_kind, backlog_issue_id=excluded.backlog_issue_id`,
+		jobID, sourceKind, issueID); err != nil {
+		return fmt.Errorf("stamp job source for %s: %w", jobID, err)
+	}
+	return nil
+}
+
+// StampJobSource records where a job came from, creating the metadata row if
+// the job has no other metadata.
+func (s *Store) StampJobSource(ctx context.Context, jobID, sourceKind, backlogIssueID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := stampJobSource(ctx, tx, jobID, sourceKind, backlogIssueID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func isBlankMetadata(value string) bool { return strings.TrimSpace(value) == "" }
