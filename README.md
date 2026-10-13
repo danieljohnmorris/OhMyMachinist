@@ -1,167 +1,164 @@
 <p align="center">
-  <img src="docs/assets/logo-dark-padded.png" alt="oh my machinist" width="420">
-</p>
-
-## About this fork
-
-This is a fork of [Machinist](https://github.com/owainlewis/machinist). It keeps the upstream control plane and worker model, and adds factory features for tracker-driven delivery.
-
-What this fork adds today:
-
-- Plane intake (label poll and webhook), project-to-repository mapping, and Plane/PR links on runs
-- Tasks board: one card per ticket with prior attempts, active/failed by default, Show succeeded, URL-persisted filters, and project/date filters
-- Run page: attempt picker, transcript tab, full-height transcript, and activity sidebar with state timings
-- Retries that inject the prior attempt transcript into the next coder prompt
-- Job timeouts with fail alerts, and Plane-driven resolve when a ticket or linked PR completes
-- Fresh fetch of lane checkouts before each run
-- Built-in PR review after a pull request opens (checks, reviewers, commit status)
-
-The coding agent is whatever executor you configure on the worker: omp, Codex, Claude Code, or another command that reads a prompt on stdin. Models are chosen through that executor configuration (local or cloud). One example setup is DGX Sparks running a local GLM via omp.
-
-Pluggable trackers (Plane or Linear) and per-project agent and model choice are in progress, not done yet.
-
-
-<p align="center">
-  <img src=".github/assets/machinist-lockup.svg" width="520" alt="Machinist">
+  <img src="https://github.com/danieljohnmorris/OhMyMachinist/blob/main/docs/assets/logo-dark-padded.png?raw=true" alt="oh my machinist">
 </p>
 
 <p align="center">
-  <strong>The open source AI software factory for agentic coders.</strong><br>
- Machinist is an open source software factory for repeatable and scalable AI coding workflows. 
+  <strong>Tracker tickets in, reviewed pull requests out.</strong>
 </p>
 
 <p align="center">
-  <a href="https://machinist.sh">Website</a> ·
-  <a href="docs/README.md">Documentation</a> ·
-  <a href="docs/configuration.md">Configuration</a> ·
-  <a href="examples/workflows/README.md">Workflow examples</a>
+  <a href="https://github.com/danieljohnmorris/OhMyMachinist/releases"><img src="https://img.shields.io/github/v/release/danieljohnmorris/OhMyMachinist?include_prereleases&style=flat&colorA=222222&colorB=3FB950" alt="Release"></a>
+  <a href="https://github.com/danieljohnmorris/OhMyMachinist/blob/main/LICENSE"><img src="https://img.shields.io/github/license/danieljohnmorris/OhMyMachinist?style=flat&colorA=222222&colorB=58A6FF" alt="License"></a>
+  <a href="https://go.dev"><img src="https://img.shields.io/badge/Go-00ADD8?style=flat&colorA=222222&logo=go&logoColor=white" alt="Go"></a>
+  <a href="https://react.dev"><img src="https://img.shields.io/badge/React-61DAFB?style=flat&colorA=222222&logo=react&logoColor=white" alt="React"></a>
+  <a href="https://github.com/owainlewis/machinist"><img src="https://img.shields.io/badge/fork%20of-Machinist-E05735?style=flat&colorA=222222" alt="Fork of Machinist"></a>
 </p>
 
 <p align="center">
-  <img src=".github/site/technical-drawings.webp" width="100%" alt="Technical drawings of a milling machine, supervised coding-agent system, and precision linear assembly">
+  Fork of <a href="https://github.com/owainlewis/machinist">Machinist</a> by <a href="https://github.com/owainlewis">@owainlewis</a>
 </p>
 
-<p align="center"><sub>Machine section · supervised agent system · exploded assembly</sub></p>
+OhMyMachinist is a fork of [Machinist](https://github.com/owainlewis/machinist), the open source AI software factory. It turns tracker tickets into reviewed pull requests on its own: label a ticket, and the factory picks it up, codes it, opens a PR, reviews it and closes the loop on the ticket.
 
-Machinist is an open-source software factory implementation. It runs on your machine, keeps repository access and credentials local, and records the work from request to handoff. Commands can invoke Codex, Claude Code, another agent CLI, a test runner, a shell script, or repository-owned orchestration.
+It keeps the upstream control plane, worker model and executors. Everything below is what the fork adds on top. For the core docs, see [upstream Machinist](https://github.com/owainlewis/machinist#readme).
 
-Please note: this is early access software and subject to change. 
+> [!NOTE]
+> Early access software, run by one person against their own projects. Expect sharp edges.
 
-## Why Machinist
+## What it adds
 
-- **One controlled entrypoint.** Workers expose named commands and repositories, never arbitrary shell text or machine-local paths.
-- **Bring your own harness.** Use any executable that accepts a prompt on standard input.
-- **Keep authority local.** Repositories, credentials, model aliases, and executor configuration stay on the worker.
-- **Inspect every run.** Stream output, retain durable events and artifacts, and track terminal outcomes, duration, and reported token use.
-- **Choose where to approve.** Pause before a step, review its files, and approve or request changes. Optional merge policies can automate narrowly defined low-risk changes.
+**Intake**
 
-<a id="quick-start"></a>
+- Plane intake by label poll or webhook, with project-to-repository mapping
+- One job per ticket (deduplicated), with Plane and PR links on every run
+- Tickets resolve automatically when the ticket or its linked PR completes
 
-## Quick start
+**Delivery**
 
-Build and initialize Machinist:
+- Retries inject the previous attempt's transcript into the next coder prompt
+- Job timeouts with failure alerts
+- Lane checkouts are fetched fresh before each run
 
-```sh
-git clone https://github.com/owainlewis/machinist.git
-cd machinist
-mkdir -p ./bin && go build -o ./bin/machinist ./cmd/machinist
-./bin/machinist init
+**Review**
+
+- Built-in PR review after a pull request opens: language-aware checks, code and prose reviewers, a docs pass, one PR comment and a `machinist/review` commit status
+
+**Web UI**
+
+- Tasks board: one card per ticket with prior attempts, active and failed by default, Show succeeded, project and date filters that persist in the URL
+- Run page: attempt picker, transcript tab, full-height transcript and an activity sidebar with state timings
+- Sidebar shows worker count and job concurrency
+
+## How it works
+
+```
+factory label  ->  intake  ->  coding agent in a lane  ->  pull request
+               ->  built-in review  ->  merge and deploy  ->  ticket resolves
 ```
 
-`init` writes `~/.machinist/config.toml` with two commands, `task-to-pr` and `audit`.
-Each is a prompt, an executor, and a timeout:
+1. Add the `factory` label to a ticket.
+2. Intake polls (or receives a webhook), dedupes, and queues one job for the mapped repository.
+3. A worker runs your coding agent in a lane checkout, fetched fresh.
+4. The agent pushes a branch and opens a PR.
+5. The built-in review runs checks and reviewers, comments, and sets `machinist/review`.
+6. The PR merges and deploys under your branch protection and merge policy.
+7. The ticket is marked resolved in the tracker and in Machinist.
+
+## Configuration today
+
+**Coding agent.** Any executor that reads a prompt on stdin: omp, Codex, Claude Code, or your own command.
+**Models.** Local or cloud, chosen per executor through model aliases.
+**Lanes and concurrency.** Set how many jobs run at once and which repositories each worker may use.
+**Review profile.** Choose the review executor and timeout with `MACHINIST_REVIEW_EXECUTOR` and `MACHINIST_REVIEW_TIMEOUT_SECONDS`.
+
+A minimal setup, with placeholders:
 
 ```toml
 # ~/.machinist/config.toml
+[server]
+listen = "127.0.0.1:7331"
+max_concurrent_jobs = 2
+
 [commands.task-to-pr]
-executor = "codex"
-prompt_file = "prompts/task-to-pr.md" # optional
+executor = "omp"
 timeout = "120m"
 ```
 
-Run it directly:
-
-```sh
-./bin/machinist run --command=task-to-pr --repo=/path/to/repo --prompt="Complete https://github.com/owner/repo/issues/42"
-```
-
-## How execution works
-
-For a direct run, Machinist maps the configured command name to a fixed executable and uses the path supplied with `--repo` as the working directory. Managed submissions instead resolve an approved repository name from the worker configuration. In both cases, Machinist renders the prompt, sends it on standard input, streams stdout and stderr, and applies one overall timeout and cancellation. Exit code 0 succeeds; every non-zero exit code fails.
-
-Inside each command, scripts are intentionally opaque. Their internal stages appear in logs, but Machinist does not infer their internal stages. A killed script restarts from the beginning unless the script owns checkpointing.
-
-For explicit steps, [configure a workflow](docs/workflows.md):
-
 ```toml
-[workflows.deliver]
-steps = ["task-to-pr"]
+# ~/.machinist/worker/worker.toml
+[executors.omp]
+command = ["omp", "--model={{machinist.model}}", "-"]
+models = { default = "<your-model>" }
+
+[repositories.my-project]
+path = "/absolute/path/to/my-project"
 ```
 
-Workflow tasks retain results and saved files, support approval and feedback, and keep earlier attempts in history. Each stage can read and write `{{task.output_dir}}`; Machinist restores and saves the shared folder between stages.
-
-Start with [your first task workflow](docs/task-guide.md): create a task from an issue or spec, follow it on the board, and review the result. The [classify-then-merge example](examples/workflows/risk_delivery/README.md) adds independent risk assessment and a conservative merge policy.
-
-## Go deeper
-
-<a id="ohmymachinist"></a>
-
-## OhMyMachinist
-
-This fork adds two generic issue sources and delivery metadata:
-
-- **Plane and Linear adapters.** Both can poll a configured label and submit a source-neutral issue. Plane uses `PLANE_URL`, `PLANE_WORKSPACE`, and `PLANE_API_KEY`; Linear uses `LINEAR_API_KEY`. Configure project-to-repository mappings and poll cadence in `config.toml`. HMAC-verified webhook intake is available as a library helper.
-- **Job metadata.** Workflow steps may set `metadata` in their JSON step result. The job page shows optional issue, branch, pull request, preview, review verdict/summary, screenshots, status, and timestamps. Job titles use `KEY: Title`, and job lists expose the full title in a tooltip when clipped.
-- **Generic delivery example.** `examples/factory/delivery.sh` has a dry-run mode and separate code/review stages. It never merges or deploys.
-
-### Post-PR review
-
-`deploy/factory/post_pr_review.py` reviews an existing pull request after delivery. It classifies changed files, runs configured checks for the languages in the diff, classifies failures as new or pre-existing, runs code and prose reviewers, performs a docs pass, and posts one PR comment. It also sets the `machinist/review` commit status.
+Secrets (tracker API keys, GitHub tokens) come from environment files kept out of git:
 
 ```sh
-python3 deploy/factory/post_pr_review.py --repo <checkout> --pr <github-pr-url-or-owner/name#n> [--base <branch>] [--executor-cmd "<cmd ...>"] [--dry-run] [--json-out <path>] [--timeout-seconds <seconds>]
+PLANE_URL=https://plane.example.com
+PLANE_WORKSPACE=
+PLANE_API_KEY=
 ```
 
-- Exit codes: `0` pass, `2` blocked by new check failures or critical/bug findings, `3` review tool error.
-- Executor: set `MACHINIST_REVIEW_EXECUTOR` or pass `--executor-cmd`. The command must read a prompt on stdin and print the final answer. With neither set, reviewers and docs are skipped with an explicit note.
-- Timeouts: default to 900 seconds per command; set `MACHINIST_REVIEW_TIMEOUT_SECONDS` or `--timeout-seconds`.
-- Dry run: prints the comment body and planned commands without calling GitHub write APIs, pushing, or committing.
+## In progress
 
-Wire it after delivery with:
+- **Pluggable trackers.** Plane today, Linear planned.
+- **Per-project choice** of tracker, coding agent and models in Settings (MACH-37).
+
+## Example setup
+
+One way to run it, not a requirement: Plane for tickets, omp as the coding agent, and a local GLM model served on a pair of NVIDIA DGX Sparks. Swap any piece for Linear, Codex, Claude Code or a cloud model.
+
+## Install
+
+**From source**
 
 ```sh
-python3 deploy/factory/post_pr_review.py --repo "$repo" --pr "$(jq -r .pr "$MACHINIST_OUTPUT_DIR/pr.json")"
+git clone https://github.com/danieljohnmorris/OhMyMachinist.git
+cd OhMyMachinist
+just build
+./bin/machinist init
 ```
 
-Configure branch protection to require the `machinist/review` commit status so blocked pull requests cannot merge. The tool never merges, approves, or closes pull requests.
+`just build` builds the web UI and the `machinist` binary into `./bin`.
 
-To follow upstream while keeping this fork:
+**Run**
 
 ```sh
-git fetch upstream
-git merge upstream/main
+just local            # control plane and worker together
+just control-plane    # control plane only
+just worker           # worker only
 ```
 
-Configure sources with placeholder values, then replace only the local values:
+Then open the UI at `http://127.0.0.1:7331`.
+
+**Post-PR review on its own**
 
 ```sh
-export PLANE_URL=https://plane.example.com
-export PLANE_WORKSPACE=
-export PLANE_API_KEY=
-export LINEAR_API_KEY=
+python3 deploy/factory/post_pr_review.py --repo <checkout> --pr <owner/name#n> [--dry-run]
 ```
+
+**Follow upstream**
+
+```sh
+git remote add upstream https://github.com/owainlewis/machinist.git
+git fetch upstream && git merge upstream/main
+```
+
+## Core docs
+
+Commands, executors, workflows, workers and deployment are documented upstream and in [`docs/`](docs/README.md):
 
 | Guide | What it covers |
 | --- | --- |
-| [Documentation](docs/README.md) | Choose the right setup and operations guide |
-| [Task workflow guide](docs/task-guide.md) | Set up planning, approval, shared files, and build |
-| [Configuration](docs/configuration.md) | Commands, executors, workers, models, and repositories |
-| [Development](docs/development.md) | Build, test, and work on Machinist locally |
-| [VM deployment](docs/vm-deployment.md) | Run the control plane and worker as services |
-| [Workflow examples](examples/workflows/README.md) | Prompt-driven and scripted workflows |
+| [Upstream Machinist](https://github.com/owainlewis/machinist#readme) | The core project |
+| [Configuration](docs/configuration.md) | Commands, executors, workers, models, repositories |
+| [Workflows](docs/workflows.md) | Multi-step workflows and approvals |
+| [VM deployment](docs/vm-deployment.md) | Running the control plane and worker as services |
+| [Factory review](deploy/factory/README.md) | The built-in PR review |
 
-## Contributing
+## Licence
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and pull-request expectations. Security issues should follow [SECURITY.md](SECURITY.md).
-
-Machinist is released under the [MIT License](LICENSE).
+Released under the [MIT License](LICENSE), as upstream.
