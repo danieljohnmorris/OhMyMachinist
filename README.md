@@ -1,4 +1,8 @@
 <p align="center">
+  <img src="docs/assets/logo-dark-padded.png" alt="oh my machinist" width="420">
+</p>
+
+<p align="center">
   <img src=".github/assets/machinist-lockup.svg" width="520" alt="Machinist">
 </p>
 

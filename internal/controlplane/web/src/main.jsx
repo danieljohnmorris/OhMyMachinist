@@ -224,9 +224,11 @@ function App() {
   return (
     <div className="app-shell min-h-screen bg-background text-foreground md:flex">
       <aside className="app-sidebar sticky top-0 z-20 flex shrink-0 items-center border-b border-border bg-sidebar px-3 py-2 md:h-screen md:w-56 md:flex-col md:items-stretch md:border-b-0 md:border-r md:px-4 md:py-5">
-        <div className="brand-lockup flex h-10 items-center gap-3 px-1">
-          <MachinistMark />
-          <span className="brand-wordmark">machinist</span>
+        <div className="brand-lockup flex h-10 items-center px-1">
+          <a href="#/runs" className="brand-logo-link" aria-label="Oh My Machinist home">
+            <img src="/logo-light.png" alt="oh my machinist" className="brand-logo brand-logo-light" width="168" height="49" />
+            <img src="/logo-dark.png" alt="oh my machinist" className="brand-logo brand-logo-dark" width="168" height="49" />
+          </a>
         </div>
         <nav className="ml-4 flex flex-1 gap-1 overflow-x-auto md:ml-0 md:mt-9 md:block md:overflow-visible" aria-label="Primary">
           <a href="#/runs" aria-current={view === "runs" || view === "task" ? "page" : undefined} className={cn("nav-item", (view === "runs" || view === "task") && "nav-item-active")}><Activity className="size-4" /><span>Tasks</span><span className="ml-auto text-xs text-muted-foreground">{counts.all}</span></a>
@@ -392,12 +394,6 @@ function EmptyRuns({ filtered, openComposer }) {
   return <div className="grid place-items-center px-6 py-16 text-center"><span className="grid size-10 place-items-center rounded-full bg-muted text-muted-foreground"><GitBranch className="size-5" /></span><h3 className="mt-3 text-sm font-semibold">{filtered ? "No matching tasks" : "No tasks yet"}</h3><p className="mt-1 max-w-sm text-xs leading-5 text-muted-foreground">{filtered ? "Try a different state filter." : "Describe the work or paste an issue link to get started."}</p>{!filtered && <Button variant="outline" size="sm" className="mt-4" onClick={openComposer}><Plus className="size-3.5" />New task</Button>}</div>;
 }
 
-function MachinistMark() {
-  return <svg className="machinist-mark" viewBox="0 0 64 48" aria-hidden="true">
-    <path className="machinist-mark-piece-a" d="M8 40V18C8 11 12 7 18 7s10 4 10 11v10h4" />
-    <path className="machinist-mark-piece-b" d="M32 28h4V18c0-7 4-11 10-11s10 4 10 11v22" />
-  </svg>;
-}
 
 function selectionChoices(status) {
  const workflows=status.workflows || [];
