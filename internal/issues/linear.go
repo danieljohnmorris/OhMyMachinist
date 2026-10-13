@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+
 	"fmt"
 	"io"
 	"net/http"
@@ -13,23 +14,38 @@ import (
 
 const linearEndpoint = "https://api.linear.app/graphql"
 
+// DefaultLinearResolvedState is used when a Linear issue source does not
+// configure resolved_state explicitly.
+const DefaultLinearResolvedState = "Done"
+
 type LinearConfig struct {
-	APIKey  string
-	Project string
+	APIKey        string
+	Project       string
+	ResolvedState string
 }
 
 type LinearClient struct {
-	config   LinearConfig
-	project  string
-	endpoint string
-	client   *http.Client
+	config        LinearConfig
+	project       string
+	resolvedState string
+	endpoint      string
+	client        *http.Client
 }
 
 func NewLinearClient(config LinearConfig) (*LinearClient, error) {
 	if err := requiresValue(config.APIKey, "LINEAR_API_KEY"); err != nil {
 		return nil, err
 	}
-	return &LinearClient{config: config, project: config.Project, endpoint: linearEndpoint, client: &http.Client{Timeout: 30 * time.Second}}, nil
+	resolvedState := strings.TrimSpace(config.ResolvedState)
+	if resolvedState == "" {
+		resolvedState = DefaultLinearResolvedState
+	}
+	return &LinearClient{config: config, project: config.Project, resolvedState: resolvedState, endpoint: linearEndpoint, client: &http.Client{Timeout: 30 * time.Second}}, nil
+}
+
+// ResolvedState reports the state name used to resolve finished work.
+func (l *LinearClient) ResolvedState() string {
+	return l.resolvedState
 }
 
 func (l *LinearClient) FetchIssue(ctx context.Context, key string) (Issue, error) {
@@ -53,6 +69,10 @@ func (l *LinearClient) FetchIssue(ctx context.Context, key string) (Issue, error
 	return response.Data.Issues.Nodes[0].issue(), nil
 }
 
+// maximumLinearPages bounds cursor pagination so a misbehaving endpoint cannot
+// loop forever; 20 pages at first:100 covers any realistic label backlog.
+const maximumLinearPages = 20
+
 func (l *LinearClient) IssuesWithLabel(ctx context.Context, label string, project string) ([]Issue, error) {
 	if err := requiresValue(label, "label"); err != nil {
 		return nil, err
@@ -63,22 +83,36 @@ func (l *LinearClient) IssuesWithLabel(ctx context.Context, label string, projec
 		projectFilter = "labels: {name: {eq: $label}}, project: {name: {eq: $project}}"
 		variables["project"] = project
 	}
-	var response struct {
-		Data struct {
-			Issues struct {
-				Nodes []linearIssueNode `json:"nodes"`
-			} `json:"issues"`
-		} `json:"data"`
+	query := fmt.Sprintf(`query Issues($label: String!%s, $after: String) { issues(filter: {%s}, first: 100, after: $after) { nodes { id identifier title description url labels { name } team { id } } pageInfo { hasNextPage endCursor } } }`, projectVariableType(project), projectFilter)
+	issues := []Issue{}
+	after := ""
+	for page := 0; ; page++ {
+		var response struct {
+			Data struct {
+				Issues struct {
+					Nodes    []linearIssueNode `json:"nodes"`
+					PageInfo struct {
+						HasNextPage bool   `json:"hasNextPage"`
+						EndCursor   string `json:"endCursor"`
+					} `json:"pageInfo"`
+				} `json:"issues"`
+			} `json:"data"`
+		}
+		variables["after"] = after
+		if err := l.request(ctx, map[string]any{"query": query, "variables": variables}, &response); err != nil {
+			return nil, err
+		}
+		for _, node := range response.Data.Issues.Nodes {
+			issues = append(issues, node.issue())
+		}
+		if !response.Data.Issues.PageInfo.HasNextPage || response.Data.Issues.PageInfo.EndCursor == "" {
+			return issues, nil
+		}
+		if page+1 >= maximumLinearPages {
+			return issues, nil
+		}
+		after = response.Data.Issues.PageInfo.EndCursor
 	}
-	query := fmt.Sprintf(`query Issues($label: String!%s) { issues(filter: {%s}, first: 100) { nodes { id identifier title description url labels { name } team { id } } } }`, projectVariableType(project), projectFilter)
-	if err := l.request(ctx, map[string]any{"query": query, "variables": variables}, &response); err != nil {
-		return nil, err
-	}
-	issues := make([]Issue, 0, len(response.Data.Issues.Nodes))
-	for _, node := range response.Data.Issues.Nodes {
-		issues = append(issues, node.issue())
-	}
-	return issues, nil
 }
 
 // Project reports the configured project name.
@@ -110,7 +144,13 @@ func (l *LinearClient) PostComment(ctx context.Context, key, body string) error 
 	}
 	query := `mutation Comment($issue: String!, $body: String!) { commentCreate(input: {issueId: $issue, body: $body}) { success } }`
 	variables := map[string]string{"issue": issue.ID, "body": body}
-	return l.request(ctx, map[string]any{"query": query, "variables": variables}, &response)
+	if err := l.request(ctx, map[string]any{"query": query, "variables": variables}, &response); err != nil {
+		return err
+	}
+	if !response.Data.CommentCreate.Success {
+		return fmt.Errorf("linear commentCreate failed: %s", key)
+	}
+	return nil
 }
 
 func (l *LinearClient) SetState(ctx context.Context, key, state string) error {
@@ -153,9 +193,47 @@ func (l *LinearClient) SetState(ctx context.Context, key, state string) error {
 		} `json:"data"`
 	}
 	query := `mutation SetState($issue: String!, $state: String!) { issueUpdate(id: $issue, input: {stateId: $state}) { success } }`
-	return l.request(ctx, map[string]any{"query": query, "variables": map[string]string{"issue": issue.ID, "state": stateID}}, &response)
+	if err := l.request(ctx, map[string]any{"query": query, "variables": map[string]string{"issue": issue.ID, "state": stateID}}, &response); err != nil {
+		return err
+	}
+	if !response.Data.IssueUpdate.Success {
+		return fmt.Errorf("linear issueUpdate failed: %s", key)
+	}
+	return nil
 }
 
+// IssueState reports the current workflow state name of the issue.
+func (l *LinearClient) IssueState(ctx context.Context, key string) (string, error) {
+	if err := requiresValue(key, "issue key"); err != nil {
+		return "", err
+	}
+	var response struct {
+		Data struct {
+			Issues struct {
+				Nodes []struct {
+					State struct {
+						Name string `json:"name"`
+					} `json:"state"`
+				} `json:"nodes"`
+			} `json:"issues"`
+		} `json:"data"`
+	}
+	query := `query IssueState($key: String!) { issues(filter: {identifier: {eq: $key}}, first: 1) { nodes { state { name } } } }`
+	if err := l.request(ctx, map[string]any{"query": query, "variables": map[string]string{"key": key}}, &response); err != nil {
+		return "", err
+	}
+	if len(response.Data.Issues.Nodes) == 0 {
+		return "", fmt.Errorf("%w: %s", ErrIssueNotFound, key)
+	}
+	return response.Data.Issues.Nodes[0].State.Name, nil
+}
+
+type graphQLError struct {
+	Message string `json:"message"`
+}
+
+// request performs a GraphQL call and fails on HTTP errors, GraphQL errors,
+// and empty data before decoding the data payload into output.
 func (l *LinearClient) request(ctx context.Context, body any, output any) error {
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -180,7 +258,23 @@ func (l *LinearClient) request(ctx context.Context, body any, output any) error 
 	if response.StatusCode < 200 || response.StatusCode > 299 {
 		return fmt.Errorf("linear request: HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(responseBody)))
 	}
-	return json.Unmarshal(responseBody, output)
+	var envelope struct {
+		Errors []graphQLError `json:"errors"`
+	}
+	if err := json.Unmarshal(responseBody, &envelope); err != nil {
+		return fmt.Errorf("linear request: decode: %w", err)
+	}
+	if len(envelope.Errors) > 0 {
+		messages := make([]string, 0, len(envelope.Errors))
+		for _, graphqlErr := range envelope.Errors {
+			messages = append(messages, graphqlErr.Message)
+		}
+		return fmt.Errorf("linear request: GraphQL error(s): %s", strings.Join(messages, "; "))
+	}
+	if err := json.Unmarshal(responseBody, output); err != nil {
+		return fmt.Errorf("linear request: decode data: %w", err)
+	}
+	return nil
 }
 
 type linearIssueNode struct {

@@ -18,6 +18,9 @@ type PlaneProject struct {
 
 type LinearProject struct {
 	Project string `toml:"project"`
+	// ResolvedState names the Linear workflow state that finished work moves
+	// to; empty selects DefaultLinearResolvedState.
+	ResolvedState string `toml:"resolved_state"`
 }
 
 func DefaultLabel() string {
@@ -55,7 +58,7 @@ func (c Config) PlaneProjects() map[string]PlaneConnection {
 func (c Config) LinearProjects() map[string]LinearConnection {
 	connections := map[string]LinearConnection{}
 	for repository, project := range c.Linear {
-		connections[repository] = LinearConnection{Project: project.Project, APIKey: os.Getenv("LINEAR_API_KEY")}
+		connections[repository] = LinearConnection{Project: project.Project, ResolvedState: project.ResolvedState, APIKey: os.Getenv("LINEAR_API_KEY")}
 	}
 	return connections
 }
@@ -68,8 +71,9 @@ type PlaneConnection struct {
 }
 
 type LinearConnection struct {
-	Project string
-	APIKey  string
+	Project       string
+	ResolvedState string
+	APIKey        string
 }
 
 func NewPlaneConnection(connection PlaneConnection) (*PlaneClient, error) {
@@ -80,5 +84,5 @@ func NewPlaneConnection(connection PlaneConnection) (*PlaneClient, error) {
 }
 
 func NewLinearConnection(connection LinearConnection) (*LinearClient, error) {
-	return NewLinearClient(LinearConfig{APIKey: connection.APIKey, Project: connection.Project})
+	return NewLinearClient(LinearConfig{APIKey: connection.APIKey, Project: connection.Project, ResolvedState: connection.ResolvedState})
 }
