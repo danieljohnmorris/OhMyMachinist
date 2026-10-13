@@ -4,6 +4,12 @@ database = "~/.machinist/server/machinist.db"
 worker_token_file = "~/.machinist/server/worker.token"
 # max_concurrent_jobs = 1
 
+# Library profile used when a repository has no .machinist/review.yaml and no
+# per-project choice in Settings. Set to "dan-pr-review" for Daniel's projects
+# after installing his reviewer skills; otherwise the shipped default runs.
+# [review]
+# default_profile = "dan-pr-review"
+
 # Take a task or GitHub issue to a reviewed pull request.
 [commands.task-to-pr]
 executor = "codex"

@@ -1,3 +1,5 @@
+"""Pure helpers for the post-pull-request review tool."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -7,17 +9,6 @@ import re
 from typing import Iterable
 
 
-CODE_REVIEW_ROLES = (
-    "feature-dev:code-reviewer",
-    "pr-review-toolkit:silent-failure-hunter",
-    "pr-review-toolkit:pr-test-analyzer",
-)
-COMBINED_REVIEW_ROLE = "feature-dev:code-reviewer"
-PROSE_REVIEW_ROLE = "write-as-dan"
-LANGUAGE_REVIEW_ROLES = {
-    "ts": ("typescript-code-review", "typescript-jsdoc"),
-    "rust": ("rust-review",),
-}
 LANGUAGE_EXTENSIONS = {
     ".ts": "ts",
     ".tsx": "ts",
@@ -33,15 +24,6 @@ LANGUAGE_EXTENSIONS = {
     ".bash": "shell",
     ".go": "go",
 }
-SENSITIVE_PATH_MARKERS = (
-    "auth",
-    "secrets",
-    "token",
-    "crypto",
-    "permission",
-    "sandbox",
-    "deploy",
-)
 
 
 @dataclass(frozen=True)
@@ -82,58 +64,6 @@ def detect_language(path: str, content: str | None = None) -> str:
     return "shell" if re.search(r"\b(sh|bash)\b", shebang) else "other"
 
 
-def languages_for_files(files: Iterable[str], contents: dict[str, str] | None = None) -> set[str]:
-    contents = contents or {}
-    return {detect_language(path, contents.get(path)) for path in files}
-
-
-def review_roles(
-    classified: dict[str, set[str]],
-    *,
-    small_combined: bool,
-) -> list[str]:
-    code_files = classified.get("code", set())
-    if small_combined and not classified.get("prose"):
-        return [COMBINED_REVIEW_ROLE]
-    languages = languages_for_files(code_files)
-    roles = list(CODE_REVIEW_ROLES)
-    for language in ("ts", "rust"):
-        if language in languages:
-            roles.extend(LANGUAGE_REVIEW_ROLES[language])
-    if classified.get("prose"):
-        roles.append(PROSE_REVIEW_ROLE)
-    return roles
-
-
-def changed_line_count(diff: str) -> int:
-    return sum(
-        1
-        for line in diff.splitlines()
-        if line.startswith(("+", "-"))
-        and not line.startswith(("+++", "---"))
-    )
-
-
-def is_sensitive_path(path: str) -> bool:
-    normalized = normalize_path(path).lower()
-    return any(marker in normalized for marker in SENSITIVE_PATH_MARKERS)
-
-
-def size_gate(
-    diff: str,
-    files: Iterable[str],
-    *,
-    max_changed_lines: int = 200,
-    max_files: int = 5,
-) -> bool:
-    file_list = list(files)
-    return (
-        len(file_list) <= max_files
-        and changed_line_count(diff) <= max_changed_lines
-        and not any(is_sensitive_path(path) for path in file_list)
-    )
-
-
 def parse_reviewer_output(output: str) -> list[Finding]:
     if output.strip().upper() == "NO FINDINGS":
         return []
@@ -170,3 +100,25 @@ def is_secret_path(path: str) -> bool:
         or basename.startswith("id_")
         or "secret" in basename.lower()
     )
+
+
+# Token shapes redacted from anything published (PR comment, run summary).
+# Profiles and reports must never echo credentials (MACH-32 hard requirement).
+_REDACTION_PATTERNS = (
+    (re.compile(r"gh[pousr]_[A-Za-z0-9]{16,}"), None),
+    (re.compile(r"github_pat_[A-Za-z0-9_]{16,}"), None),
+    (re.compile(r"AKIA[0-9A-Z]{16}"), None),
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"), None),
+    (re.compile(r"(?i)(authorization\s*[:=]\s*(?:bearer|basic|token)\s+)\S+"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)\b((?:api[_-]?key|token|secret|password|passwd)\s*[=:]\s*)[^\s'\"&]{8,}"), r"\1[REDACTED]"),
+)
+
+
+def redact(text: str) -> str:
+    """Mask credential-shaped strings in command output before publication."""
+    if not text:
+        return text
+    result = text
+    for pattern, replacement in _REDACTION_PATTERNS:
+        result = pattern.sub(replacement or "[REDACTED]", result)
+    return result

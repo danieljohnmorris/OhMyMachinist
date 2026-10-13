@@ -1,16 +1,44 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { instructionsFromPayload } from "./review-settings.js";
+import { resolvedFromPayload, profilesFromPayload } from "./review-settings.js";
 import { routeFromHash } from "./routes.js";
 
-test("payload parsing keeps stored instructions and custom flag", () => {
-  assert.deepEqual(instructionsFromPayload({ instructions: "# rules", custom: true }), { instructions: "# rules", custom: true });
+test("payload parsing keeps the resolved profile fields", () => {
+  assert.deepEqual(
+    resolvedFromPayload({
+      project: "omacom/mobile",
+      source: "project",
+      profile_name: "mobile-profile",
+      profile: "name: mobile-profile\nversion: 1\n",
+      extra_instructions: "extra rules",
+    }),
+    {
+      project: "omacom/mobile",
+      source: "project",
+      profileName: "mobile-profile",
+      profile: "name: mobile-profile\nversion: 1\n",
+      extraInstructions: "extra rules",
+    },
+  );
 });
 
-test("payload parsing falls back to the default shape", () => {
-  assert.deepEqual(instructionsFromPayload({ instructions: "seeded", custom: false }), { instructions: "seeded", custom: false });
-  assert.deepEqual(instructionsFromPayload(undefined), { instructions: "", custom: false });
-  assert.deepEqual(instructionsFromPayload({ instructions: 42 }), { instructions: "", custom: false });
+test("payload parsing falls back to the empty shape", () => {
+  assert.deepEqual(resolvedFromPayload(undefined), { project: "", source: "", profileName: "", profile: "", extraInstructions: "" });
+  assert.deepEqual(resolvedFromPayload({ profile: 42 }), { project: "", source: "", profileName: "", profile: "", extraInstructions: "" });
+});
+
+test("library payload parsing keeps built-in flags", () => {
+  assert.deepEqual(
+    profilesFromPayload({ default: "default", profiles: [{ name: "default", built_in: true, body: "x" }, { name: "custom" }] }),
+    {
+      defaultName: "default",
+      profiles: [
+        { name: "default", builtIn: true, body: "x" },
+        { name: "custom", builtIn: false, body: "" },
+      ],
+    },
+  );
+  assert.deepEqual(profilesFromPayload(undefined), { defaultName: "", profiles: [] });
 });
 
 test("settings is a routable page", () => {

@@ -102,6 +102,35 @@ PLANE_WORKSPACE=
 PLANE_API_KEY=
 ```
 
+## PR review profiles
+
+A review profile is YAML (or markdown with YAML frontmatter) declaring the whole review:
+
+- `scope`: `pin_head_sha` (findings tie to the head SHA; affected steps re-run if the head moves), `lanes_from` (`diff` or `repo`), `mode` (`review_only` or `amend` — amend allows pushing fixes to the PR branch).
+- `checks.lanes[]`: each lane has a `when` glob list and ordered `commands`. A command is a string or `{run, if_exists, if_script, if_configured, optional, else, requires_authorization}`; `{changed}`, `{changed_py}`, `{changed_shell}` expand to the matched files. `checks.blocking` is `new_failures` (new vs base block; pre-existing is reported only) and `checks.missing_tool` is `blocked`, `skip`, or `pass` (blocked never counts as a pass). A command with `requires_authorization: deploy` is skipped and reported pending unless the run is started with `--authorized deploy` (or `MACHINIST_REVIEW_AUTHORIZED=deploy`).
+- `reviewers[]`: named reviewer passes, each with `skills` (names from the installed skills library — e.g. `feature-dev:code-reviewer` — or an inline `prompt`), optional `model`/`effort`, `lanes` filters, `when` globs, `read_only`, `optional`, `trigger: on_request` (runs only when the PR carries the `machinist:adversarial` label), and `routing_only`.
+- `routing`: `rules` map file globs to passes (mixed PRs get every matching pass; an unreadable file list falls back), plus the `fallback` reviewer set.
+- `concurrency`: reviewer waves; a required pass is never dropped, only delayed.
+- `reconcile`: `dedupe` and `verify_against_code` (findings outside the changed files are marked unverified).
+- `docs`: `enabled`, `files`, `update_pr_description`.
+- `blocking`: `severities` and `amend_rounds` (replaces `MACHINIST_REVIEW_AMEND_ROUNDS`; CLI/env still override).
+- `output`: `pr_comment`, `commit_status` (default `machinist/review`), and `report` sections.
+
+**Precedence.** The review resolves the profile in this order, first match wins:
+
+1. `.machinist/review.yaml` (or `.machinist/review.md`) in the repository **at the PR base ref** — so a pull request cannot weaken its own review.
+2. The project's setting in **Settings** (a library profile name or a full YAML body, plus optional extra instructions).
+3. The instance-wide **default profile**: the Settings global default picker, else `review.default_profile` in the control-plane config, else the shipped `default` profile.
+4. The shipped default profile bundled with the review step.
+
+Shipped profiles live in [`profiles/review/`](profiles/review/) (`default`, and `dan-pr-review` ported from [pr-review-skill](https://github.com/danieljohnmorris/pr-review-skill/blob/main/SKILL.md) — set `default_profile = "dan-pr-review"` under `[review]` in the config, or pick it per project in Settings). A minimal worked example is at [`examples/review/basic.yaml`](examples/review/basic.yaml). The old free-text per-project instructions were migrated into each project's profile as extra instructions; nothing was lost.
+
+**Skills.** Reviewer `skills` reference names in the installed skills library (`~/.agents/skills`, seeded from `deploy/factory/review/skills/`). Nothing is fetched at review time; if a required skill is missing the pass is reported INCOMPLETE, and an `optional` pass is skipped with a note. Install additional reviewer skills with `machinist review install-skill <github SKILL.md url>`; the shared skills loader (MACH-33) extends this stub with version pinning and caching.
+
+**Settings editor.** Settings shows the resolved source, a library profile picker, an inline YAML editor, extra instructions, the global default picker, and a no-execution **preview**: paste changed-file paths and see the resolved profile source, matched lanes, checks, and reviewer passes. Saves are validated server-side and rejected with line-numbered errors (unknown keys, bad globs, unknown pass refs).
+
+**Secrets.** Profiles and the PR comment never echo credentials: token-shaped strings in check and reviewer output are redacted before publication, the installer refuses payloads with secret findings, and CI runs a gitleaks scan on every PR. Secrets come only from the environment or a systemd `EnvironmentFile` outside git.
+
 ## In progress
 
 - **Pluggable trackers.** Plane today, Linear planned.

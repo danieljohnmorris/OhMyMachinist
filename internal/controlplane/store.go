@@ -273,6 +273,19 @@ CREATE TABLE IF NOT EXISTS review_instructions (
  repository TEXT PRIMARY KEY,
  instructions TEXT NOT NULL,
  updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS review_profiles (
+ name TEXT PRIMARY KEY,
+ body TEXT NOT NULL,
+ updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS project_review_settings (
+ repository TEXT PRIMARY KEY,
+ profile_name TEXT NOT NULL DEFAULT '',
+ profile_body TEXT NOT NULL DEFAULT '',
+ extra_instructions TEXT NOT NULL DEFAULT '',
+ updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS settings (
+ key TEXT PRIMARY KEY,
+ value TEXT NOT NULL);
 CREATE TRIGGER IF NOT EXISTS job_state_history_insert AFTER INSERT ON jobs
 BEGIN
  INSERT INTO job_state_history(job_id,state,changed_at) VALUES (new.id,new.state,new.created_at);
@@ -283,6 +296,9 @@ BEGIN
 END;`
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("initialize database: %w", err)
+	}
+	if err := s.migrateReviewInstructions(ctx); err != nil {
+		return fmt.Errorf("migrate review instructions: %w", err)
 	}
 	if version < 3 {
 		if err := s.upgradeWorkflows(ctx); err != nil {
