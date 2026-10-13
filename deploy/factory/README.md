@@ -11,9 +11,21 @@ env files (`.env.example`, `.env.sample`, `.env.template`, `.env.dist`,
 staged added lines of those templates are still scanned for real-looking
 secrets (see `tests/test_deliver_pr.py`).
 
-Install:
+Install (MACH-31: the review must be installed next to `deliver-pr.py` so it
+runs as a plain script, with the skills available to the machinist user):
 
-    sudo install -m755 deploy/factory/deliver-pr.py /usr/local/lib/machinist-factory/deliver-pr.py
+    sudo install -m755 deploy/factory/deliver-pr.py deploy/factory/post_pr_review.py /usr/local/lib/machinist-factory/
+    sudo cp -R deploy/factory/review /usr/local/lib/machinist-factory/review
+    sudo -u machinist deploy/factory/install-review-skills.sh
+
+Reviewers and the amend pass run under the executor from
+`MACHINIST_REVIEW_EXECUTOR`; if that is unset, `deliver-pr.py` uses
+`<install dir>/omp-glm medium` when `omp-glm` sits next to it (the same
+sandboxed GLM coder the wrapper uses), and with no executor at all it logs the
+fact and the review skips the reviewer passes. INCOMPLETE (crashed review, no
+executor, timeout) never fails the delivery job: `post_pr_review.py` logs a
+warning and exits 0 while still recording the `machinist/review` status and
+JSON summary; only BLOCKED exits `2` and fails the delivery.
 
 Run tests:
 

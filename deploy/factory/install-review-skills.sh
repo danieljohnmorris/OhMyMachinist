@@ -8,7 +8,16 @@
 # Usage: install-review-skills.sh [target-dir]
 set -euo pipefail
 
-source_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/skills"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Skills live in review/skills next to this script (both in the repo and in a
+# flat install); fall back to a sibling skills/ for older layouts.
+if [[ -d "$script_dir/skills" ]]; then
+  source_dir="$script_dir/skills"
+elif [[ -d "$script_dir/review/skills" ]]; then
+  source_dir="$script_dir/review/skills"
+else
+  source_dir="$script_dir/skills"
+fi
 target_dir="${1:-$HOME/.agents/skills}"
 
 if [[ ! -d "$source_dir" ]]; then

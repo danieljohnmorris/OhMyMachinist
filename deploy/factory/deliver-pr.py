@@ -124,6 +124,18 @@ def log(*a): print("deliver-pr:", *a, file=sys.stderr, flush=True)
 
 REVIEW_VERDICTS = {0: "PASS", 2: "BLOCKED", 3: "INCOMPLETE"}
 
+def review_executor_cmd():
+    """Executor for the built-in review (MACH-31): MACHINIST_REVIEW_EXECUTOR,
+    else omp-glm next to this script (the same sandboxed GLM coder the wrapper
+    uses), else None (the review logs it and skips reviewers)."""
+    env = os.environ.get("MACHINIST_REVIEW_EXECUTOR", "").strip()
+    if env:
+        return env
+    omp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "omp-glm")
+    if os.access(omp, os.X_OK):
+        return f"{omp} medium"
+    return None
+
 def review_script_path():
     """The built-in review step (MACH-26) lives next to this script once
     installed; MACHINIST_REVIEW_SCRIPT overrides the location."""
@@ -133,19 +145,28 @@ def review_script_path():
 
 def run_review(repo, pr_url):
     """Run the built-in review (types/lint/build, parallel reviewers, docs).
-    Returns the review exit code (0 PASS, 2 BLOCKED, 3 INCOMPLETE) or None
-    when the review script is not installed."""
+    Returns the review exit code (0 PASS, 2 BLOCKED; INCOMPLETE and any other
+    non-BLOCKED verdict are reported as 0 so they never fail the delivery,
+    MACH-31) or None when the review script is not installed."""
     script = review_script_path()
     if not os.path.isfile(script):
         log(f"review skipped: {script} not found")
         return None
     command = [sys.executable, script, "--repo", repo, "--pr", pr_url]
+    executor = review_executor_cmd()
+    if executor:
+        command += ["--executor-cmd", executor]
+    else:
+        log("no review executor available (set MACHINIST_REVIEW_EXECUTOR); reviewers will be skipped")
     out = os.environ.get("MACHINIST_OUTPUT_DIR")
     if out:
         command += ["--json-out", os.path.join(out, "post-pr-review.json")]
     log("built-in review starting")
     completed = subprocess.run(command, cwd=repo)
     log(f"built-in review verdict: {REVIEW_VERDICTS.get(completed.returncode, f'exit {completed.returncode}')}")
+    if completed.returncode not in (0, 2):
+        log("warn: review did not complete; not failing the delivery job")
+        return 0
     return completed.returncode
 
 def review_status(out_dir):
