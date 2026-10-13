@@ -69,6 +69,18 @@ fi
 [ "$actual" = "$expected" ] || fail "checksum mismatch for $archive_name"
 
 tar -xzf "$temporary_dir/$archive_name" -C "$temporary_dir" machinist
+
+# Hard requirement: never install from a tree with secret findings. The
+# release archive contains only the binary; scan the extracted payload when
+# gitleaks is available so a tampered or mistakenly published archive is
+# refused instead of installed.
+if command -v gitleaks >/dev/null 2>&1; then
+  mkdir -p "$temporary_dir/payload"
+  tar -xzf "$temporary_dir/$archive_name" -C "$temporary_dir/payload"
+  gitleaks detect --source "$temporary_dir/payload" --no-git --redact --verbose || \
+    fail "secret scan found findings in the release payload; refusing to install"
+fi
+
 mkdir -p "$install_dir"
 install -m 0755 "$temporary_dir/machinist" "$install_dir/machinist"
 
