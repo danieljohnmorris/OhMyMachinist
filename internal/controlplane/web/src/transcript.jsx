@@ -44,15 +44,24 @@ export function Transcript({ run, csrfToken }) {
     };
   }, [run?.id, run?.state, csrfToken, state.attempt]);
   const lines = state.runID === run?.id ? transcriptLines(state.events) : [];
+  // The transcript grows with the page (no inner scroll box). While live, the
+  // window follows new output as long as the reader is near the bottom.
+  useEffect(() => {
+    if (!live) return undefined;
+    const trackFollow = () => {
+      const page = document.scrollingElement || document.documentElement;
+      following.current = page.scrollHeight - window.scrollY - window.innerHeight <= followThresholdPixels;
+    };
+    window.addEventListener("scroll", trackFollow, { passive: true });
+    return () => window.removeEventListener("scroll", trackFollow);
+  }, [live]);
   useEffect(() => {
     const element = scroller.current;
-    if (live && element && following.current) element.scrollTop = element.scrollHeight;
+    if (live && element && following.current) {
+      const page = document.scrollingElement || document.documentElement;
+      window.scrollTo({ top: page.scrollHeight });
+    }
   }, [lines.length, live]);
-  function trackFollow() {
-    const element = scroller.current;
-    if (!element) return;
-    following.current = element.scrollHeight - element.scrollTop - element.clientHeight <= followThresholdPixels;
-  }
   function retry() {
     setState((current) => ({ ...current, error: "", attempt: current.attempt + 1 }));
   }
@@ -73,8 +82,7 @@ export function Transcript({ run, csrfToken }) {
       ) : (
         <pre
           ref={scroller}
-          onScroll={trackFollow}
-          className="h-[480px] overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-muted/40 p-3 font-mono text-xs leading-5"
+          className="whitespace-pre-wrap break-words rounded-md border border-border bg-muted/40 p-3 font-mono text-xs leading-5"
         >
           {lines.length
             ? lines.map((entry, index) => (

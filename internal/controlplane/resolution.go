@@ -184,6 +184,9 @@ func (s *Server) resolveTicket(ctx context.Context, jobs []Job, key string, cach
 // then roughly every ten minutes. Jobs are grouped by ticket so each ticket
 // costs one lookup, and lookups are paced to stay under Plane's rate limit.
 func (s *Server) reconcileTicketOutcomes(ctx context.Context) error {
+	if err := s.store.linkTicketAttempts(ctx); err != nil {
+		log.Printf("link ticket attempts: %v", err)
+	}
 	jobs, err := s.store.listJobs(ctx)
 	if err != nil {
 		return fmt.Errorf("list jobs for resolution: %w", err)
