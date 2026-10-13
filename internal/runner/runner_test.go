@@ -100,8 +100,11 @@ func TestExecuteStreamsPromptAndPersistsOrderedResult(t *testing.T) {
 	}
 
 	events := readEvents(t, result.EventsPath)
-	if len(events) != 5 {
+	if len(events) != 6 {
 		t.Fatalf("events = %#v", events)
+	}
+	if events[1].Type != "lane.fetch.skipped" {
+		t.Fatalf("event 1 = %#v", events[1])
 	}
 	for index, event := range events {
 		if event.Sequence != int64(index+1) {
@@ -624,6 +627,138 @@ func TestResolveRepositoryReturnsRootAndRejectsNonGitDirectory(t *testing.T) {
 	if _, err := ResolveRepository(t.TempDir()); err == nil || !strings.Contains(err.Error(), "not inside a Git worktree") {
 		t.Fatalf("expected Git error, got %v", err)
 	}
+}
+
+func TestExecuteFastForwardsLaneBaseBranch(t *testing.T) {
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	runGitCommand(t, "", "init", "--bare", "--quiet", origin)
+	runGitCommand(t, origin, "symbolic-ref", "HEAD", "refs/heads/main")
+	seed := filepath.Join(t.TempDir(), "seed")
+	runGitCommand(t, "", "init", "--quiet", seed)
+	runGitCommand(t, seed, "symbolic-ref", "HEAD", "refs/heads/main")
+	runGitCommand(t, seed, "commit", "--allow-empty", "-m", "initial")
+	runGitCommand(t, seed, "remote", "add", "origin", origin)
+	runGitCommand(t, seed, "push", "--quiet", "origin", "main")
+	lane := filepath.Join(t.TempDir(), "lane")
+	runGitCommand(t, "", "clone", "--quiet", origin, lane)
+	runGitCommand(t, seed, "commit", "--allow-empty", "-m", "update")
+	runGitCommand(t, seed, "push", "--quiet", "origin", "main")
+	expected := runGitCommand(t, seed, "rev-parse", "HEAD")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	result, err := Execute(context.Background(), Options{
+		Command:       helperAgent("echo", time.Second),
+		Repository:    lane,
+		DataDirectory: t.TempDir(),
+		Stdout:        &stdout,
+		Stderr:        &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.State != StateSucceeded || result.ExitCode != 0 {
+		t.Fatalf("result = %#v", result)
+	}
+	if got := runGitCommand(t, lane, "rev-parse", "HEAD"); got != expected {
+		t.Fatalf("lane HEAD = %s, want %s", got, expected)
+	}
+	events := readEvents(t, result.EventsPath)
+	fetched := false
+	for _, event := range events {
+		if event.Type == "lane.fetch" && strings.Contains(event.Message, "fast-forwarded main to origin/main") {
+			fetched = true
+		}
+	}
+	if !fetched {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
+func TestExecuteRefusesDirtyLane(t *testing.T) {
+	repository := newGitRepository(t)
+	if err := os.WriteFile(filepath.Join(repository, "tracked.txt"), []byte("clean"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitCommand(t, repository, "add", "tracked.txt")
+	runGitCommand(t, repository, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "seed", "--quiet")
+	if err := os.WriteFile(filepath.Join(repository, "tracked.txt"), []byte("dirty"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	result, err := Execute(context.Background(), Options{
+		Command:       helperAgent("echo", time.Second),
+		Repository:    repository,
+		DataDirectory: t.TempDir(),
+		Stdout:        &stdout,
+		Stderr:        &stderr,
+	})
+	var outcome *OutcomeError
+	if !errors.As(err, &outcome) || outcome.State != StateFailed || outcome.ExitCode != 1 {
+		t.Fatalf("error = %#v", err)
+	}
+	if result.State != StateFailed || result.ExitCode != 1 {
+		t.Fatalf("result = %#v", result)
+	}
+	if !strings.Contains(outcome.Error(), "lane checkout is dirty") {
+		t.Fatalf("error = %q", outcome.Error())
+	}
+	events := readEvents(t, result.EventsPath)
+	if last := events[len(events)-1]; last.Type != "run.completed" || !strings.Contains(last.Message, "dirty") {
+		t.Fatalf("last event = %#v", last)
+	}
+	for _, event := range events {
+		if event.Type == "process.started" {
+			t.Fatalf("agent started despite dirty lane: %#v", event)
+		}
+	}
+}
+
+func TestExecuteSkipsFetchWithoutOrigin(t *testing.T) {
+	repository := newGitRepository(t)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	result, err := Execute(context.Background(), Options{
+		Command:       helperAgent("echo", time.Second),
+		Repository:    repository,
+		DataDirectory: t.TempDir(),
+		Stdout:        &stdout,
+		Stderr:        &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.State != StateSucceeded || result.ExitCode != 0 {
+		t.Fatalf("result = %#v", result)
+	}
+	events := readEvents(t, result.EventsPath)
+	skipped := false
+	for _, event := range events {
+		if event.Type == "lane.fetch.skipped" {
+			skipped = true
+		}
+	}
+	if !skipped {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
+func runGitCommand(t *testing.T, directory string, arguments ...string) string {
+	t.Helper()
+	command := exec.Command("git", arguments...)
+	if directory != "" {
+		command.Dir = directory
+	}
+	command.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
+	)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v: %s", arguments, err, output)
+	}
+	return strings.TrimSpace(string(output))
 }
 
 func helperAgent(mode string, timeout time.Duration) config.ResolvedCommand {
