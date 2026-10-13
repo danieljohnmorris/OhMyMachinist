@@ -328,6 +328,17 @@ export function groupEntriesByBoardColumn(entries) {
   return groups;
 }
 
+// Board cards the filters hide even though the other active filters would
+// allow them: succeeded, resolved and cancelled tickets when "Show succeeded"
+// is off, restricted to the date window. Columns show how many they hide so a
+// zero badge is not mistaken for no work.
+export function hiddenBoardEntries(jobs, dateFilter, showSucceeded, now = new Date()) {
+  if (showSucceeded) return [];
+  const datedIds = new Set(filterJobsByDate(jobs, dateFilter, now).map((job) => job.id));
+  return collapseJobsByTicket(jobs).filter((entry) =>
+    datedIds.has(entry.latest.id) && filterBoardJobs([entry.latest], false).length === 0);
+}
+
 export function jobDisplayTitle(job) {
   const storedTitle = typeof job.title === "string" ? job.title.trim() : "";
   const title = typeof job.github_issue_title === "string" ? job.github_issue_title.trim() : "";

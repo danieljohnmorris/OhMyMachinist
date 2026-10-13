@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { attemptDurationMillis, attemptStart, attemptTime, boardCardTimestamp, boardColumnForState, boardDateFilters, boardDateWindow, boardFiltersFromHash, boardFiltersFromParams, boardHash, boardParamsFromFilters, canCancelJob, collapseIssueAttempts, collapseJobsByTicket, filterBoardJobs, filterJobs, filterJobsByDate, githubIssueReference, groupJobsByBoardColumn, jobCounts, jobDisplayTitle, jobTicketKey, needsAttention, priorAttempts, resolutionLabel, supersededJob, ticketAttempts } from "./runs-board.js";
+import { attemptDurationMillis, attemptStart, attemptTime, boardCardTimestamp, boardColumnForState, boardDateFilters, boardDateWindow, boardFiltersFromHash, boardFiltersFromParams, boardHash, boardParamsFromFilters, canCancelJob, collapseIssueAttempts, collapseJobsByTicket, filterBoardJobs, filterJobs, filterJobsByDate, githubIssueReference, groupEntriesByBoardColumn, groupJobsByBoardColumn, hiddenBoardEntries, jobCounts, jobDisplayTitle, jobTicketKey, needsAttention, priorAttempts, resolutionLabel, supersededJob, ticketAttempts } from "./runs-board.js";
 
 test("board card timestamps prefer run completion for finished jobs and last update otherwise", () => {
   const finishedJob = {
@@ -89,6 +89,31 @@ test("board shows active and failed by default; Show succeeded adds succeeded an
 
   assert.deepEqual(filterBoardJobs(jobs, false).map(({ id }) => id), ["queued", "running", "failed", "timed_out"]);
   assert.deepEqual(filterBoardJobs(jobs, true).map(({ id }) => id), ["queued", "running", "failed", "timed_out", "succeeded", "resolved", "cancelled"]);
+});
+
+test("hidden board entries count the cards filters hide, respecting the date window", () => {
+  const now = new Date(2026, 5, 15, 12, 0, 0);
+  const jobs = [
+    { id: "old_attempt", state: "failed", prompt: "MACH-35 Hidden count", created_at: new Date(2026, 5, 14, 9, 0, 0).toISOString() },
+    { id: "ticket_succeeded", state: "succeeded", prompt: "MACH-35 Hidden count", created_at: new Date(2026, 5, 15, 8, 0, 0).toISOString() },
+    { id: "plain_succeeded", state: "succeeded", created_at: new Date(2026, 5, 15, 7, 0, 0).toISOString() },
+    { id: "stale_succeeded", state: "succeeded", created_at: new Date(2026, 5, 8, 7, 0, 0).toISOString() },
+    { id: "running", state: "running", created_at: new Date(2026, 5, 15, 6, 0, 0).toISOString() },
+  ];
+
+  // One card per ticket: the collapsed succeeded ticket hides once, not once
+  // per attempt, and visible states never count as hidden.
+  const hidden = hiddenBoardEntries(jobs, "all", false, now);
+  assert.deepEqual(hidden.map((entry) => entry.latest.id), ["ticket_succeeded", "plain_succeeded", "stale_succeeded"]);
+  const groupedHidden = groupEntriesByBoardColumn(hidden);
+  assert.equal(groupedHidden.finished.length, 3);
+  assert.equal(groupedHidden.queued.length + groupedHidden.running.length + groupedHidden.attention.length, 0);
+
+  // The date filter bounds the count: only cards inside the window are hidden.
+  assert.deepEqual(hiddenBoardEntries(jobs, "last7", false, now).map((entry) => entry.latest.id), ["ticket_succeeded", "plain_succeeded"]);
+
+  // With Show succeeded on, nothing is hidden.
+  assert.deepEqual(hiddenBoardEntries(jobs, "all", true, now), []);
 });
 
 test("board filters parse from and serialize to the URL hash, omitting defaults", () => {

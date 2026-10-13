@@ -13,7 +13,7 @@ import { Card } from "@/components/ui/card";
 import { PageHeading } from "@/components/ui/page-heading";
 import { cn } from "@/lib/utils";
 import { routeFromHash } from "@/routes";
-import { attemptTime, boardCardTimestamp, boardColumns, boardDateFilters, boardFiltersFromHash, boardHash, canCancelJob, collapseIssueAttempts, collapseJobsByTicket, currentRun, filterBoardJobs, filterJobsByDate, groupEntriesByBoardColumn, groupJobsByBoardColumn, jobCounts, jobDisplayTitle, resolutionLabel } from "@/runs-board";
+import { attemptTime, boardCardTimestamp, boardColumns, boardDateFilters, boardFiltersFromHash, boardHash, canCancelJob, collapseIssueAttempts, collapseJobsByTicket, currentRun, filterBoardJobs, filterJobsByDate, groupEntriesByBoardColumn, groupJobsByBoardColumn, hiddenBoardEntries, jobCounts, jobDisplayTitle, resolutionLabel } from "@/runs-board";
 import { groupEntriesByProject, groupJobsByProject } from "@/project";
 import { concurrencyLabel } from "@/concurrency";
 import { createStatusLoader } from "@/status-loader";
@@ -113,6 +113,11 @@ function App() {
     return collapseJobsByTicket(status.jobs).filter((entry) =>
       datedIds.has(entry.latest.id) && filterBoardJobs([entry.latest], filters.showSucceeded).length > 0);
   }, [filters.dateFilter, filters.showSucceeded, status.jobs]);
+  // Cards the current filters hide but the other filters would allow, so each
+  // column can show how many it hides (e.g. "0 · 12 hidden").
+  const hiddenEntries = useMemo(() =>
+    hiddenBoardEntries(status.jobs, filters.dateFilter, filters.showSucceeded),
+  [filters.dateFilter, filters.showSucceeded, status.jobs]);
 
   const connectedWorkers = status.workers.filter((worker) => worker.connected).length;
   const selectedJob = route.jobID ? status.jobs.find((job) => job.id === route.jobID) : undefined;
@@ -284,7 +289,8 @@ function App() {
               </div>
             </div>
 
-            {filters.runsView === "board" ? (filters.boardLayout === "projects" ? <ProjectRunBoard entries={boardEntries} onCancelJob={cancelJob} /> : <RunBoard entries={boardEntries} onCancelJob={cancelJob} />) : <Card className="overflow-hidden">
+            {filters.runsView === "board" ? (filters.boardLayout === "projects" ? <ProjectRunBoard entries={boardEntries} hiddenEntries={hiddenEntries} onCancelJob={cancelJob} onShowSucceeded={() => updateBoardFilters({ showSucceeded: true })} /> : <RunBoard entries={boardEntries} hiddenEntries={hiddenEntries} onCancelJob={cancelJob} onShowSucceeded={() => updateBoardFilters({ showSucceeded: true })} />) : <Card className="overflow-hidden">
+              {displayJobs.length - visibleJobs.length > 0 && <HiddenCards count={displayJobs.length - visibleJobs.length} onShow={() => updateBoardFilters({ showSucceeded: true })} />}
               {visibleJobs.length ? visibleJobs.map((job) => <RunRow key={job.id} job={job} onCancelJob={cancelJob} />) : <EmptyRuns filtered={!filters.showSucceeded} openComposer={() => setComposerOpen(true)} />}
             </Card>}
           </section>
@@ -317,41 +323,52 @@ function RunComposer({ title,setTitle,sourceURL,setSourceURL,choices,repositorie
   </Card>;
 }
 
-function RunBoard({ entries, onCancelJob }) {
+function RunBoard({ entries, hiddenEntries = [], onCancelJob, onShowSucceeded }) {
   const groupedEntries = groupEntriesByBoardColumn(entries);
+  const groupedHidden = groupEntriesByBoardColumn(hiddenEntries);
   return <div className="grid min-w-0 gap-4 md:grid-cols-2 xl:grid-cols-4">
-    {boardColumns.map((column) => <RunColumn key={column.id} column={column} entries={groupedEntries[column.id]} idPrefix="board" onCancelJob={onCancelJob} />)}
+    {boardColumns.map((column) => <RunColumn key={column.id} column={column} entries={groupedEntries[column.id]} hiddenEntries={groupedHidden[column.id]} idPrefix="board" onCancelJob={onCancelJob} onShowSucceeded={onShowSucceeded} />)}
   </div>;
 }
 
-function ProjectRunBoard({ entries, onCancelJob }) {
+function ProjectRunBoard({ entries, hiddenEntries = [], onCancelJob, onShowSucceeded }) {
+  const hiddenByProject = new Map(groupEntriesByProject(hiddenEntries));
   const projectGroups = groupEntriesByProject(entries);
   return <div className="grid min-w-0 gap-6">
     {projectGroups.map(([project, projectEntries]) => {
       const groupedEntries = groupEntriesByBoardColumn(projectEntries);
+      const groupedHidden = groupEntriesByBoardColumn(hiddenByProject.get(project) || []);
       return <section key={project} className="min-w-0" aria-labelledby={`project-${project}`}>
         <header className="mb-2 flex items-center justify-between gap-3">
           <h2 id={`project-${project}`} className="text-base font-semibold">{project}</h2>
           <Badge className="shrink-0 border-border bg-surface text-muted-foreground" aria-label={`${projectEntries.length} visible ${project} runs`}>{projectEntries.length}</Badge>
         </header>
         <div className="grid min-w-0 gap-4 md:grid-cols-2 xl:grid-cols-4">
-          {boardColumns.map((column) => <RunColumn key={column.id} column={column} entries={groupedEntries[column.id]} idPrefix={`project-${project}`} onCancelJob={onCancelJob} />)}
+          {boardColumns.map((column) => <RunColumn key={column.id} column={column} entries={groupedEntries[column.id]} hiddenEntries={groupedHidden[column.id]} idPrefix={`project-${project}`} onCancelJob={onCancelJob} onShowSucceeded={onShowSucceeded} />)}
         </div>
       </section>;
     })}
   </div>;
 }
 
-function RunColumn({ column, entries, idPrefix, onCancelJob }) {
+function RunColumn({ column, entries, hiddenEntries = [], idPrefix, onCancelJob, onShowSucceeded }) {
   return <section className="run-column min-w-0 border border-border bg-muted/20" aria-labelledby={`${idPrefix}-${column.id}`}>
     <header className="flex items-center justify-between gap-3 border-b border-border px-3 py-2.5">
       <div className="min-w-0"><h2 id={`${idPrefix}-${column.id}`} className="text-sm font-semibold">{column.title}</h2><p className="break-words text-xs text-muted-foreground">{column.description}</p></div>
-      <Badge className="shrink-0 border-border bg-surface text-muted-foreground" aria-label={`${entries.length} visible ${column.title.toLowerCase()} runs`}>{entries.length}</Badge>
+      <Badge className="shrink-0 border-border bg-surface text-muted-foreground" aria-label={`${entries.length} visible ${column.title.toLowerCase()} runs${hiddenEntries.length ? `, ${hiddenEntries.length} hidden` : ""}`}>{entries.length}{hiddenEntries.length ? ` · ${hiddenEntries.length} hidden` : ""}</Badge>
     </header>
+    {hiddenEntries.length > 0 && <HiddenCards count={hiddenEntries.length} onShow={onShowSucceeded} />}
     <div className="grid min-w-0 gap-2 p-2">
       {entries.length ? entries.map((entry) => <RunCard key={entry.latest.id} job={entry.latest} priors={entry.priors} onCancelJob={onCancelJob} />) : <p className="px-2 py-8 text-center text-xs text-muted-foreground">No runs</p>}
     </div>
   </section>;
+}
+
+function HiddenCards({ count, onShow }) {
+  return <p className="border-b border-border px-3 py-1.5 text-xs text-muted-foreground">
+    {count} hidden.{" "}
+    <button type="button" className="underline transition hover:text-foreground" onClick={onShow}>Show</button>
+  </p>;
 }
 
 function attemptBadges(job) {
