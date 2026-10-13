@@ -12,7 +12,7 @@ import { Card } from "@/components/ui/card";
 import { PageHeading } from "@/components/ui/page-heading";
 import { cn } from "@/lib/utils";
 import { routeFromHash } from "@/routes";
-import { boardCardTimestamp, boardColumns, currentRun, filterJobs, groupJobsByBoardColumn, jobCounts, jobDisplayTitle } from "@/runs-board";
+import { boardCardTimestamp, boardColumns, canCancelJob, currentRun, filterJobs, groupJobsByBoardColumn, jobCounts, jobDisplayTitle } from "@/runs-board";
 import { groupJobsByProject } from "@/project";
 import { createStatusLoader } from "@/status-loader";
 import { TriggersPage } from "@/triggers";
@@ -145,6 +145,17 @@ function App() {
     } catch (error) { setTaskActionError(error.message); }
   }
 
+  async function cancelJob(job) {
+    setTaskActionError("");
+    try {
+      const response = await fetch(`/api/v1/jobs/${encodeURIComponent(job.id)}/cancel`, {
+        method: "POST", headers: { "X-Machinist-CSRF": status.csrf_token },
+      });
+      if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.error || "Unable to cancel job"); }
+      await statusLoader.current.refresh();
+    } catch (error) { setTaskActionError(error.message); }
+  }
+
   async function deleteJob(job) {
     if (!window.confirm(`Delete task ${shortId(job.id)} and all of its stored run data?`)) return;
     setDeletingJob(job.id);
@@ -193,7 +204,7 @@ function App() {
       </aside>
 
       <main className="workshop min-w-0 flex-1">
-        {view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={selectedJob} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : view === "workers" ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} /> : view === "triggers" ? <TriggersPage triggers={status.triggers || []} loaded={statusLoaded} error={statusError} /> : ["commands", "workflows"].includes(view) ? <CommandsPage /> : <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
+        {view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={selectedJob} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} onCancelJob={cancelJob} /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : view === "workers" ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} /> : view === "triggers" ? <TriggersPage triggers={status.triggers || []} loaded={statusLoaded} error={statusError} /> : ["commands", "workflows"].includes(view) ? <CommandsPage /> : <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
           <PageHeading title="Tasks" description="Describe the work. Review the result.">
             <div className="flex items-center gap-2">
               <Button className="text-xs!" onClick={() => setComposerOpen(true)}><Plus className="size-4" />New task</Button>
@@ -223,8 +234,8 @@ function App() {
               </div>
             </div>
 
-            {runsView === "board" ? (boardLayout === "projects" ? <ProjectRunBoard jobs={visibleJobs} /> : <RunBoard jobs={visibleJobs} />) : <Card className="overflow-hidden">
-              {visibleJobs.length ? visibleJobs.map((job) => <RunRow key={job.id} job={job} />) : <EmptyRuns filtered={filter !== "all"} openComposer={() => setComposerOpen(true)} />}
+            {runsView === "board" ? (boardLayout === "projects" ? <ProjectRunBoard jobs={visibleJobs} onCancelJob={cancelJob} /> : <RunBoard jobs={visibleJobs} onCancelJob={cancelJob} />) : <Card className="overflow-hidden">
+              {visibleJobs.length ? visibleJobs.map((job) => <RunRow key={job.id} job={job} onCancelJob={cancelJob} />) : <EmptyRuns filtered={filter !== "all"} openComposer={() => setComposerOpen(true)} />}
             </Card>}
           </section>
 
@@ -256,14 +267,14 @@ function RunComposer({ title,setTitle,sourceURL,setSourceURL,choices,repositorie
   </Card>;
 }
 
-function RunBoard({ jobs }) {
+function RunBoard({ jobs, onCancelJob }) {
   const groupedJobs = groupJobsByBoardColumn(jobs);
   return <div className="grid min-w-0 gap-4 md:grid-cols-2 xl:grid-cols-4">
-    {boardColumns.map((column) => <RunColumn key={column.id} column={column} jobs={groupedJobs[column.id]} idPrefix="board" />)}
+    {boardColumns.map((column) => <RunColumn key={column.id} column={column} jobs={groupedJobs[column.id]} idPrefix="board" onCancelJob={onCancelJob} />)}
   </div>;
 }
 
-function ProjectRunBoard({ jobs }) {
+function ProjectRunBoard({ jobs, onCancelJob }) {
   const projectGroups = groupJobsByProject(jobs);
   return <div className="grid min-w-0 gap-6">
     {projectGroups.map(([project, projectJobs]) => {
@@ -274,26 +285,26 @@ function ProjectRunBoard({ jobs }) {
           <Badge className="shrink-0 border-border bg-surface text-muted-foreground" aria-label={`${projectJobs.length} visible ${project} runs`}>{projectJobs.length}</Badge>
         </header>
         <div className="grid min-w-0 gap-4 md:grid-cols-2 xl:grid-cols-4">
-          {boardColumns.map((column) => <RunColumn key={column.id} column={column} jobs={groupedJobs[column.id]} idPrefix={`project-${project}`} />)}
+          {boardColumns.map((column) => <RunColumn key={column.id} column={column} jobs={groupedJobs[column.id]} idPrefix={`project-${project}`} onCancelJob={onCancelJob} />)}
         </div>
       </section>;
     })}
   </div>;
 }
 
-function RunColumn({ column, jobs, idPrefix }) {
+function RunColumn({ column, jobs, idPrefix, onCancelJob }) {
   return <section className="run-column min-w-0 border border-border bg-muted/20" aria-labelledby={`${idPrefix}-${column.id}`}>
     <header className="flex items-center justify-between gap-3 border-b border-border px-3 py-2.5">
       <div className="min-w-0"><h2 id={`${idPrefix}-${column.id}`} className="text-sm font-semibold">{column.title}</h2><p className="break-words text-xs text-muted-foreground">{column.description}</p></div>
       <Badge className="shrink-0 border-border bg-surface text-muted-foreground" aria-label={`${jobs.length} visible ${column.title.toLowerCase()} runs`}>{jobs.length}</Badge>
     </header>
     <div className="grid min-w-0 gap-2 p-2">
-      {jobs.length ? jobs.map((job) => <RunCard key={job.id} job={job} />) : <p className="px-2 py-8 text-center text-xs text-muted-foreground">No runs</p>}
+      {jobs.length ? jobs.map((job) => <RunCard key={job.id} job={job} onCancelJob={onCancelJob} />) : <p className="px-2 py-8 text-center text-xs text-muted-foreground">No runs</p>}
     </div>
   </section>;
 }
 
-function RunCard({ job }) {
+function RunCard({ job, onCancelJob }) {
   const title = jobDisplayTitle(job);
   const run = currentRun(job);
   const timestamp = boardCardTimestamp(job);
@@ -304,13 +315,13 @@ function RunCard({ job }) {
       <State value={job.state} />
       <time className="text-xs text-muted-foreground" dateTime={timestamp} title={timestamp ? new Date(timestamp).toLocaleString() : undefined}>{relativeTime(timestamp)}</time>
     </div>
-  </a></Card>;
+  </a>{canCancelJob(job) && <div className="flex justify-end px-4 pb-4"><Button size="sm" variant="outline" aria-label={`Cancel task ${title}`} onClick={() => onCancelJob(job)}>Cancel</Button></div>}</Card>;
 }
 
-function RunRow({ job }) {
+function RunRow({ job, onCancelJob }) {
   const title=jobDisplayTitle(job);
   const run=currentRun(job);
-  return <article className="border-b border-border last:border-b-0"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="flex items-center justify-between gap-4 px-5 py-4 hover:bg-muted/35" aria-label={`Open task ${title}`}><div className="min-w-0"><p className="break-words text-sm font-medium" title={title}>{title}</p><p className="mt-1 text-xs text-muted-foreground">{job.repository} · {friendlyName(run?.command || job.command)}</p></div><div className="flex shrink-0 flex-col items-end gap-1"><State value={job.state} /><time className="text-xs text-muted-foreground" dateTime={job.created_at}>{relativeTime(job.created_at)}</time></div></a></article>;
+  return <article className="border-b border-border last:border-b-0"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="flex items-center justify-between gap-4 px-5 py-4 hover:bg-muted/35" aria-label={`Open task ${title}`}><div className="min-w-0"><p className="break-words text-sm font-medium" title={title}>{title}</p><p className="mt-1 text-xs text-muted-foreground">{job.repository} · {friendlyName(run?.command || job.command)}</p></div><div className="flex shrink-0 flex-col items-end gap-1"><State value={job.state} /><time className="text-xs text-muted-foreground" dateTime={job.created_at}>{relativeTime(job.created_at)}</time>{canCancelJob(job) && <Button size="sm" variant="outline" aria-label={`Cancel task ${title}`} onClick={() => onCancelJob(job)}>Cancel</Button>}</div></a></article>;
 }
 
 function EmptyRuns({ filtered, openComposer }) {

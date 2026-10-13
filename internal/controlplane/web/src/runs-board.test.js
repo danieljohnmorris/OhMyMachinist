@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { boardCardTimestamp, boardColumnForState, filterJobs, githubIssueReference, groupJobsByBoardColumn, jobDisplayTitle, needsAttention } from "./runs-board.js";
+import { boardCardTimestamp, boardColumnForState, canCancelJob, filterJobs, githubIssueReference, groupJobsByBoardColumn, jobDisplayTitle, needsAttention } from "./runs-board.js";
 
 test("board card timestamps prefer run completion for finished jobs and last update otherwise", () => {
   const finishedJob = {
@@ -73,4 +73,13 @@ test("stored job titles are preferred over task titles and coder prompts", () =>
     prompt: "You are the CODER in a spec-driven software factory.",
   };
   assert.equal(jobDisplayTitle(job), "OMM-1: Local build step timings and ETAs");
+});
+
+test("only plain queued jobs are cancellable", () => {
+  assert.equal(canCancelJob({ state: "queued" }), true);
+  for (const state of ["running", "succeeded", "failed", "timed_out", "cancelled", "awaiting_approval"]) {
+    assert.equal(canCancelJob({ state }), false);
+  }
+  assert.equal(canCancelJob({ state: "queued", workflow: { name: "deliver", steps: ["build"], current_step: 0 } }), false);
+  assert.equal(canCancelJob({ state: "running", workflow: { name: "deliver" } }), false);
 });

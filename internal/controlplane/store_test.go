@@ -1238,3 +1238,46 @@ func TestSnapshotPrefersTheWorkflowStepSummaryOverTheFinalMessage(t *testing.T) 
 		t.Fatalf("summary = %q, want the step summary", got)
 	}
 }
+
+func TestCancelPlainQueuedJob(t *testing.T) {
+	store := openTestStore(t, t.TempDir()+"/db")
+	jobID, err := store.CreateJob(t.Context(), "Ship it", "machinist", "build", testAgent("build", "{{machinist.prompt}}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WorkflowAction(t.Context(), jobID, "", "cancel", false); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Jobs) != 1 || snapshot.Jobs[0].State != "cancelled" {
+		t.Fatalf("snapshot = %#v", snapshot.Jobs)
+	}
+	var runState string
+	var exitCode int
+	if err := store.db.QueryRow(`SELECT state,exit_code FROM runs WHERE job_id=?`, jobID).Scan(&runState, &exitCode); err != nil {
+		t.Fatal(err)
+	}
+	if runState != "cancelled" || exitCode != 130 {
+		t.Fatalf("run state = %q exit = %d", runState, exitCode)
+	}
+}
+
+func TestCancelPlainJobRejectsRunningAndMissing(t *testing.T) {
+	store := openTestStore(t, t.TempDir()+"/db")
+	jobID, err := store.CreateJob(t.Context(), "Ship it", "machinist", "build", testAgent("build", "{{machinist.prompt}}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE jobs SET state='running' WHERE id=?`, jobID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WorkflowAction(t.Context(), jobID, "", "cancel", false); !errors.Is(err, ErrWorkflowAction) {
+		t.Fatalf("cancel running plain job = %v", err)
+	}
+	if err := store.WorkflowAction(t.Context(), "job_missing", "", "cancel", false); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("cancel missing job = %v", err)
+	}
+}

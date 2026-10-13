@@ -911,3 +911,44 @@ func deleteRequest(t *testing.T, endpoint string, headers map[string]string) *ht
 	}
 	return response
 }
+
+func TestServerCancelsPlainQueuedJobOverHTTP(t *testing.T) {
+	server, webServer := newTestHTTPServer(t)
+	defer webServer.Close()
+	status := getStatus(t, webServer.URL)
+	if _, err := server.store.db.Exec(`INSERT INTO known_repositories(repository) VALUES('machinist')`); err != nil {
+		t.Fatal(err)
+	}
+	created := postJSON(t, webServer.URL+"/api/v1/jobs", map[string]string{"prompt": "Work locally", "repository": "machinist", "command": "plan"}, map[string]string{"Origin": webServer.URL, "X-Machinist-CSRF": status.CSRFToken})
+	if created.StatusCode != http.StatusCreated {
+		created.Body.Close()
+		t.Fatalf("create status = %d", created.StatusCode)
+	}
+	created.Body.Close()
+	status = getStatus(t, webServer.URL)
+	if len(status.Jobs) != 1 {
+		t.Fatalf("jobs = %#v", status.Jobs)
+	}
+	jobID := status.Jobs[0].ID
+
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+jobID+"/cancel", strings.NewReader("{}"))
+	request.Header.Set("Authorization", "Bearer secret")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("cancel status = %d", recorder.Code)
+	}
+
+	status = getStatus(t, webServer.URL)
+	if status.Jobs[0].State != "cancelled" || status.Jobs[0].Runs[0].State != "cancelled" {
+		t.Fatalf("jobs = %#v", status.Jobs)
+	}
+
+	second := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+jobID+"/cancel", strings.NewReader("{}"))
+	second.Header.Set("Authorization", "Bearer secret")
+	recorder = httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, second)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("second cancel status = %d", recorder.Code)
+	}
+}

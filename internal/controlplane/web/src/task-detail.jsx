@@ -8,7 +8,7 @@ import { Artifacts, useTaskArtifacts } from "./artifacts.jsx";
 import { Transcript } from "./transcript.jsx";
 import { taskPresentation } from "./task-presentation.js";
 import { linkifyText } from "./linkify.js";
-import { jobDisplayTitle } from "./runs-board.js";
+import { jobDisplayTitle, canCancelJob } from "./runs-board.js";
 import { formatDurationMillis, formatTokenUsage } from "./run-metrics.js";
 import {
   State,
@@ -25,6 +25,7 @@ export function TaskDetail({
   deleting,
   onDelete,
   onWorkflowAction,
+  onCancelJob,
 }) {
   const artifacts = useTaskArtifacts(job, csrfToken);
   if (!job)
@@ -222,6 +223,7 @@ export function TaskDetail({
                 onAction={onWorkflowAction}
               />
             )}
+            {canCancelJob(job) && <CancelJobButton job={job} onCancel={onCancelJob} />}
           </Card>
           <div
             className="space-y-6 rounded-sm border border-border bg-surface p-5 text-sm sm:p-6"
@@ -400,6 +402,27 @@ function RunMetric({ label, value, mono = false }) {
         {value}
       </dd>
     </div>
+  );
+}
+
+function CancelJobButton({ job, onCancel }) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <Button
+      variant="outline"
+      disabled={busy}
+      aria-label={`Cancel task ${jobDisplayTitle(job)}`}
+      onClick={async () => {
+        setBusy(true);
+        try {
+          await onCancel(job);
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      {busy ? "Cancelling…" : "Cancel task"}
+    </Button>
   );
 }
 

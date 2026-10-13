@@ -492,9 +492,13 @@ WHERE github_trigger_requests.state='pending'`, admission.Identity, admission.Oc
 		}
 	}
 
-	var existingJob string
-	err = tx.QueryRowContext(ctx, `SELECT id FROM jobs WHERE trigger_identity=? AND occurrence_key=?`, admission.Identity, admission.OccurrenceKey).Scan(&existingJob)
-	if err == nil {
+	var existingJob, existingState string
+	err = tx.QueryRowContext(ctx, `SELECT id,state FROM jobs WHERE trigger_identity=? AND occurrence_key=? ORDER BY rowid DESC LIMIT 1`, admission.Identity, admission.OccurrenceKey).Scan(&existingJob, &existingState)
+	// Issue-family admissions treat a terminal job as spent: a later edit or
+	// deliberate re-label admits fresh work, so only active jobs dedupe here.
+	// Other families keep one job per occurrence key forever.
+	duplicate := err == nil && (!terminalJobState(existingState) || admission.Family != "issue")
+	if duplicate {
 		if admission.Family == "github" {
 			if admission.GitHubIssueTitle != "" {
 				if _, updateErr := tx.ExecContext(ctx, `UPDATE jobs SET github_issue_title=? WHERE id=? AND github_issue_title=''`, admission.GitHubIssueTitle, existingJob); updateErr != nil {
@@ -512,8 +516,18 @@ WHERE github_trigger_requests.state='pending'`, admission.Identity, admission.Oc
 		}
 		return existingJob, false, tx.Commit()
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		// No prior occurrence; admit below.
+	case err == nil:
+		// Terminal issue-family job; admit fresh work below.
+	default:
 		return "", false, fmt.Errorf("read trigger occurrence: %w", err)
+	}
+	// jobs_trigger_occurrence admits one job per (identity, occurrence key), so a
+	// spent issue occurrence gets a fresh key before its successor is inserted.
+	if err == nil && admission.Family == "issue" {
+		admission.OccurrenceKey = fmt.Sprintf("%s#%d", admission.OccurrenceKey, admission.ScheduledAt.UnixNano())
 	}
 
 	if fixed {
@@ -597,6 +611,72 @@ WHERE github_trigger_requests.state='pending'`, admission.Identity, admission.Oc
 		return "", false, fmt.Errorf("commit triggered job: %w", err)
 	}
 	return jobID, true, nil
+}
+
+// ActiveTriggerJob returns the newest queued or running job admitted for any of
+// the given trigger subjects (an issue URL or ticket key). found is false when
+// no active job exists.
+func (s *Store) ActiveTriggerJob(ctx context.Context, subjects ...string) (jobID, state string, found bool, err error) {
+	cleaned := make([]string, 0, len(subjects))
+	for _, subject := range subjects {
+		if subject = strings.TrimSpace(subject); subject != "" {
+			cleaned = append(cleaned, subject)
+		}
+	}
+	if len(cleaned) == 0 {
+		return "", "", false, errors.New("trigger subject is required")
+	}
+	placeholders := strings.Repeat("?,", len(cleaned))
+	args := make([]any, 0, len(cleaned)+2)
+	for _, subject := range cleaned {
+		args = append(args, subject)
+	}
+	query := `SELECT id,state FROM jobs WHERE trigger_subject IN (` + placeholders[:len(placeholders)-1] + `) AND state IN ('queued','running') ORDER BY rowid DESC LIMIT 1`
+	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&jobID, &state); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", "", false, nil
+		}
+		return "", "", false, fmt.Errorf("read active trigger job: %w", err)
+	}
+	return jobID, state, true, nil
+}
+
+// UpdateQueuedTriggerJob rewrites the spec of a queued job in place with the
+// edited ticket content: prompt, title, task input, and the queued run's
+// rendered command. The job must still be queued.
+func (s *Store) UpdateQueuedTriggerJob(ctx context.Context, jobID string, admission TriggerAdmission) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := s.now().UTC().Format(time.RFC3339Nano)
+	result, err := tx.ExecContext(ctx, `UPDATE jobs SET prompt=?,title=?,command=?,updated_at=? WHERE id=? AND state='queued'`,
+		admission.Prompt, admission.Title, admission.SelectionName, now, jobID)
+	if err != nil {
+		return fmt.Errorf("update queued job spec: %w", err)
+	}
+	if changed, err := result.RowsAffected(); err != nil {
+		return err
+	} else if changed != 1 {
+		return ErrJobActive
+	}
+	if admission.Task != nil {
+		raw, err := json.Marshal(*admission.Task)
+		if err != nil {
+			return fmt.Errorf("encode queued task: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO task_inputs(job_id,task) VALUES(?,?) ON CONFLICT(job_id) DO UPDATE SET task=excluded.task`, jobID, string(raw)); err != nil {
+			return fmt.Errorf("update queued task: %w", err)
+		}
+	} else if _, err := tx.ExecContext(ctx, `DELETE FROM task_inputs WHERE job_id=?`, jobID); err != nil {
+		return fmt.Errorf("clear queued task: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE runs SET command=?,command_hash=?,executor=?,model=?,rendered_prompt=? WHERE job_id=? AND state='queued'`,
+		admission.Command.Name, admission.Command.Hash, admission.Command.Executor, admission.Command.Model, admission.Command.Prompt, jobID); err != nil {
+		return fmt.Errorf("update queued run spec: %w", err)
+	}
+	return tx.Commit()
 }
 
 // RecordTriggerAttempt records one poll or scheduling attempt. Candidate counts are
