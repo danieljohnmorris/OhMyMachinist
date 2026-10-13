@@ -74,6 +74,12 @@ button:disabled { cursor: not-allowed; }
 .app-sidebar { box-shadow: inset -1px 0 color-mix(in srgb, var(--foreground) 4%, transparent); }
 .workshop { background: var(--background); }
 .brand-wordmark { font-family: var(--font-sans); font-size: 1.125rem; font-weight: 600; letter-spacing: -.02em; }
+.brand-logo-link { display: flex; align-items: center; min-width: 0; }
+.brand-logo { display: block; height: 2.25rem; width: auto; max-width: 10.5rem; object-fit: contain; }
+.brand-logo-dark { display: none; }
+.dark .brand-logo-light { display: none; }
+.dark .brand-logo-dark { display: block; }
+
 .machinist-mark { width: 2.6rem; height: auto; overflow: visible; color: var(--foreground); }
 .machinist-mark path { fill: none; stroke-width: 5; stroke-linecap: square; stroke-linejoin: round; }
 .machinist-mark .machinist-mark-piece-a { stroke: currentColor; }
