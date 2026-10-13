@@ -21,8 +21,13 @@ All requests and responses are `application/json`. Errors are
   (`100.64.0.0/10`), and the server logs a startup warning. Binds to any
   other interface are rejected at startup.
 - Browsers keep the existing same-origin defense: writes require the
-  `X-Machinist-CSRF` header from `GET /api/v1/status` and a same-origin
-  `Origin`.
+  `X-Machinist-CSRF` header from `GET /api/v1/status`, a same-origin `Origin`,
+  and browser Fetch Metadata (`Sec-Fetch-Site: same-origin`). Non-browser
+  clients cannot write without a token: the CSRF token is served by the open
+  status endpoint and `Origin` is self-reported, so Fetch Metadata is what
+  separates real browsers from credential-less scripts (which must present a
+  bearer token instead). Same-origin browser GETs (such as the token list)
+  carry only the `X-Machinist-CSRF` header — browsers omit `Origin` there.
 - The shared worker token (from `server.worker_token_file`) still
   authenticates worker endpoints and is accepted on write endpoints as a
   write-capable credential, audit-logged as `worker-token`.
@@ -57,7 +62,7 @@ the browser UI can bootstrap; they serve no secrets.
 | POST | `/api/v1/jobs/{id}/{action}` | Workflow actions: `cancel`, `retry` (requeue), `approve`, `request_changes`. Body may carry `run_id`, `feedback`, `previous_process_stopped`. |
 | DELETE | `/api/v1/jobs/{id}` | Delete a terminal job. |
 | PUT | `/api/v1/settings/{key}` | Write one setting. Body: `{"value": "…"}`. |
-| GET | `/api/v1/tokens` | List tokens (write scope). |
+| GET | `/api/v1/tokens` | List tokens (write scope; browsers read with the CSRF header). |
 | POST | `/api/v1/tokens` | Create a token. Body: `{"name": "…", "scope": "read"|"write"}`. Response carries the one-time `secret`. |
 | DELETE | `/api/v1/tokens/{id}` | Revoke a token. |
 | PUT | `/api/v1/review-profiles` | Save a library review profile. |

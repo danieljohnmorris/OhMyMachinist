@@ -337,3 +337,152 @@ func TestTokenHashesOnly(t *testing.T) {
 		t.Fatal("revoking an unknown token should fail")
 	}
 }
+
+// TestAPITokenListBrowserRead pins the GET /api/v1/tokens read defense:
+// browsers omit the Origin header on same-origin GETs, so the list loads with
+// the CSRF token alone; explicit cross-site markers and unauthenticated
+// callers are rejected, and machine callers still need write scope.
+func TestAPITokenListBrowserRead(t *testing.T) {
+	server, webServer := newAuthTestServer(t, config.AuthTokens)
+	defer webServer.Close()
+	_, readSecret, err := server.store.CreateToken(t.Context(), "reader", TokenScopeRead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, writeSecret, err := server.store.CreateToken(t.Context(), "writer", TokenScopeWrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	get := func(token string, headers map[string]string) *http.Response {
+		t.Helper()
+		request, err := http.NewRequest(http.MethodGet, webServer.URL+"/api/v1/tokens", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if token != "" {
+			request.Header.Set("Authorization", "Bearer "+token)
+		}
+		for key, value := range headers {
+			request.Header.Set(key, value)
+		}
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+
+	// A same-origin browser GET sends the CSRF header and no Origin.
+	response := get("", map[string]string{"X-Machinist-CSRF": server.csrfToken})
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("browser token list status = %d, want 200", response.StatusCode)
+	}
+	response.Body.Close()
+
+	// An explicit cross-site marker is rejected, as for artifacts.
+	response = get("", map[string]string{"X-Machinist-CSRF": server.csrfToken, "Sec-Fetch-Site": "cross-site"})
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("cross-site token list status = %d, want 403", response.StatusCode)
+	}
+	response.Body.Close()
+
+	// No credential at all is rejected.
+	response = get("", nil)
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("credential-less token list status = %d, want 403", response.StatusCode)
+	}
+	response.Body.Close()
+
+	// Read-scope bearers cannot list tokens; write-scope bearers can.
+	response = get(readSecret, nil)
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("read-scope token list status = %d, want 403", response.StatusCode)
+	}
+	response.Body.Close()
+	response = get(writeSecret, nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("write-scope token list status = %d, want 200", response.StatusCode)
+	}
+	response.Body.Close()
+}
+
+// TestAPIWritesRejectCredentiallessNonBrowsers pins the write-path credential
+// rule: the CSRF token is served by the open status endpoint and Origin is
+// self-reported, so a non-browser client without a bearer must not be able to
+// write by forging a loopback Origin — browser writes additionally require
+// Fetch Metadata, which browsers always send and pages cannot set.
+func TestAPIWritesRejectCredentiallessNonBrowsers(t *testing.T) {
+	server, webServer := newAuthTestServer(t, config.AuthTokens)
+	defer webServer.Close()
+	seedRepository(t, server)
+
+	// Everything a non-browser can assemble without impersonating browser
+	// fetch metadata: the status-endpoint CSRF token plus a loopback Origin.
+	forged, err := http.NewRequest(http.MethodPost, webServer.URL+"/api/v1/tokens", strings.NewReader(`{"name":"sneaky","scope":"write"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged.Header.Set("Content-Type", "application/json")
+	forged.Header.Set("X-Machinist-CSRF", server.csrfToken)
+	forged.Header.Set("Origin", webServer.URL)
+	response, err := http.DefaultClient.Do(forged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("credential-less forged write status = %d, want 403", response.StatusCode)
+	}
+	response.Body.Close()
+
+	// A real browser request (Fetch Metadata present) is accepted.
+	browser, err := http.NewRequest(http.MethodPost, webServer.URL+"/api/v1/tokens", strings.NewReader(`{"name":"ui","scope":"read"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	browser.Header.Set("Content-Type", "application/json")
+	browser.Header.Set("X-Machinist-CSRF", server.csrfToken)
+	browser.Header.Set("Origin", webServer.URL)
+	browser.Header.Set("Sec-Fetch-Site", "same-origin")
+	response, err = http.DefaultClient.Do(browser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("browser write status = %d, want 201", response.StatusCode)
+	}
+	response.Body.Close()
+
+	// The forged attempt minted nothing.
+	tokens, err := server.store.ListTokens(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tokens) != 1 || tokens[0].Name != "ui" {
+		t.Fatalf("tokens after forged write = %#v", tokens)
+	}
+}
+
+// TestMCPAuthOffAuditNamesAnonymous pins that MCP tool calls on auth-off
+// servers audit as the anonymous principal, matching the HTTP path.
+func TestMCPAuthOffAuditNamesAnonymous(t *testing.T) {
+	server, webServer := newAuthTestServer(t, config.AuthNone)
+	defer webServer.Close()
+
+	response := authRequest(t, http.MethodPost, webServer.URL+"/mcp", "", map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]any{"name": "set_setting", "arguments": map[string]any{"key": "k", "value": "v"}},
+	})
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("auth-off tools/call status = %d, want 200", response.StatusCode)
+	}
+	response.Body.Close()
+
+	entries, err := server.store.AuditLog(t.Context(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) == 0 || entries[0]["action"] != "settings.write" || entries[0]["token_name"] != "anonymous" {
+		t.Fatalf("auth-off MCP audit entries = %#v", entries)
+	}
+}

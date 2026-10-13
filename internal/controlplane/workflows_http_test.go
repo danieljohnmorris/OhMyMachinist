@@ -48,7 +48,7 @@ func TestWorkflowHTTPSubmissionAndApproval(t *testing.T) {
 	if len(stages) != 1 || stages[0].Name != "plan" || !stages[0].Approval {
 		t.Fatalf("approval metadata missing: %+v", stages)
 	}
-	headers := map[string]string{"Origin": web.URL, "X-Machinist-CSRF": status.CSRFToken}
+	headers := map[string]string{"Origin": web.URL, "X-Machinist-CSRF": status.CSRFToken, "Sec-Fetch-Site": "same-origin"}
 	response := postJSON(t, web.URL+"/api/v1/jobs", map[string]string{"workflow": "deliver", "repository": "machinist", "prompt": "issue"}, headers)
 	if response.StatusCode != http.StatusCreated {
 		t.Fatalf("submission %d", response.StatusCode)

@@ -115,6 +115,11 @@ func (s *Server) handleMCP(response http.ResponseWriter, request *http.Request) 
 		writeUnauthorized(response)
 		return
 	}
+	if !authenticated {
+		// Auth-off servers accept calls without a credential; audit them as
+		// the anonymous principal like the HTTP path instead of an empty name.
+		identity = anonymous
+	}
 	switch msg.Method {
 	case "initialize":
 		s.writeMCP(response, msg.ID, map[string]any{

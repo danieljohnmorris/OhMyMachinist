@@ -234,6 +234,7 @@ func TestReviewProfileHTTP(t *testing.T) {
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set("X-Machinist-CSRF", csrf)
 		request.Header.Set("Origin", endpoint.URL)
+		request.Header.Set("Sec-Fetch-Site", "same-origin")
 		response, err := http.DefaultClient.Do(request)
 		if err != nil {
 			t.Fatal(err)

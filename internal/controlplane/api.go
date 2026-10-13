@@ -63,8 +63,30 @@ func (s *Server) authorizeWrite(next http.HandlerFunc) http.HandlerFunc {
 	return s.authorize(next, TokenScopeWrite)
 }
 
-// authorize enforces the token-or-CSRF rule for the required scope.
+// authorizeTokenList guards GET /api/v1/tokens. Bearer callers need write
+// scope; browsers use the artifact read defense because browsers omit the
+// Origin header on same-origin GET requests, which the write-path browser
+// check requires.
+func (s *Server) authorizeTokenList(next http.HandlerFunc) http.HandlerFunc {
+	return s.authorizeWithBrowser(next, TokenScopeWrite, s.validBrowserReadRequest)
+}
+
+// authorize enforces the token-or-CSRF rule for the required scope. Browser
+// writes must also carry Fetch Metadata: the CSRF token is served by the open
+// status endpoint and Origin is self-reported, so a credential-less client
+// could forge both and write anyway; browsers always attach Sec-Fetch-Site
+// and forbid pages from setting it.
 func (s *Server) authorize(next http.HandlerFunc, required string) http.HandlerFunc {
+	browserCheck := s.validBrowserRequest
+	if required == TokenScopeWrite {
+		browserCheck = s.validBrowserWriteRequest
+	}
+	return s.authorizeWithBrowser(next, required, browserCheck)
+}
+
+// authorizeWithBrowser enforces the token rule with the given browser check
+// for requests that present no bearer credential.
+func (s *Server) authorizeWithBrowser(next http.HandlerFunc, required string, validBrowser func(*http.Request) bool) http.HandlerFunc {
 	return func(response http.ResponseWriter, request *http.Request) {
 		if s.authOff() {
 			next(response, request.WithContext(withIdentity(request.Context(), anonymous)))
@@ -77,9 +99,9 @@ func (s *Server) authorize(next http.HandlerFunc, required string) http.HandlerF
 				writeUnauthorized(response)
 				return
 			}
-			if !s.validBrowserRequest(request) {
+			if !validBrowser(request) {
 				if required == TokenScopeWrite {
-					writeError(response, http.StatusForbidden, errors.New("invalid submission origin or CSRF token"))
+					writeError(response, http.StatusForbidden, errors.New("write requests require a write-scope token or a same-origin browser request"))
 				} else {
 					writeUnauthorized(response)
 				}

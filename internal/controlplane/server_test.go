@@ -57,7 +57,7 @@ func TestServerProtectsSubmissionAndWorkerAPIs(t *testing.T) {
 	}
 	legacy.Body.Close()
 
-	headers := map[string]string{"Origin": webServer.URL, "X-Machinist-CSRF": status.CSRFToken}
+	headers := map[string]string{"Origin": webServer.URL, "X-Machinist-CSRF": status.CSRFToken, "Sec-Fetch-Site": "same-origin"}
 	created := postJSON(t, webServer.URL+"/api/v1/jobs", map[string]string{"prompt": "Work locally", "repository": "machinist", "command": "plan", "model": "luna"}, headers)
 	if created.StatusCode != http.StatusCreated {
 		t.Fatalf("create status = %d", created.StatusCode)
@@ -73,6 +73,7 @@ func TestServerProtectsSubmissionAndWorkerAPIs(t *testing.T) {
 	request.Host = "127.0.0.1:7331"
 	request.Header.Set("Origin", "http://127.0.0.1:7331")
 	request.Header.Set("X-Machinist-CSRF", server.csrfToken)
+	request.Header.Set("Sec-Fetch-Site", "same-origin")
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
 	if response.Code != http.StatusBadRequest {
@@ -127,6 +128,7 @@ func TestSubmitStoresCommandTitleWithPrompt(t *testing.T) {
 	created.Host = "127.0.0.1:7331"
 	created.Header.Set("Origin", "http://127.0.0.1:7331")
 	created.Header.Set("X-Machinist-CSRF", server.csrfToken)
+	created.Header.Set("Sec-Fetch-Site", "same-origin")
 	createdResponse := httptest.NewRecorder()
 	handler.ServeHTTP(createdResponse, created)
 	if createdResponse.Code != http.StatusCreated {
@@ -167,7 +169,7 @@ func TestServerDeletesOnlyTerminalJobsWithSubmissionAuthorization(t *testing.T) 
 		t.Fatal(err)
 	}
 	status := getStatus(t, webServer.URL)
-	headers := map[string]string{"Origin": webServer.URL, "X-Machinist-CSRF": status.CSRFToken}
+	headers := map[string]string{"Origin": webServer.URL, "X-Machinist-CSRF": status.CSRFToken, "Sec-Fetch-Site": "same-origin"}
 	active := deleteRequest(t, webServer.URL+"/api/v1/jobs/"+jobID, headers)
 	if active.StatusCode != http.StatusConflict {
 		t.Fatalf("active delete status = %d", active.StatusCode)
@@ -272,7 +274,7 @@ func TestServerRejectsUnavailableRepositoryBeforePersistence(t *testing.T) {
 	defer webServer.Close()
 
 	status := getStatus(t, webServer.URL)
-	headers := map[string]string{"Origin": webServer.URL, "X-Machinist-CSRF": status.CSRFToken}
+	headers := map[string]string{"Origin": webServer.URL, "X-Machinist-CSRF": status.CSRFToken, "Sec-Fetch-Site": "same-origin"}
 	response := postJSON(t, webServer.URL+"/api/v1/jobs", map[string]string{
 		"prompt": "unknown repository", "repository": "missing", "command": "plan",
 	}, headers)
@@ -961,7 +963,7 @@ func TestServerCancelsPlainQueuedJobOverHTTP(t *testing.T) {
 	if _, err := server.store.db.Exec(`INSERT INTO known_repositories(repository) VALUES('machinist')`); err != nil {
 		t.Fatal(err)
 	}
-	created := postJSON(t, webServer.URL+"/api/v1/jobs", map[string]string{"prompt": "Work locally", "repository": "machinist", "command": "plan"}, map[string]string{"Origin": webServer.URL, "X-Machinist-CSRF": status.CSRFToken})
+	created := postJSON(t, webServer.URL+"/api/v1/jobs", map[string]string{"prompt": "Work locally", "repository": "machinist", "command": "plan"}, map[string]string{"Origin": webServer.URL, "X-Machinist-CSRF": status.CSRFToken, "Sec-Fetch-Site": "same-origin"})
 	if created.StatusCode != http.StatusCreated {
 		created.Body.Close()
 		t.Fatalf("create status = %d", created.StatusCode)

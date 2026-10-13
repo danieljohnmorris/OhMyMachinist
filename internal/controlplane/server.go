@@ -357,7 +357,7 @@ func (s *Server) routes() (http.Handler, error) {
 	mux.HandleFunc("GET /api/v1/runs/{id}", s.authorizeRead(s.getRunHandler))
 	mux.HandleFunc("GET /api/v1/settings", s.authorizeRead(s.getSettingsHandler))
 	mux.HandleFunc("PUT /api/v1/settings/{key}", s.authorizeWrite(s.putSettingHandler))
-	mux.HandleFunc("GET /api/v1/tokens", s.authorizeWrite(s.listTokensHandler))
+	mux.HandleFunc("GET /api/v1/tokens", s.authorizeTokenList(s.listTokensHandler))
 	mux.HandleFunc("POST /api/v1/tokens", s.authorizeWrite(s.createTokenHandler))
 	mux.HandleFunc("DELETE /api/v1/tokens/{id}", s.authorizeWrite(s.revokeTokenHandler))
 	mux.HandleFunc("GET /api/v1/audit-log", s.authorizeRead(s.auditLogHandler))
@@ -737,6 +737,27 @@ func (s *Server) validBrowserRequest(request *http.Request) bool {
 	}
 	hostname := origin.Hostname()
 	return hostname == "localhost" || net.ParseIP(hostname) != nil && net.ParseIP(hostname).IsLoopback()
+}
+
+// validBrowserWriteRequest is the write-path browser check. Browsers attach
+// Sec-Fetch-Site to every fetch and forbid pages from setting it, so a
+// credential-less write without it is not from a browser; such clients must
+// present a bearer token (the CSRF token alone is not a credential because
+// GET /api/v1/status serves it to any caller).
+func (s *Server) validBrowserWriteRequest(request *http.Request) bool {
+	if request.Header.Get("Sec-Fetch-Site") != "same-origin" {
+		return false
+	}
+	return s.validBrowserRequest(request)
+}
+
+// validBrowserReadRequest mirrors the artifact read defense
+// (artifacts_http.go): a valid CSRF token and no explicit cross-site marker.
+// Browsers omit the Origin header on same-origin GET requests, so it is not
+// required here; cross-site pages cannot read the token in the first place.
+func (s *Server) validBrowserReadRequest(request *http.Request) bool {
+	return subtle.ConstantTimeCompare([]byte(request.Header.Get("X-Machinist-CSRF")), []byte(s.csrfToken)) == 1 &&
+		request.Header.Get("Sec-Fetch-Site") != "cross-site"
 }
 
 func decodeJSON(request *http.Request, target any) error {
