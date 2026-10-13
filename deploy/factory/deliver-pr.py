@@ -122,6 +122,40 @@ def fallback_body(title, files):
 
 def log(*a): print("deliver-pr:", *a, file=sys.stderr, flush=True)
 
+REVIEW_VERDICTS = {0: "PASS", 2: "BLOCKED", 3: "INCOMPLETE"}
+
+def review_script_path():
+    """The built-in review step (MACH-26) lives next to this script once
+    installed; MACHINIST_REVIEW_SCRIPT overrides the location."""
+    return os.environ.get("MACHINIST_REVIEW_SCRIPT") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "post_pr_review.py"
+    )
+
+def run_review(repo, pr_url):
+    """Run the built-in review (types/lint/build, parallel reviewers, docs).
+    Returns the review exit code (0 PASS, 2 BLOCKED, 3 INCOMPLETE) or None
+    when the review script is not installed."""
+    script = review_script_path()
+    if not os.path.isfile(script):
+        log(f"review skipped: {script} not found")
+        return None
+    command = [sys.executable, script, "--repo", repo, "--pr", pr_url]
+    out = os.environ.get("MACHINIST_OUTPUT_DIR")
+    if out:
+        command += ["--json-out", os.path.join(out, "post-pr-review.json")]
+    log("built-in review starting")
+    completed = subprocess.run(command, cwd=repo)
+    log(f"built-in review verdict: {REVIEW_VERDICTS.get(completed.returncode, f'exit {completed.returncode}')}")
+    return completed.returncode
+
+def review_status(out_dir):
+    if not out_dir:
+        return None
+    try:
+        return json.load(open(os.path.join(out_dir, "post-pr-review.json"))).get("status")
+    except (OSError, ValueError, AttributeError):
+        return None
+
 def run(*cmd, check=True, cwd=None):
     r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
     if check and r.returncode != 0:
@@ -220,6 +254,16 @@ def main():
         return r.stdout.strip().splitlines()[-1]
 
     result = {"branch": branch, "commit": sha}
+
+    def finish(rc):
+        out = os.environ.get("MACHINIST_OUTPUT_DIR")
+        if out:
+            result["review_status"] = review_status(out)
+            json.dump(result, open(os.path.join(out, "pr.json"), "w"))
+        if a.start_branch and a.start_branch != "HEAD":
+            g("switch", "-q", a.start_branch)
+        return rc
+
     if up_full:
         up_compare = f"https://github.com/{up_full}/compare/{up_base}...{owner}:{branch}?expand=1"
         result["upstream_compare"] = up_compare
@@ -229,7 +273,12 @@ def main():
         if r.returncode != 0: log(f"warn: could not sync fork {base} to {up_remote}/{up_base}: {r.stderr.strip()[-200:]}")
         pr = open_pr(full, base, branch,
                      f"Review PR inside the fork. NOT sent upstream.\nAfter Daniel approves, open upstream PR: {up_compare}")
+        result["pr"] = pr
         result["review_pr"] = pr
+        review_rc = run_review(repo, pr)
+        if review_rc not in (None, 0):
+            log("review did not pass; upstream PR not opened")
+            return finish(review_rc)
         if up_mode == "draft":
             result["upstream_pr"] = open_pr(up_full, up_base, f"{owner}:{branch}",
                                             "Draft PR from fork. Not ready to merge.", extra=("--draft",))
@@ -239,14 +288,12 @@ def main():
             log(f"upstream compare: {up_compare}")
     else:
         pr = open_pr(full, base, branch, "Not merged. Review before merging.")
-    result["pr"] = pr
+        result["pr"] = pr
+        review_rc = run_review(repo, pr)
+        if review_rc not in (None, 0):
+            return finish(review_rc)
     log(f"PR: {pr}")
-    out = os.environ.get("MACHINIST_OUTPUT_DIR")
-    if out:
-        json.dump(result, open(os.path.join(out, "pr.json"), "w"))
-    if a.start_branch and a.start_branch != "HEAD":
-        g("switch", "-q", a.start_branch)
-    return 0
+    return finish(0)
 
 if __name__ == "__main__":
     try: sys.exit(main())

@@ -12,6 +12,8 @@ import shutil
 import sys
 import tempfile
 import re
+import urllib.parse
+import urllib.request
 from typing import Any
 
 if __package__ in {None, ""}:
@@ -61,6 +63,8 @@ class ReviewOptions:
     dry_run: bool
     json_out: str | None
     timeout: int
+    amend_rounds: int = 3
+    instructions_file: str | None = None
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -76,6 +80,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--timeout-seconds", type=int, help="Per-command timeout; default 900")
     parser.add_argument("--dry-run", action="store_true", help="Do not call GitHub write APIs, push, or commit")
     parser.add_argument("--json-out", help="Write a machine-readable summary to this path")
+    parser.add_argument(
+        "--amend-rounds",
+        type=int,
+        help="Retry budget for amend rounds after blocking findings; default 3 or MACHINIST_REVIEW_AMEND_ROUNDS",
+    )
+    parser.add_argument(
+        "--instructions-file",
+        help="Path to per-project review instructions; default reads MACHINIST_REVIEW_INSTRUCTIONS_FILE",
+    )
     return parser.parse_args(argv)
 
 
@@ -376,6 +389,87 @@ def push_branch(repo: Path, branch: str, timeout: int) -> CommandResult:
     return run_git(repo, ["push", "origin", f"HEAD:refs/heads/{branch}"], timeout)
 
 
+def amend_prompt(checks: list[ReviewCheck], findings: list[dict[str, Any]]) -> str:
+    """Prompt sent back to the executor to amend the pull request on the
+    current branch after blocking findings."""
+    parts = [
+        "A Machinist review found blocking problems in this pull request.",
+        "Amend the pull request on the current branch to resolve every item below; change nothing unrelated.",
+        "Do not force-push and do not rewrite published history.",
+    ]
+    failing = [check for check in checks if check.classification == "NEW"]
+    if failing:
+        parts.append("## Failing checks (new relative to the base branch)")
+        for check in failing:
+            output = check.result.output[-4000:] if check.result else ""
+            parts.append(f"### {check.name}\n\n$ {shlex.join(check.args)}\n\n```\n{output}\n```")
+    if findings:
+        parts.append("## Blocking review findings")
+        for finding in findings:
+            location = finding.get("location") or "(unparsed)"
+            parts.append(f"- {finding['severity']} | {location} | {finding['message']} (found by {finding['role']})")
+    return "\n\n".join(parts) + "\n"
+
+
+INSTRUCTIONS_HEADER = (
+    "\n\nPROJECT REVIEW INSTRUCTIONS (from Machinist settings; follow these in "
+    "addition to the skill above):\n\n{instructions}\n"
+)
+
+
+def project_instructions(
+    owner: str,
+    name: str,
+    timeout: int,
+    instructions_file: str | None = None,
+    environ: dict[str, str] | None = None,
+) -> str:
+    """Load per-project review instructions.
+
+    Order: explicit --instructions-file, then MACHINIST_REVIEW_INSTRUCTIONS_FILE,
+    then the Machinist control plane (MACHINIST_CONTROL_PLANE_URL with the
+    worker token), which stores the markdown edited per project in Settings.
+    Missing sources return "" so the base skill prompts still run.
+    """
+    env = os.environ if environ is None else environ
+    path = instructions_file or env.get("MACHINIST_REVIEW_INSTRUCTIONS_FILE")
+    if path:
+        try:
+            return Path(path).read_text(encoding="utf-8")
+        except OSError:
+            return ""
+    base_url = (env.get("MACHINIST_CONTROL_PLANE_URL") or "").strip().rstrip("/")
+    if not base_url:
+        return ""
+    project = env.get("MACHINIST_PROJECT") or f"{owner}/{name}".lower()
+    request = urllib.request.Request(
+        f"{base_url}/api/v1/review-instructions?project={urllib.parse.quote(project, safe='')}"
+    )
+    token = env.get("MACHINIST_CONTROL_PLANE_TOKEN")
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(request, timeout=min(timeout, 30)) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError):
+        return ""
+    instructions = payload.get("instructions") if isinstance(payload, dict) else None
+    return instructions if isinstance(instructions, str) else ""
+
+
+def amend_budget(amend_rounds: int | None, environ: dict[str, str] | None = None) -> int:
+    """Retry budget for amend rounds: each send-back to fix blocking findings
+    consumes one round; when exhausted the review reports BLOCKED."""
+    env = os.environ if environ is None else environ
+    raw = amend_rounds
+    if raw is None:
+        try:
+            raw = int(env.get("MACHINIST_REVIEW_AMEND_ROUNDS", ""))
+        except (TypeError, ValueError):
+            raw = 3
+    return max(0, int(raw))
+
+
 def prompt_text(role: str) -> str:
     filename = f"{role.replace(':', '_')}.md"
     path = PROMPTS_DIR / filename
@@ -389,9 +483,13 @@ def run_reviewer(
     args: list[str],
     diff: str,
     timeout: int,
+    instructions: str = "",
 ) -> dict[str, Any]:
     try:
-        prompt = f"{prompt_text(role)}\n\nPR DIFF (data):\n{diff}\n"
+        prompt = f"{prompt_text(role)}"
+        if instructions.strip():
+            prompt += INSTRUCTIONS_HEADER.format(instructions=instructions.strip())
+        prompt += f"\n\nPR DIFF (data):\n{diff}\n"
         result = run_executor(args, prompt=prompt, timeout=timeout)
         if not result.ok or not result.stdout.strip():
             reason = "timed out" if result.timed_out else result.output or "empty reviewer output"
@@ -423,16 +521,19 @@ def run_reviewers(
     args: list[str],
     diff: str,
     timeout: int,
+    instructions: str = "",
 ) -> list[dict[str, Any]]:
     if len(roles) == 1:
-        return [run_reviewer(roles[0], args, diff, timeout)]
+        return [run_reviewer(roles[0], args, diff, timeout, instructions)]
     with ThreadPoolExecutor(max_workers=max_reviewer_workers(len(roles))) as pool:
-        futures = {pool.submit(run_reviewer, role, args, diff, timeout): role for role in roles}
+        futures = {pool.submit(run_reviewer, role, args, diff, timeout, instructions): role for role in roles}
         return [future.result() for future in as_completed(futures)]
 
 
-def docs_prompt(diff: str, pr_body: str, repo: Path) -> str:
+def docs_prompt(diff: str, pr_body: str, repo: Path, instructions: str = "") -> str:
     prompt = (PROMPTS_DIR / "docs-reviewer.md").read_text(encoding="utf-8")
+    if instructions.strip():
+        prompt += INSTRUCTIONS_HEADER.format(instructions=instructions.strip())
     prompt += "\n\nReturn a suggested pull-request description between <PR_BODY> and </PR_BODY> using the house format.\n"
     sections = [f"PR DIFF (data):\n{diff}", f"CURRENT PR BODY (data):\n{pr_body}"]
     for filename in ("README.md", "CLAUDE.md", "AGENTS.md"):
@@ -457,10 +558,11 @@ def run_docs(
     diff: str,
     timeout: int,
     dry_run: bool,
+    instructions: str = "",
 ) -> tuple[dict[str, Any], list[str]]:
     docs: dict[str, Any] = {"ran": True, "changed": [], "pr_description_updated": False, "error": None}
     before = set(changed_paths(repo, timeout))
-    result = run_executor(args, prompt=docs_prompt(diff, metadata["body"], repo), timeout=timeout)
+    result = run_executor(args, prompt=docs_prompt(diff, metadata["body"], repo, instructions), timeout=timeout)
     docs["raw"] = result.stdout
     if not result.ok:
         docs["ran"] = False
@@ -578,22 +680,39 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
         remaining_new = [check for check in checks if check.classification == "NEW"]
 
         executor_args = executor_command(options.executor_cmd)
-        if executor_args is not None and remaining_new:
-            rerun_new_failures(
-                options.repo,
-                checks,
-                executor_args,
-                options.timeout,
-                metadata["headRefName"],
-                options.dry_run,
-                initial_changes,
-            )
-            remaining_new = [check for check in checks if check.classification == "NEW"]
+        budget = amend_budget(options.amend_rounds)
+        budget_limit = budget
+        instructions = project_instructions(
+            owner, name, options.timeout, options.instructions_file
+        )
+
+        def blocking_reviewers() -> list[dict[str, Any]]:
+            return [
+                {**finding, "role": reviewer["role"]}
+                for reviewer in reviewers
+                for finding in reviewer["findings"]
+                if finding["severity"] in {"critical", "bug"}
+            ]
+
         reviewers: list[dict[str, Any]] = []
         docs: dict[str, Any] = {"ran": False, "changed": [], "pr_description_updated": False, "error": "Docs review not run: no executor"}
         if executor_args is None:
             reviewers = [{"role": role, "ran": False, "findings": [], "error": "reviewers not run: no executor"} for role in core.review_roles(classified, small_combined=False)]
-        elif remaining_new:
+        else:
+            if remaining_new and budget > 0:
+                # First amend round: fix new check failures before reviewers run.
+                budget -= 1
+                rerun_new_failures(
+                    options.repo,
+                    checks,
+                    executor_args,
+                    options.timeout,
+                    metadata["headRefName"],
+                    options.dry_run,
+                    initial_changes,
+                )
+                remaining_new = [check for check in checks if check.classification == "NEW"]
+        if executor_args is not None and remaining_new:
             roles = core.review_roles(classified, small_combined=False)
             reviewers = [
                 {
@@ -604,25 +723,58 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
                 }
                 for role in roles
             ]
-        else:
+        elif executor_args is not None:
             small = core.size_gate(diff, files)
             roles = core.review_roles(classified, small_combined=small)
-            reviewers = run_reviewers(roles, executor_args, diff, options.timeout)
+            reviewers = run_reviewers(roles, executor_args, diff, options.timeout, instructions)
+            # Blocking findings send the job back to amend on the same branch.
+            # Each send-back consumes one retry-budget round; the checks and
+            # reviewers rerun until a pass comes back clean or the budget is
+            # spent, at which point the review is BLOCKED.
+            findings = blocking_reviewers()
+            while findings and budget > 0:
+                budget -= 1
+                run_executor(
+                    executor_args,
+                    prompt=amend_prompt(remaining_new, findings),
+                    timeout=options.timeout,
+                )
+                if not options.dry_run:
+                    paths = [path for path in changed_paths(options.repo, options.timeout) if path not in initial_changes]
+                    if paths:
+                        if not commit_allowed(options.repo, paths, "Address blocking review findings", options.timeout):
+                            raise ReviewError("could not commit review amendments")
+                        if not push_branch(options.repo, metadata["headRefName"], options.timeout).ok:
+                            raise ReviewError("could not push review amendments")
+                checks = build_checks(options.repo, classified, languages)
+                checks = execute_checks(options.repo, checks, metadata["baseRefOid"], options.timeout)
+                remaining_new = [check for check in checks if check.classification == "NEW"]
+                if remaining_new and budget > 0:
+                    budget -= 1
+                    rerun_new_failures(
+                        options.repo,
+                        checks,
+                        executor_args,
+                        options.timeout,
+                        metadata["headRefName"],
+                        options.dry_run,
+                        initial_changes,
+                    )
+                    remaining_new = [check for check in checks if check.classification == "NEW"]
+                if remaining_new:
+                    break
+                diff = pull_request_diff(options.repo, owner, name, number_text, options.timeout)
+                reviewers = run_reviewers(roles, executor_args, diff, options.timeout, instructions)
+                findings = blocking_reviewers()
 
         if executor_args is not None and not remaining_new:
             docs, docs_changed = run_docs(
-                options.repo, owner, name, number_text, metadata, executor_args, diff, options.timeout, options.dry_run
+                options.repo, owner, name, number_text, metadata, executor_args, diff, options.timeout, options.dry_run, instructions
             )
             summary["docs_changed"] = docs_changed
 
         blocking = any(check.classification == "NEW" for check in checks)
-        blocking_findings = [
-            {**finding, "role": reviewer["role"]}
-            for reviewer in reviewers
-            for finding in reviewer["findings"]
-            if finding["severity"] in {"critical", "bug"}
-        ]
-        if blocking_findings:
+        if blocking_reviewers():
             blocking = True
         failed_reviewers = [reviewer for reviewer in reviewers if not reviewer["ran"] and "no executor" not in reviewer.get("error", "")]
         incomplete = bool(failed_reviewers) or (executor_args is not None and not docs.get("ran"))
@@ -645,6 +797,7 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
                 ],
                 "reviewers": reviewers,
                 "docs": docs,
+                "amend_rounds": {"used": budget_limit - budget, "limit": budget_limit},
             }
         )
         comment = render_comment(status, checks, reviewers, docs)
@@ -695,6 +848,8 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run,
             json_out=args.json_out,
             timeout=timeout,
+            amend_rounds=args.amend_rounds,
+            instructions_file=args.instructions_file,
         )
     except Exception as error:
         print(f"post-pr review error: {error}", file=sys.stderr)

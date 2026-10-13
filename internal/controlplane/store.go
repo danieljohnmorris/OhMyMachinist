@@ -269,6 +269,10 @@ CREATE TABLE IF NOT EXISTS job_state_history (
  job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
  state TEXT NOT NULL, changed_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS job_state_history_job ON job_state_history(job_id);
+CREATE TABLE IF NOT EXISTS review_instructions (
+ repository TEXT PRIMARY KEY,
+ instructions TEXT NOT NULL,
+ updated_at TEXT NOT NULL);
 CREATE TRIGGER IF NOT EXISTS job_state_history_insert AFTER INSERT ON jobs
 BEGIN
  INSERT INTO job_state_history(job_id,state,changed_at) VALUES (new.id,new.state,new.created_at);

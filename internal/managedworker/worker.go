@@ -231,6 +231,16 @@ func (w *Worker) poll(ctx context.Context) (*protocol.RunSpec, error) {
 	return response.Run, nil
 }
 
+// reviewEnv exposes the control plane to trusted post-agent scripts (the
+// built-in PR review step) so they can read per-project review instructions.
+func (w *Worker) reviewEnv() []string {
+	env := []string{"MACHINIST_CONTROL_PLANE_URL=" + strings.TrimSpace(w.config.ControlPlane.URL)}
+	if token, err := w.config.WorkerToken(); err == nil {
+		env = append(env, "MACHINIST_CONTROL_PLANE_TOKEN="+token)
+	}
+	return env
+}
+
 func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Completion {
 	completion := protocol.Completion{InstanceID: w.instanceID, LeaseToken: spec.LeaseToken, State: "failed", ExitCode: 1}
 	repository, err := w.config.ResolveRepository(spec.Repository)
@@ -258,6 +268,7 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 		ArtifactKey:   spec.LeaseToken,
 		Command:       command,
 		Repository:    repository,
+		ExtraEnv:      w.reviewEnv(),
 		DataDirectory: w.config.DataDirectory,
 		Stdout:        w.stdout,
 		Stderr:        w.stderr,
