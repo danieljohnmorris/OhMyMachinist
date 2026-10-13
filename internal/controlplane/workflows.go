@@ -235,6 +235,11 @@ func (s *Store) WorkflowAction(ctx context.Context, job, run, action string, sto
 	var state, latest, plan, repository string
 	var index int
 	err = tx.QueryRowContext(ctx, `SELECT j.state,w.plan,w.current_step,j.repository,(SELECT id FROM runs WHERE job_id=j.id ORDER BY rowid DESC LIMIT 1) FROM jobs j JOIN workflow_jobs w ON w.job_id=j.id WHERE j.id=?`, job).Scan(&state, &plan, &index, &repository, &latest)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Plain (non-workflow) jobs have no workflow_jobs row; the operator can
+		// still cancel a queued one.
+		return s.cancelPlainJob(ctx, tx, job, action)
+	}
 	if err != nil {
 		return err
 	}
@@ -287,6 +292,30 @@ func (s *Store) WorkflowAction(ctx context.Context, job, run, action string, sto
 		return ErrWorkflowAction
 	}
 	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// cancelPlainJob cancels a queued plain (non-workflow) job. It returns
+// sql.ErrNoRows for unknown jobs, preserving the 404 mapping, and
+// ErrWorkflowAction for jobs that cannot be cancelled.
+func (s *Store) cancelPlainJob(ctx context.Context, tx *sql.Tx, job, action string) error {
+	if action != "cancel" {
+		return sql.ErrNoRows
+	}
+	var state string
+	if err := tx.QueryRowContext(ctx, `SELECT state FROM jobs WHERE id=?`, job).Scan(&state); err != nil {
+		return err
+	}
+	if state != "queued" {
+		return ErrWorkflowAction
+	}
+	now := s.now().UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `UPDATE runs SET state='cancelled',exit_code=130,error='Cancelled by operator',completed_at=? WHERE job_id=? AND state='queued'`, now, job); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET state='cancelled',updated_at=? WHERE id=?`, now, job); err != nil {
 		return err
 	}
 	return tx.Commit()

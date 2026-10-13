@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { attemptDurationMillis, attemptStart, attemptTime, boardCardTimestamp, boardColumnForState, boardDateFilters, boardDateWindow, collapseIssueAttempts, collapseJobsByTicket, filterJobs, filterJobsByDate, githubIssueReference, groupJobsByBoardColumn, jobCounts, jobDisplayTitle, jobTicketKey, needsAttention, priorAttempts, resolutionLabel, supersededJob, ticketAttempts } from "./runs-board.js";
+import { attemptDurationMillis, attemptStart, attemptTime, boardCardTimestamp, boardColumnForState, boardDateFilters, boardDateWindow, canCancelJob, collapseIssueAttempts, collapseJobsByTicket, filterJobs, filterJobsByDate, githubIssueReference, groupJobsByBoardColumn, jobCounts, jobDisplayTitle, jobTicketKey, needsAttention, priorAttempts, resolutionLabel, supersededJob, ticketAttempts } from "./runs-board.js";
 
 test("board card timestamps prefer run completion for finished jobs and last update otherwise", () => {
   const finishedJob = {
@@ -321,4 +321,13 @@ test("attemptDurationMillis measures wall clock, elapsed for in-progress attempt
   );
   assert.equal(attemptDurationMillis({ state: "failed", runs: [{ started_at: "2026-10-01T00:00:00Z" }] }, now), undefined, "terminal without completion times has no duration");
   assert.equal(attemptDurationMillis({ state: "queued", runs: [] }, now), undefined, "no timestamps at all has no duration");
+});
+
+test("only plain queued jobs are cancellable", () => {
+  assert.equal(canCancelJob({ state: "queued" }), true);
+  for (const state of ["running", "succeeded", "failed", "timed_out", "cancelled", "awaiting_approval"]) {
+    assert.equal(canCancelJob({ state }), false);
+  }
+  assert.equal(canCancelJob({ state: "queued", workflow: { name: "deliver", steps: ["build"], current_step: 0 } }), false);
+  assert.equal(canCancelJob({ state: "running", workflow: { name: "deliver" } }), false);
 });

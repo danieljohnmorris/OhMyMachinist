@@ -9,7 +9,7 @@ import { Transcript } from "./transcript.jsx";
 import { taskPresentation } from "./task-presentation.js";
 import { linkifyText } from "./linkify.js";
 import { Markdown } from "./markdown.js";
-import { jobDisplayTitle, resolutionLabel, supersededJob, ticketAttempts, attemptStart, attemptDurationMillis } from "./runs-board.js";
+import { jobDisplayTitle, canCancelJob, resolutionLabel, supersededJob, ticketAttempts, attemptStart, attemptDurationMillis } from "./runs-board.js";
 import { runSidebarLinks } from "./run-links.js";
 import { formatDurationMillis, formatTokenUsage } from "./run-metrics.js";
 import { activityRows } from "./run-activity.js";
@@ -29,6 +29,7 @@ export function TaskDetail({
   deleting,
   onDelete,
   onWorkflowAction,
+  onCancelJob,
   onAttemptChange,
   tab,
   onTabChange,
@@ -398,6 +399,7 @@ export function TaskDetail({
                 onAction={onWorkflowAction}
               />
             )}
+            {canCancelJob(job) && <CancelJobButton job={job} onCancel={onCancelJob} />}
           </Card>
           <div
             className="space-y-6 rounded-sm border border-border bg-surface p-5 text-sm sm:p-6"
@@ -554,6 +556,27 @@ function RunMetric({ label, value, mono = false }) {
         {value}
       </dd>
     </div>
+  );
+}
+
+function CancelJobButton({ job, onCancel }) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <Button
+      variant="outline"
+      disabled={busy}
+      aria-label={`Cancel task ${jobDisplayTitle(job)}`}
+      onClick={async () => {
+        setBusy(true);
+        try {
+          await onCancel(job);
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      {busy ? "Cancelling…" : "Cancel task"}
+    </Button>
   );
 }
 

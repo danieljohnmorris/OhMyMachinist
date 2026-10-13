@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"maps"
 	"slices"
 	"strings"
@@ -72,38 +73,10 @@ func (s *Server) processIssueTrigger(ctx context.Context, trigger config.Resolve
 			if !slices.ContainsFunc(issue.Labels, func(label string) bool { return strings.EqualFold(label, trigger.Label) }) {
 				continue
 			}
-			title := issues.Title(issue.Key, issue.Title)
-			task := protocol.Task{Title: title, SourceURL: issue.URL, Spec: issue.Description}
-			if err := task.Validate(); err != nil {
-				failures = append(failures, err)
-				continue
-			}
-			prompt := issue.URL
-			if issue.Description != "" {
-				prompt = issue.Description
-			}
-			command, renderErr := config.RenderPrompt(trigger.Command, prompt)
-			if renderErr != nil {
-				failures = append(failures, renderErr)
-				continue
-			}
-			command.Model = trigger.Model
-			subject := issue.URL
-			if subject == "" {
-				subject = issue.Key
-			}
-			_, created, admissionErr := s.store.CreateTriggeredJob(ctx, TriggerAdmission{
-				Identity: trigger.Identity, Family: trigger.Family, ConfigSignature: trigger.Signature,
-				ConfigGeneration: generation, OccurrenceKey: subject, Subject: subject, Title: title, ScheduledAt: s.now().UTC(),
-				Prompt: prompt, Repository: trigger.Repository, SelectionName: trigger.SelectionName,
-				Command: command, Task: &task, IssueKey: issue.Key,
-			})
-			if admissionErr != nil {
-				failures = append(failures, fmt.Errorf("%s: %w", issue.Key, admissionErr))
-				continue
-			}
-			if created {
-				admitted++
+			count, admitErr := s.admitIssue(ctx, trigger, generation, source, issue)
+			admitted += count
+			if admitErr != nil {
+				failures = append(failures, fmt.Errorf("%s: %w", issue.Key, admitErr))
 			}
 		}
 	}
@@ -111,6 +84,61 @@ func (s *Server) processIssueTrigger(ctx context.Context, trigger config.Resolve
 	recordErr := s.store.RecordTriggerAttempt(ctx, trigger.Identity, generation, admitted, triggerErr)
 	nextErr := s.store.SetTriggerNextDue(ctx, trigger.Identity, generation, s.now().UTC().Add(trigger.Every))
 	return errors.Join(triggerErr, recordErr, nextErr)
+}
+
+// admitIssue dedupes per ticket before creating work: an edit to a ticket with a
+// queued job updates that job's spec and posts one comment, an edit while a job
+// is running is ignored, and only a ticket without active work admits a new job.
+func (s *Server) admitIssue(ctx context.Context, trigger config.ResolvedTrigger, generation string, source issuePoller, issue issues.Issue) (int, error) {
+	title := issues.Title(issue.Key, issue.Title)
+	task := protocol.Task{Title: title, SourceURL: issue.URL, Spec: issue.Description}
+	if err := task.Validate(); err != nil {
+		return 0, err
+	}
+	prompt := issue.URL
+	if issue.Description != "" {
+		prompt = issue.Description
+	}
+	command, renderErr := config.RenderPrompt(trigger.Command, prompt)
+	if renderErr != nil {
+		return 0, renderErr
+	}
+	command.Model = trigger.Model
+	subject := issue.URL
+	if subject == "" {
+		subject = issue.Key
+	}
+	admission := TriggerAdmission{
+		Identity: trigger.Identity, Family: trigger.Family, ConfigSignature: trigger.Signature,
+		ConfigGeneration: generation, OccurrenceKey: subject, Subject: subject, Title: title, ScheduledAt: s.now().UTC(),
+		Prompt: prompt, Repository: trigger.Repository, SelectionName: trigger.SelectionName,
+		Command: command, Task: &task, IssueKey: issue.Key,
+	}
+	jobID, state, found, err := s.store.ActiveTriggerJob(ctx, subject, issue.Key)
+	if err != nil {
+		return 0, err
+	}
+	if found {
+		switch state {
+		case "running":
+			log.Printf("issue trigger %q: job %s is still running; ignoring ticket edit", trigger.Identity, jobID)
+			return 0, nil
+		case "queued":
+			if err := s.store.UpdateQueuedTriggerJob(ctx, jobID, admission); err != nil {
+				return 0, err
+			}
+			if commenter, ok := source.(issueCommenter); ok {
+				if err := commenter.PostComment(ctx, issue.Key, fmt.Sprintf("spec updated on queued %s", jobID)); err != nil {
+					return 0, fmt.Errorf("post spec-updated comment: %w", err)
+				}
+			}
+			return 1, nil
+		}
+	}
+	if _, _, err := s.store.CreateTriggeredJob(ctx, admission); err != nil {
+		return 0, err
+	}
+	return 1, nil
 }
 
 func (s *Server) processFixedTrigger(ctx context.Context, trigger config.ResolvedTrigger, generation string, firstDue time.Time, pending *time.Time, now time.Time) error {

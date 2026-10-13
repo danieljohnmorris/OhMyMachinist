@@ -298,6 +298,10 @@ export function githubIssueReference(job) {
   return match ? `#${match[1]}` : "";
 }
 
+export function canCancelJob(job) {
+  return !job.workflow && job.state === "queued";
+}
+
 export function runProgress(runs) {
   const completeStates = new Set(["succeeded", "failed", "timed_out", "cancelled"]);
   return { completed: runs.filter((run) => completeStates.has(run.state)).length, total: runs.length };
