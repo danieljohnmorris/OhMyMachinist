@@ -53,6 +53,7 @@ type Server struct {
 	shutdownTimeout      time.Duration
 	maxConcurrentJobs    int
 	workerToken          string
+	authMode             string
 	reviewDefaultProfile string
 	failAlerts           *failAlertWriter
 	csrfToken            string
@@ -109,9 +110,12 @@ type catalogResponse struct {
 	Repositories []string `json:"repositories"`
 }
 
-func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJobs int) (*Server, error) {
+func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJobs int, authMode string) (*Server, error) {
 	if maxConcurrentJobs < 0 {
 		return nil, errors.New("max concurrent jobs cannot be negative")
+	}
+	if authMode != config.AuthTokens && authMode != config.AuthNone {
+		return nil, fmt.Errorf("auth mode must be %q or %q", config.AuthTokens, config.AuthNone)
 	}
 	csrfToken, err := randomID("csrf", 24)
 	if err != nil {
@@ -174,6 +178,7 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 		schedulerError:    func(err error) { log.Printf("scheduler: %v", err) },
 		failAlerts:        &failAlertWriter{directory: alertsDirectory},
 		maxConcurrentJobs: maxConcurrentJobs, workerToken: workerToken, csrfToken: csrfToken,
+		authMode:             authMode,
 		reviewDefaultProfile: definition.Review.DefaultProfile,
 	}
 	server.handler, err = server.routes()
@@ -186,7 +191,7 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 func (s *Server) Handler() http.Handler { return s.handler }
 
 func (s *Server) Serve(ctx context.Context, listen string, onListening func(net.Addr)) error {
-	if err := validateLoopbackListen(listen); err != nil {
+	if err := validateListenAddress(listen); err != nil {
 		return err
 	}
 	listener, err := net.Listen("tcp", listen)
@@ -196,6 +201,9 @@ func (s *Server) Serve(ctx context.Context, listen string, onListening func(net.
 	defer listener.Close()
 	if onListening != nil {
 		onListening(listener.Addr())
+	}
+	if s.authOff() {
+		warnOnAuthDisabled(listener.Addr())
 	}
 	httpServer := &http.Server{
 		Handler:           s.handler,
@@ -343,6 +351,20 @@ func (s *Server) routes() (http.Handler, error) {
 	mux.HandleFunc("POST /api/v1/runs/{id}/complete", s.authorizeWorker(s.complete))
 	mux.HandleFunc("POST /api/v1/runs/{id}/events", s.authorizeWorker(s.liveEvents))
 	mux.HandleFunc("GET /api/v1/runs/{id}/events", s.authorizeArtifact(s.runEvents))
+	// Documented machine API (docs/api.md): scoped bearer tokens required.
+	mux.HandleFunc("GET /api/v1/jobs", s.authorizeRead(s.listJobsHandler))
+	mux.HandleFunc("GET /api/v1/jobs/{id}", s.authorizeRead(s.getJobHandler))
+	mux.HandleFunc("GET /api/v1/runs/{id}", s.authorizeRead(s.getRunHandler))
+	mux.HandleFunc("GET /api/v1/settings", s.authorizeRead(s.getSettingsHandler))
+	mux.HandleFunc("PUT /api/v1/settings/{key}", s.authorizeWrite(s.putSettingHandler))
+	mux.HandleFunc("GET /api/v1/tokens", s.authorizeWrite(s.listTokensHandler))
+	mux.HandleFunc("POST /api/v1/tokens", s.authorizeWrite(s.createTokenHandler))
+	mux.HandleFunc("DELETE /api/v1/tokens/{id}", s.authorizeWrite(s.revokeTokenHandler))
+	mux.HandleFunc("GET /api/v1/audit-log", s.authorizeRead(s.auditLogHandler))
+	// Model Context Protocol endpoint (docs/mcp.md), streamable HTTP.
+	mux.HandleFunc("POST /mcp", s.handleMCP)
+	mux.HandleFunc("GET /mcp", methodNotAllowed)
+	mux.HandleFunc("DELETE /mcp", methodNotAllowed)
 	mux.Handle("/", http.FileServer(http.FS(dist)))
 	return securityHeaders(mux), nil
 }
@@ -442,6 +464,11 @@ func (s *Server) catalog(response http.ResponseWriter, request *http.Request) {
 	})
 }
 
+// badRequestError marks submit validation failures that map to HTTP 400.
+type badRequestError struct{ err error }
+
+func (e badRequestError) Error() string { return e.err.Error() }
+
 func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 	if !limitRequestBody(response, request, maxRequestBytes) {
 		return
@@ -451,43 +478,51 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 		writeDecodeError(response, err)
 		return
 	}
-	if strings.TrimSpace(input.Repository) == "" {
-		writeError(response, http.StatusBadRequest, errors.New("repository is required"))
+	jobID, err := s.queueJob(request.Context(), input, identityFrom(request))
+	if err != nil {
+		if bad, ok := err.(badRequestError); ok {
+			writeError(response, http.StatusBadRequest, bad.err)
+			return
+		}
+		writeError(response, http.StatusInternalServerError, err)
 		return
 	}
-	repositories, repositoryErr := s.store.KnownRepositories(request.Context())
+	writeJSON(response, http.StatusCreated, map[string]string{"id": jobID})
+}
+
+// queueJob validates and stores one submitted job. It is shared by the HTTP
+// API and the MCP queue_job tool; validation failures are badRequestError.
+func (s *Server) queueJob(ctx context.Context, input submitRequest, identity TokenIdentity) (string, error) {
+	bad := func(err error) (string, error) { return "", badRequestError{err} }
+	if strings.TrimSpace(input.Repository) == "" {
+		return bad(errors.New("repository is required"))
+	}
+	repositories, repositoryErr := s.store.KnownRepositories(ctx)
 	if repositoryErr != nil {
-		writeError(response, http.StatusInternalServerError, repositoryErr)
-		return
+		return "", repositoryErr
 	}
 	if !slices.Contains(repositories, input.Repository) {
-		writeError(response, http.StatusBadRequest, fmt.Errorf("repository %q is not defined in the control plane", input.Repository))
-		return
+		return bad(fmt.Errorf("repository %q is not defined in the control plane", input.Repository))
 	}
 	input.Model = strings.TrimSpace(input.Model)
 	if len(input.Model) > 128 || strings.ContainsAny(input.Model, "\x00\r\n") {
-		writeError(response, http.StatusBadRequest, errors.New("model must be at most 128 characters on one line"))
-		return
+		return bad(errors.New("model must be at most 128 characters on one line"))
 	}
 	input.Project = strings.TrimSpace(input.Project)
 	project, projectErr := ResolveProjectKey(input.Project, input.Title)
 	if projectErr != nil {
-		writeError(response, http.StatusBadRequest, projectErr)
-		return
+		return bad(projectErr)
 	}
 	if input.Workflow != "" {
 		if input.Command != "" {
-			writeError(response, http.StatusBadRequest, errors.New("choose either workflow or command"))
-			return
+			return bad(errors.New("choose either workflow or command"))
 		}
 		definition, err := config.LoadDefinitions(s.definitionPath)
 		if err != nil {
-			writeError(response, http.StatusBadRequest, err)
-			return
+			return bad(err)
 		}
 		if input.Prompt != "" && (input.SourceURL != "" || input.Spec != "") {
-			writeError(response, http.StatusBadRequest, errors.New("use spec instead of prompt for a task"))
-			return
+			return bad(errors.New("use spec instead of prompt for a task"))
 		}
 		task := protocol.Task{Title: input.Title, SourceURL: input.SourceURL, Spec: input.Spec}
 		// Normalize older clients at the boundary; every new workflow is a task.
@@ -495,47 +530,44 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 			task.Spec = input.Prompt
 		}
 		if err := task.Validate(); err != nil {
-			writeError(response, http.StatusBadRequest, err)
-			return
+			return bad(err)
 		}
 		steps, err := definition.ResolveTaskWorkflow(input.Workflow, input.Model)
 		if err != nil {
-			writeError(response, http.StatusBadRequest, err)
-			return
+			return bad(err)
 		}
-		id, err := s.store.CreateTaskJob(request.Context(), task, input.Repository, input.Workflow, project, steps)
+		id, err := s.store.CreateTaskJob(ctx, task, input.Repository, input.Workflow, project, steps)
 		if err != nil {
-			writeError(response, http.StatusInternalServerError, err)
-			return
+			return "", err
 		}
-		writeJSON(response, http.StatusCreated, map[string]string{"id": id})
-		return
+		if err := s.store.RecordAudit(ctx, identity, "jobs.create", input.Repository+" "+input.Workflow); err != nil {
+			log.Printf("audit jobs.create: %v", err)
+		}
+		return id, nil
 	}
 	if input.SourceURL != "" || input.Spec != "" {
-		writeError(response, 400, errors.New("source_url and spec require a workflow"))
-		return
+		return bad(errors.New("source_url and spec require a workflow"))
 	}
 	if strings.TrimSpace(input.Command) == "" {
-		writeError(response, http.StatusBadRequest, errors.New("command is required"))
-		return
+		return bad(errors.New("command is required"))
 	}
 	command, err := config.LoadCommand(s.definitionPath, input.Command)
 	if err != nil {
-		writeError(response, http.StatusBadRequest, err)
-		return
+		return bad(err)
 	}
 	command, err = config.RenderPrompt(command, input.Prompt)
 	if err != nil {
-		writeError(response, http.StatusBadRequest, err)
-		return
+		return bad(err)
 	}
 	command.Model = input.Model
-	jobID, err := s.store.CreateJobWithOptions(request.Context(), input.Prompt, input.Repository, input.Command, command, CreateJobOptions{Title: input.Title, Project: project})
+	jobID, err := s.store.CreateJobWithOptions(ctx, input.Prompt, input.Repository, input.Command, command, CreateJobOptions{Title: input.Title, Project: project})
 	if err != nil {
-		writeError(response, http.StatusInternalServerError, err)
-		return
+		return "", err
 	}
-	writeJSON(response, http.StatusCreated, map[string]string{"id": jobID})
+	if err := s.store.RecordAudit(ctx, identity, "jobs.create", input.Repository+" "+input.Command); err != nil {
+		log.Printf("audit jobs.create: %v", err)
+	}
+	return jobID, nil
 }
 
 func (s *Server) deleteJob(response http.ResponseWriter, request *http.Request) {
@@ -552,6 +584,7 @@ func (s *Server) deleteJob(response http.ResponseWriter, request *http.Request) 
 		writeError(response, http.StatusInternalServerError, err)
 		return
 	}
+	s.recordAudit(request, "jobs.delete", request.PathValue("id"))
 	response.WriteHeader(http.StatusNoContent)
 }
 
@@ -661,7 +694,7 @@ func (s *Server) heartbeat(response http.ResponseWriter, request *http.Request) 
 
 func (s *Server) authorizeWorker(next http.HandlerFunc) http.HandlerFunc {
 	return func(response http.ResponseWriter, request *http.Request) {
-		if !s.validBearerRequest(request) {
+		if !s.authOff() && !s.validBearerRequest(request) {
 			writeUnauthorized(response)
 			return
 		}
@@ -669,19 +702,12 @@ func (s *Server) authorizeWorker(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// authorizeSubmission authenticates job-changing requests. Machine clients
+// present a bearer credential: the shared worker token or a write-scope API
+// token. Browsers use the same-origin CSRF defense. Handlers see the resolved
+// principal for audit logging.
 func (s *Server) authorizeSubmission(next http.HandlerFunc) http.HandlerFunc {
-	return func(response http.ResponseWriter, request *http.Request) {
-		if request.Header.Get("Authorization") != "" {
-			if !s.validBearerRequest(request) {
-				writeUnauthorized(response)
-				return
-			}
-		} else if !s.validBrowserRequest(request) {
-			writeError(response, http.StatusForbidden, errors.New("invalid submission origin or CSRF token"))
-			return
-		}
-		next(response, request)
-	}
+	return s.authorizeWrite(next)
 }
 
 func (s *Server) validBearerRequest(request *http.Request) bool {
@@ -689,9 +715,16 @@ func (s *Server) validBearerRequest(request *http.Request) bool {
 	return provided != request.Header.Get("Authorization") && subtle.ConstantTimeCompare([]byte(provided), []byte(s.workerToken)) == 1
 }
 
+// methodNotAllowed answers unsupported MCP transport methods; the streamable
+// HTTP transport is served via POST only.
+func methodNotAllowed(response http.ResponseWriter, _ *http.Request) {
+	response.Header().Set("Allow", "POST")
+	writeError(response, http.StatusMethodNotAllowed, errors.New("MCP endpoint supports POST only"))
+}
+
 func writeUnauthorized(response http.ResponseWriter) {
 	response.Header().Set("WWW-Authenticate", "Bearer")
-	writeError(response, http.StatusUnauthorized, errors.New("invalid worker token"))
+	writeError(response, http.StatusUnauthorized, errors.New("invalid or missing bearer token"))
 }
 
 func (s *Server) validBrowserRequest(request *http.Request) bool {
@@ -704,21 +737,6 @@ func (s *Server) validBrowserRequest(request *http.Request) bool {
 	}
 	hostname := origin.Hostname()
 	return hostname == "localhost" || net.ParseIP(hostname) != nil && net.ParseIP(hostname).IsLoopback()
-}
-
-func validateLoopbackListen(listen string) error {
-	host, _, err := net.SplitHostPort(listen)
-	if err != nil {
-		return fmt.Errorf("invalid listen address %q: %w", listen, err)
-	}
-	if host == "localhost" {
-		return nil
-	}
-	ip := net.ParseIP(host)
-	if ip == nil || !ip.IsLoopback() {
-		return fmt.Errorf("listen address %q must use a loopback host", listen)
-	}
-	return nil
 }
 
 func decodeJSON(request *http.Request, target any) error {
@@ -786,19 +804,21 @@ func (s *Server) workflowAction(response http.ResponseWriter, request *http.Requ
 		writeDecodeError(response, err)
 		return
 	}
-	err := s.store.WorkflowAction(request.Context(), request.PathValue("id"), input.RunID, request.PathValue("action"), input.PreviousProcessStopped, input.Feedback)
-	if errors.Is(err, sql.ErrNoRows) {
-		writeError(response, http.StatusNotFound, err)
-		return
+	if err := s.store.WorkflowAction(request.Context(), request.PathValue("id"), input.RunID, request.PathValue("action"), input.PreviousProcessStopped, input.Feedback); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(response, http.StatusNotFound, err)
+			return
+		}
+		if errors.Is(err, ErrWorkflowAction) {
+			writeError(response, http.StatusConflict, err)
+			return
+		}
+		if err != nil {
+			writeError(response, http.StatusInternalServerError, err)
+			return
+		}
 	}
-	if errors.Is(err, ErrWorkflowAction) {
-		writeError(response, http.StatusConflict, err)
-		return
-	}
-	if err != nil {
-		writeError(response, http.StatusInternalServerError, err)
-		return
-	}
+	s.recordAudit(request, "jobs."+request.PathValue("action"), request.PathValue("id"))
 	writeJSON(response, http.StatusOK, map[string]string{"status": "accepted"})
 }
 

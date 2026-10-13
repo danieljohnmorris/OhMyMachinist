@@ -187,7 +187,7 @@ func (s *Server) reconcileTicketOutcomes(ctx context.Context) error {
 	if err := s.store.linkTicketAttempts(ctx); err != nil {
 		log.Printf("link ticket attempts: %v", err)
 	}
-	jobs, err := s.store.listJobs(ctx)
+	jobs, err := s.store.listJobs(ctx, "")
 	if err != nil {
 		return fmt.Errorf("list jobs for resolution: %w", err)
 	}

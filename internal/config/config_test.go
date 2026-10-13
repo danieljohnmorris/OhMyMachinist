@@ -142,6 +142,27 @@ prompt_file = "plan.md"
 	if token, err := server.WorkerToken(); err != nil || token != "secret" {
 		t.Fatalf("token = %q, %v", token, err)
 	}
+	if server.Auth != AuthTokens {
+		t.Fatalf("default auth = %q, want %q", server.Auth, AuthTokens)
+	}
+}
+
+func TestLoadConfigValidatesAuthMode(t *testing.T) {
+	directory := t.TempDir()
+	writeTestFile(t, filepath.Join(directory, "token"), "secret")
+	path := filepath.Join(directory, "config.toml")
+	writeTestFile(t, path, "[server]\nworker_token_file = \"token\"\nauth = \"open\"\n")
+	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), `auth must be "tokens" or "none"`) {
+		t.Fatalf("invalid auth error = %v", err)
+	}
+	writeTestFile(t, path, "[server]\nworker_token_file = \"token\"\nauth = \"none\"\n")
+	machinistConfig, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if machinistConfig.Server.Auth != AuthNone {
+		t.Fatalf("auth = %q, want %q", machinistConfig.Server.Auth, AuthNone)
+	}
 }
 
 func TestLoadConfigParsesIssueSources(t *testing.T) {

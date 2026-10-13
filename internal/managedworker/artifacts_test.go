@@ -74,7 +74,7 @@ printf '{"outcome":"complete","summary":"Built"}' > "$MACHINIST_STEP_RESULT_PATH
 		t.Fatal(err)
 	}
 	defer store.Close()
-	server, err := controlplane.NewServer(store, definition, "secret", 0)
+	server, err := controlplane.NewServer(store, definition, "secret", 0, config.AuthTokens)
 	if err != nil {
 		t.Fatal(err)
 	}

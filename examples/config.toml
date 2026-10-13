@@ -4,6 +4,17 @@ database = "~/.machinist/server/machinist.db"
 worker_token_file = "~/.machinist/server/worker.token"
 # max_concurrent_jobs = 1
 
+# API authentication. Default "tokens" requires scoped bearer tokens for
+# machine clients (create with `machinist tokens create --name bot --scope write`,
+# or from the Settings page). Tokens are stored hashed in the server database
+# and must live in your bot's environment — never in this file or any
+# repository. "none" opts out and is only allowed on a loopback or trusted
+# Tailscale interface; it logs a startup warning.
+# auth = "tokens"
+
+# The MCP endpoint (streamable HTTP) is served at /mcp on the same listener;
+# see docs/mcp.md.
+
 # Library profile used when a repository has no .machinist/review.yaml and no
 # per-project choice in Settings. Set to "dan-pr-review" for Daniel's projects
 # after installing his reviewer skills; otherwise the shipped default runs.

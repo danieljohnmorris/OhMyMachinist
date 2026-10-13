@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -65,8 +66,18 @@ type Server struct {
 	Database          string `toml:"database"`
 	WorkerTokenFile   string `toml:"worker_token_file"`
 	MaxConcurrentJobs *int   `toml:"max_concurrent_jobs"`
-	configDir         string
+	// Auth selects the API authentication mode: "tokens" (default) requires
+	// scoped bearer tokens for machine access, "none" disables auth and is
+	// only allowed on loopback or trusted Tailscale interfaces.
+	Auth      string `toml:"auth"`
+	configDir string
 }
+
+// AuthTokens and AuthNone name the supported server auth modes.
+const (
+	AuthTokens = "tokens"
+	AuthNone   = "none"
+)
 
 type Config struct {
 	Storage      Storage             `toml:"storage"`
@@ -582,6 +593,12 @@ func applyServerDefaults(server Server) (Server, error) {
 	if strings.TrimSpace(server.WorkerTokenFile) == "" {
 		return Server{}, errors.New("worker_token_file is required")
 	}
+	if server.Auth == "" {
+		server.Auth = AuthTokens
+	}
+	if server.Auth != AuthTokens && server.Auth != AuthNone {
+		return Server{}, fmt.Errorf("auth must be %q or %q", AuthTokens, AuthNone)
+	}
 	if server.MaxConcurrentJobs != nil && *server.MaxConcurrentJobs <= 0 {
 		return Server{}, errors.New("max_concurrent_jobs must be positive")
 	}
@@ -610,6 +627,27 @@ func validateCommand(name string, command []string) error {
 		if strings.Contains(argument, modelParameter) && (!strings.HasPrefix(argument, "--") || !strings.HasSuffix(argument, "="+modelParameter) || strings.Count(argument, modelParameter) != 1) {
 			return fmt.Errorf("executor %q must use %s as a complete optional --flag=%s argument", name, modelParameter, modelParameter)
 		}
+	}
+	return nil
+}
+
+// ValidateListenAuth rejects auth opt-out on untrusted interfaces. Auth-off
+// servers may only bind loopback or the Tailscale CGNAT range; token auth may
+// bind any loopback or Tailscale address. Public binds stay rejected.
+func ValidateListenAuth(auth, listen string) error {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		return fmt.Errorf("invalid listen address %q: %w", listen, err)
+	}
+	ip := net.ParseIP(host)
+	trusted := host == "localhost" || (ip != nil && ip.IsLoopback())
+	if !trusted && ip != nil {
+		if ip4 := ip.To4(); ip4 != nil && ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
+			trusted = true
+		}
+	}
+	if !trusted {
+		return fmt.Errorf("listen address %q must use a loopback or Tailscale host", listen)
 	}
 	return nil
 }

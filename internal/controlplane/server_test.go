@@ -116,7 +116,7 @@ func TestSubmitStoresCommandTitleWithPrompt(t *testing.T) {
 	if _, err := store.db.ExecContext(t.Context(), `INSERT INTO known_repositories(repository) VALUES('machinist')`); err != nil {
 		t.Fatal(err)
 	}
-	server, err := NewServer(store, definitionPath, "secret", 0)
+	server, err := NewServer(store, definitionPath, "secret", 0, config.AuthTokens)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -388,10 +388,10 @@ func TestServerServesEmbeddedReactAppAndRejectsRemoteListen(t *testing.T) {
 	if response.StatusCode != http.StatusOK || !strings.Contains(body.String(), `<div id="root"></div>`) {
 		t.Fatalf("status = %d body = %q", response.StatusCode, body.String())
 	}
-	if err := validateLoopbackListen("0.0.0.0:7331"); err == nil {
+	if err := validateListenAddress("0.0.0.0:7331"); err == nil {
 		t.Fatal("expected non-loopback listen rejection")
 	}
-	if err := validateLoopbackListen("127.0.0.1:7331"); err != nil {
+	if err := validateListenAddress("127.0.0.1:7331"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -781,7 +781,7 @@ func TestServerCancellationAlwaysStopsHTTPServer(t *testing.T) {
 			t.Fatal(err)
 		}
 		store := openTestStore(t, filepath.Join(directory, "machinist.db"))
-		server, err := NewServer(store, definitionPath, "secret", 0)
+		server, err := NewServer(store, definitionPath, "secret", 0, config.AuthTokens)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -896,7 +896,7 @@ func newTestHTTPServerWithLimit(t *testing.T, maxConcurrentJobs int) (*Server, *
 		t.Fatal(err)
 	}
 	store := openTestStore(t, filepath.Join(directory, "machinist.db"))
-	server, err := NewServer(store, definitionPath, "secret", maxConcurrentJobs)
+	server, err := NewServer(store, definitionPath, "secret", maxConcurrentJobs, config.AuthTokens)
 	if err != nil {
 		t.Fatal(err)
 	}
