@@ -330,6 +330,8 @@ func (s *Server) routes() (http.Handler, error) {
 	mux.HandleFunc("DELETE /api/v1/jobs/{id}", s.authorizeSubmission(s.deleteJob))
 	mux.HandleFunc("POST /api/v1/workers/poll", s.authorizeWorker(s.poll))
 	mux.HandleFunc("POST /api/v1/webhooks/issues", s.issueWebhook)
+	mux.HandleFunc("GET /api/v1/review-instructions", s.reviewInstructions)
+	mux.HandleFunc("PUT /api/v1/review-instructions", s.authorizeSubmission(s.saveReviewInstructions))
 	mux.HandleFunc("POST /api/v1/runs/{id}/heartbeat", s.authorizeWorker(s.heartbeat))
 	mux.HandleFunc("POST /api/v1/runs/{id}/complete", s.authorizeWorker(s.complete))
 	mux.HandleFunc("POST /api/v1/runs/{id}/events", s.authorizeWorker(s.liveEvents))

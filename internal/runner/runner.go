@@ -47,6 +47,10 @@ type Options struct {
 	ArtifactKey   string
 	Command       config.ResolvedCommand
 	Repository    string
+	// ExtraEnv is appended to the executor command environment. The managed
+	// worker uses it to expose the control plane so trusted post-agent scripts
+	// (e.g. the built-in PR review) can read per-project settings.
+	ExtraEnv      []string
 	DataDirectory string
 	Stdout        io.Writer
 	Stderr        io.Writer
@@ -201,6 +205,7 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	command := exec.Command(executorCommand[0], executorCommand[1:]...)
 	command.Dir = repository
 	command.Env = append(sanitizedEnvironment(os.Environ()), "MACHINIST_RUN_ID="+runID, "MACHINIST_REPOSITORY="+repository, tokenUsageEnvironment+"="+tokenUsagePath)
+	command.Env = append(command.Env, options.ExtraEnv...)
 	if options.Revision != nil {
 		revisionPath := filepath.Join(runDirectory, "revision.json")
 		body, err := json.Marshal(options.Revision)
