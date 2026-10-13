@@ -96,6 +96,7 @@ func newResolutionTestServer(t *testing.T) (*Server, *Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	server.planePause = 0
 	return server, store
 }
 
@@ -202,11 +203,11 @@ func TestPullRequestMatchesTicket(t *testing.T) {
 
 func TestReconcileResolvesMergedPullRequestAndMovesPlaneTicket(t *testing.T) {
 	server, store := newResolutionTestServer(t)
-	jobID := seedJob(t, store, "MACH-5: Fix sidebar", "", "failed")
+	jobID := seedJob(t, store, "MACH-6: Fix sidebar", "", "failed")
 	planeClient, requests := newPlaneFixture(t)
 	cli, _ := newScriptedGitHubCLI(scriptedGitHubResult{stdout: `[
-		{"number": 12, "title": "MACH-5: Fix sidebar", "headRefName": "mach-5-sidebar", "url": "https://github.com/dan/sparkdash/pull/12", "mergedBy": {"login": "kim"}},
-		{"number": 10, "title": "MACH-5: one", "headRefName": "mach-5-one", "url": "https://github.com/dan/sparkdash/pull/10", "mergedBy": {"login": "dan"}}
+		{"number": 12, "title": "MACH-6: Fix sidebar", "headRefName": "mach-6-sidebar", "url": "https://github.com/dan/sparkdash/pull/12", "mergedBy": {"login": "kim"}},
+		{"number": 10, "title": "MACH-6: one", "headRefName": "mach-6-one", "url": "https://github.com/dan/sparkdash/pull/10", "mergedBy": {"login": "dan"}}
 	]`})
 	server.github = cli
 	server.planeClients = map[string]*issues.PlaneClient{"issue/sparkdash": planeClient}
@@ -232,9 +233,9 @@ func TestReconcileResolvesMergedPullRequestAndMovesPlaneTicket(t *testing.T) {
 	var patch, comment *planeRequest
 	for _, request := range *requests {
 		switch {
-		case request.Method == http.MethodPatch && strings.HasSuffix(request.Path, "/projects/proj/issues/uuid-MACH-5/"):
+		case request.Method == http.MethodPatch && strings.HasSuffix(request.Path, "/projects/proj/issues/uuid-MACH-6/"):
 			patch = &request
-		case request.Method == http.MethodPost && strings.HasSuffix(request.Path, "/projects/proj/issues/uuid-MACH-5/comments/"):
+		case request.Method == http.MethodPost && strings.HasSuffix(request.Path, "/projects/proj/issues/uuid-MACH-6/comments/"):
 			comment = &request
 		}
 	}
@@ -443,5 +444,51 @@ func TestMarkJobResolvedRequiresResolvableState(t *testing.T) {
 	queued := seedJob(t, store, "MACH-6: queued", "", "queued")
 	if err := store.MarkJobResolved(t.Context(), queued, "plane", "Plane Done", time.Now().UTC()); err == nil {
 		t.Fatal("resolving a queued job must fail")
+	}
+}
+
+func TestReconcileGroupsJobsByTicketAndSkipsDoneTickets(t *testing.T) {
+	server, store := newResolutionTestServer(t)
+	open1 := seedJob(t, store, "MACH-6: First attempt", "", "failed")
+	open2 := seedJob(t, store, "MACH-6: Second attempt", "", "failed")
+	done := seedJob(t, store, "MACH-5: Already done", "", "failed")
+	planeClient, requests := newPlaneFixture(t)
+	cli, _ := newScriptedGitHubCLI(scriptedGitHubResult{stdout: `[
+		{"number": 30, "title": "MACH-6: fix", "headRefName": "mach-6", "url": "https://github.com/dan/sparkdash/pull/30", "mergedBy": {"login": "kim"}},
+		{"number": 31, "title": "MACH-5: fix", "headRefName": "mach-5", "url": "https://github.com/dan/sparkdash/pull/31", "mergedBy": {"login": "kim"}}
+	]`})
+	server.github = cli
+	server.planeClients = map[string]*issues.PlaneClient{"issue/sparkdash": planeClient}
+
+	if err := server.reconcileTicketOutcomes(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{open1, open2, done} {
+		if job := jobByID(t, store, id); job.State != "resolved" {
+			t.Fatalf("job %s state = %q, want resolved", id, job.State)
+		}
+	}
+	comments := map[string]int{}
+	patches := map[string]int{}
+	for _, request := range *requests {
+		if request.Method == http.MethodPost && strings.HasSuffix(request.Path, "/comments/") {
+			comments[request.Path]++
+		}
+		if request.Method == http.MethodPatch {
+			patches[request.Path]++
+		}
+	}
+	if comments["/api/v1/workspaces/platform/projects/proj/issues/uuid-MACH-6/comments/"] != 1 {
+		t.Fatalf("MACH-6 comments = %v, want exactly one for two jobs", comments)
+	}
+	for path := range comments {
+		if strings.Contains(path, "MACH-5") {
+			t.Fatalf("already-done MACH-5 was commented: %v", comments)
+		}
+	}
+	for path := range patches {
+		if strings.Contains(path, "MACH-5") {
+			t.Fatalf("already-done MACH-5 was patched: %v", patches)
+		}
 	}
 }

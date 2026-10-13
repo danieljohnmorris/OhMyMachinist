@@ -46,6 +46,7 @@ type Server struct {
 	githubRepositories map[string]string
 	webhookSecret      string
 	resolutionEvery    time.Duration
+	planePause         time.Duration
 	schedulerEvery     time.Duration
 	now                func() time.Time
 	schedulerError     func(error)
@@ -167,6 +168,7 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 		githubRepositories: definition.GitHub.Repositories,
 		webhookSecret:      definition.IssueSources.WebhookSecretValue(),
 		resolutionEvery:    defaultResolutionEvery,
+		planePause:         2500 * time.Millisecond, // ~2 Plane calls per ticket; stays under 60 req/min
 		schedulerEvery:     30 * time.Second, shutdownTimeout: 5 * time.Second,
 		schedulerError:    func(err error) { log.Printf("scheduler: %v", err) },
 		failAlerts:        &failAlertWriter{directory: alertsDirectory},
