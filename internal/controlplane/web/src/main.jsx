@@ -115,6 +115,10 @@ function App() {
 
   const connectedWorkers = status.workers.filter((worker) => worker.connected).length;
   const selectedJob = route.jobID ? status.jobs.find((job) => job.id === route.jobID) : undefined;
+  // ?attempt=<jobID> switches the page to that attempt's job; a missing or
+  // stale param falls back to the job in the URL.
+  const attemptJob = route.attempt ? status.jobs.find((job) => job.id === route.attempt) : undefined;
+  const displayJob = attemptJob || selectedJob;
 
   async function submit(event) {
     event.preventDefault();
@@ -177,10 +181,24 @@ function App() {
     }
   }
 
+  function taskHash(jobID, tab, attempt) {
+    const params = new URLSearchParams();
+    if (tab && tab !== "transcript") params.set("tab", tab);
+    if (attempt && attempt !== jobID) params.set("attempt", attempt);
+    const query = params.toString();
+    return `#/runs/${encodeURIComponent(jobID)}${query ? `?${query}` : ""}`;
+  }
+
   function selectTaskTab(next) {
-    const hash = `#/runs/${encodeURIComponent(route.jobID)}${next && next !== "transcript" ? `?tab=${encodeURIComponent(next)}` : ""}`;
+    const hash = taskHash(route.jobID, next, route.attempt);
     window.history.replaceState(null, "", hash);
     setRoute({ ...route, tab: next });
+  }
+
+  function selectTaskAttempt(next) {
+    const hash = taskHash(route.jobID, route.tab, next);
+    window.history.replaceState(null, "", hash);
+    setRoute({ ...route, attempt: next });
   }
 
   return (
@@ -209,7 +227,7 @@ function App() {
       </aside>
 
       <main className="workshop min-w-0 flex-1">
-        {view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={selectedJob} jobs={status.jobs} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} tab={route.tab} onTabChange={selectTaskTab} /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : view === "workers" ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} /> : view === "triggers" ? <TriggersPage triggers={status.triggers || []} loaded={statusLoaded} error={statusError} /> : ["commands", "workflows"].includes(view) ? <CommandsPage /> : <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
+        {view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={displayJob} jobs={status.jobs} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} onAttemptChange={selectTaskAttempt} tab={route.tab} onTabChange={selectTaskTab} /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : view === "workers" ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} /> : view === "triggers" ? <TriggersPage triggers={status.triggers || []} loaded={statusLoaded} error={statusError} /> : ["commands", "workflows"].includes(view) ? <CommandsPage /> : <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
           <PageHeading title="Tasks" description="Describe the work. Review the result.">
             <div className="flex items-center gap-2">
               <Button className="text-xs!" onClick={() => setComposerOpen(true)}><Plus className="size-4" />New task</Button>

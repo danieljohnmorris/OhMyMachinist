@@ -69,6 +69,63 @@ export function supersededJob(jobs, job) {
   return jobs.find((candidate) => candidate.id === job.superseded_by);
 }
 
+const terminalAttemptStates = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
+
+function validAttemptTimestamp(value) {
+  return Boolean(value && value !== zeroTime && Number.isFinite(Date.parse(value)));
+}
+
+// ticketAttempts lists every attempt for the same Plane ticket as job, oldest
+// first, including job itself. Attempts are matched through previous_job_id
+// chains in both directions and by ticket key, so retitled or half-deleted
+// chains still resolve. Jobs deleted since a link was made are skipped.
+export function ticketAttempts(jobs, job) {
+  const group = new Map([[job.id, job]]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const candidate of jobs) {
+      if (group.has(candidate.id)) continue;
+      const linked =
+        (candidate.previous_job_id && group.has(candidate.previous_job_id)) ||
+        [...group.values()].some((member) => member.previous_job_id === candidate.id);
+      if (linked) {
+        group.set(candidate.id, candidate);
+        changed = true;
+      }
+    }
+  }
+  const key = jobTicketKey(job);
+  if (key) {
+    for (const candidate of jobs) {
+      if (candidate.id !== job.id && jobTicketKey(candidate) === key) group.set(candidate.id, candidate);
+    }
+  }
+  return [...group.values()].sort((left, right) => {
+    const leftRank = attemptRank(left);
+    const rightRank = attemptRank(right);
+    return leftRank < rightRank ? -1 : leftRank > rightRank ? 1 : 0;
+  });
+}
+
+// Start of an attempt: its earliest run start, falling back to job creation.
+export function attemptStart(job) {
+  const starts = (job.runs || []).map((run) => run.started_at).filter(validAttemptTimestamp);
+  if (!starts.length) return validAttemptTimestamp(job.created_at) ? job.created_at : "";
+  return starts.reduce((earliest, value) => (Date.parse(value) < Date.parse(earliest) ? value : earliest));
+}
+
+// Wall-clock duration of an attempt: from its start to the latest completed
+// run; attempts still in progress measure elapsed time to `now`.
+export function attemptDurationMillis(job, now = new Date()) {
+  const start = Date.parse(attemptStart(job));
+  if (!Number.isFinite(start)) return undefined;
+  if (!terminalAttemptStates.has(job.state)) return Math.max(0, now.getTime() - start);
+  const ends = (job.runs || []).map((run) => run.completed_at).filter(validAttemptTimestamp);
+  if (!ends.length) return undefined;
+  return Math.max(0, Math.max(...ends.map((value) => Date.parse(value))) - start);
+}
+
 // collapseIssueAttempts reduces jobs to one entry per source issue: the latest
 // attempt, annotated with how many prior attempts failed. Jobs without an issue
 // key, and issues with a single attempt, pass through unchanged. Input order is
