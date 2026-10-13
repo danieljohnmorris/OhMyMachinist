@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { attemptDurationMillis, attemptStart, attemptTime, boardCardTimestamp, boardColumnForState, boardDateFilters, boardDateWindow, collapseIssueAttempts, collapseJobsByTicket, filterJobs, filterJobsByDate, githubIssueReference, groupJobsByBoardColumn, jobDisplayTitle, jobTicketKey, needsAttention, priorAttempts, supersededJob, ticketAttempts } from "./runs-board.js";
+import { attemptDurationMillis, attemptStart, attemptTime, boardCardTimestamp, boardColumnForState, boardDateFilters, boardDateWindow, collapseIssueAttempts, collapseJobsByTicket, filterJobs, filterJobsByDate, githubIssueReference, groupJobsByBoardColumn, jobCounts, jobDisplayTitle, jobTicketKey, needsAttention, priorAttempts, resolutionLabel, supersededJob, ticketAttempts } from "./runs-board.js";
 
 test("board card timestamps prefer run completion for finished jobs and last update otherwise", () => {
   const finishedJob = {
@@ -42,6 +42,31 @@ test("job states map to the three board columns without hiding attention states"
   assert.deepEqual(grouped.queued.map(({ id }) => id), ["queued"]);
   assert.deepEqual(grouped.running.map(({ id }) => id), ["running"]);
   assert.deepEqual(grouped.finished.map(({ id }) => id), ["succeeded", "failed", "timed_out", "cancelled", "unexpected_state"]);
+});
+
+test("resolved jobs land under Finished, show green and are counted with Succeeded", () => {
+  assert.equal(boardColumnForState("resolved"), "finished");
+  assert.equal(needsAttention("resolved"), false);
+
+  const jobs = ["succeeded", "resolved", "failed"].map((state) => ({ id: state, state }));
+  const grouped = groupJobsByBoardColumn(jobs);
+  assert.deepEqual(grouped.finished.map(({ id }) => id), ["succeeded", "resolved", "failed"]);
+  assert.deepEqual(filterJobs(jobs, "resolved").map(({ id }) => id), ["resolved"]);
+  assert.deepEqual(filterJobs(jobs, "succeeded").map(({ id }) => id), ["succeeded"]);
+  assert.deepEqual(filterJobs(jobs, "failed").map(({ id }) => id), ["failed"]);
+
+  const counts = jobCounts(jobs);
+  assert.equal(counts.all, 3);
+  assert.equal(counts.succeeded, 2);
+  assert.equal(counts.resolved, 1);
+  assert.equal(counts.failed, 1);
+});
+
+test("resolution labels describe how the ticket was closed", () => {
+  assert.equal(resolutionLabel({ state: "resolved", resolution_kind: "pr", resolution_detail: "PR #12 (merged by dan)" }), "Resolved via PR #12 (merged by dan)");
+  assert.equal(resolutionLabel({ state: "resolved", resolution_kind: "plane", resolution_detail: "Plane Done" }), "Resolved via Plane Done");
+  assert.equal(resolutionLabel({ state: "succeeded", resolution_kind: "pr", resolution_detail: "PR #12 (merged by dan)" }), "");
+  assert.equal(resolutionLabel({ state: "resolved", resolution_kind: "pr", resolution_detail: "  " }), "");
 });
 
 test("board and table filters use the same filtered job set", () => {

@@ -120,5 +120,15 @@ command = "task-to-pr"
 
 Set `source = "linear"` for a Linear trigger. For Plane, set `PLANE_URL`,
 `PLANE_WORKSPACE`, and `PLANE_API_KEY`; for Linear, set `LINEAR_API_KEY`. Poll
-jobs are deduplicated by issue URL or key while active. Webhooks must be
-verified with the `issues.WebhookHandler` helper before parsing.
+jobs are deduplicated by issue URL or key while active.
+
+Finished jobs whose ticket completes outside the factory move to the green
+`resolved` state. A card becomes resolved when its Plane ticket reaches a
+completed-group state (Done), or when a merged pull request references the
+ticket key in its title or branch, or links the Plane issue. The control plane
+reconciles tickets at startup and then roughly every ten minutes; a merged
+pull request also moves the Plane ticket to Done and posts a comment. Point a
+Plane webhook at `POST /api/v1/webhooks/issues` (HMAC-SHA256 in the
+`X-Signature` header) to resolve cards immediately on state changes. The
+shared secret comes from `issue_sources.webhook_secret` or the
+`MACHINIST_ISSUE_WEBHOOK_SECRET` environment variable.

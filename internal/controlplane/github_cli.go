@@ -325,6 +325,39 @@ func (g *GitHubCLI) run(ctx context.Context, operation string, args []string) ([
 	return nil, &GitHubCLIError{Kind: kind, Operation: operation, Detail: detail, Err: err}
 }
 
+// GitHubPullRequest is a merged pull request as returned by the GitHub CLI.
+type GitHubPullRequest struct {
+	Number      int    `json:"number"`
+	Title       string `json:"title"`
+	HeadRefName string `json:"headRefName"`
+	URL         string `json:"url"`
+	Body        string `json:"body"`
+	MergedBy    struct {
+		Login string `json:"login"`
+	} `json:"mergedBy"`
+}
+
+// MergedPullRequests lists recent merged pull requests for a repository. The
+// caller matches them against ticket keys, so a bounded recent window is
+// enough for reconciliation.
+func (g *GitHubCLI) MergedPullRequests(ctx context.Context, repository string, limit int) ([]GitHubPullRequest, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	args := []string{"pr", "list", "--repo", repository, "--state", "merged",
+		"--limit", strconv.Itoa(limit),
+		"--json", "number,title,headRefName,url,body,mergedBy"}
+	output, err := g.run(ctx, "list merged pull requests", args)
+	if err != nil {
+		return nil, err
+	}
+	var pullRequests []GitHubPullRequest
+	if err := json.Unmarshal(output, &pullRequests); err != nil {
+		return nil, malformedGitHubOutput("list merged pull requests", err, output)
+	}
+	return pullRequests, nil
+}
+
 func classifyGitHubCLIError(ctx context.Context, stderr []byte, err error) GitHubCLIErrorKind {
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
 		return GitHubCLIErrorTimeout

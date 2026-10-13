@@ -115,6 +115,59 @@ func (p *PlaneClient) SetState(ctx context.Context, key, state string) error {
 
 func (p *PlaneClient) IssueURL(key string) string { return p.endpoint("issues/", key, "/") }
 
+// PlaneIssueState is the state an issue currently sits in. Plane groups states
+// into triage, backlog, started, completed and cancelled.
+type PlaneIssueState struct {
+	Name  string
+	Group string
+}
+
+// IssueState fetches the current state of an issue by key.
+func (p *PlaneClient) IssueState(ctx context.Context, key string) (PlaneIssueState, error) {
+	if err := requiresValue(key, "issue key"); err != nil {
+		return PlaneIssueState{}, err
+	}
+	var response struct {
+		State     json.RawMessage `json:"state"`
+		StateName string          `json:"state_name"`
+	}
+	if err := p.request(ctx, http.MethodGet, p.endpoint("issues/", key, "/"), nil, &response); err != nil {
+		return PlaneIssueState{}, err
+	}
+	state := PlaneIssueState{Name: response.StateName}
+	if len(response.State) > 0 {
+		var named struct {
+			Name  string `json:"name"`
+			Group string `json:"group"`
+		}
+		if err := json.Unmarshal(response.State, &named); err == nil {
+			state.Name = firstNonEmpty(named.Name, state.Name)
+			state.Group = named.Group
+		} else {
+			var name string
+			if err := json.Unmarshal(response.State, &name); err == nil {
+				state.Name = firstNonEmpty(name, state.Name)
+			}
+		}
+	}
+	if state.Name == "" && state.Group == "" {
+		return PlaneIssueState{}, fmt.Errorf("plane issue %s has no state", key)
+	}
+	return state, nil
+}
+
+// IsCompletedPlaneState reports whether an issue state sits in Plane's
+// completed group (Done) or is literally named Done.
+func IsCompletedPlaneState(state PlaneIssueState) bool {
+	if strings.EqualFold(state.Group, "completed") {
+		return true
+	}
+	return strings.EqualFold(state.Name, "done")
+}
+
+// CompletedPlaneState is the state name Machinist moves delivered tickets to.
+const CompletedPlaneState = "Done"
+
 func (p *PlaneClient) endpoint(parts ...string) string {
 	base := strings.TrimRight(p.config.URL, "/")
 	base += "/api/v1/workspaces/" + url.PathEscape(p.config.Workspace) + "/projects/" + url.PathEscape(p.config.ProjectID) + "/"

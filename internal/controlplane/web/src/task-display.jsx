@@ -8,6 +8,7 @@ export function State({ value }) {
     running: "border-warning/25 bg-warning/10 text-warning",
     queued: "border-warning/25 bg-warning/10 text-warning",
     succeeded: "border-success/25 bg-success/10 text-success",
+    resolved: "border-success/25 bg-success/10 text-success",
     failed: "border-danger/25 bg-danger/10 text-danger",
     timed_out: "border-danger/25 bg-danger/10 text-danger",
     cancelled: "border-danger/25 bg-danger/10 text-danger",
