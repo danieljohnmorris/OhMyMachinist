@@ -75,7 +75,7 @@ button:disabled { cursor: not-allowed; }
 .workshop { background: var(--background); }
 .brand-wordmark { font-family: var(--font-sans); font-size: 1.125rem; font-weight: 600; letter-spacing: -.02em; }
 .brand-logo-link { display: flex; align-items: center; min-width: 0; }
-.brand-logo { display: block; height: 2.25rem; width: auto; max-width: 10.5rem; object-fit: contain; }
+.brand-logo { display: block; height: 1.875rem; margin-left: 0; width: auto; max-width: 10.5rem; object-fit: contain; }
 .brand-logo-dark { display: none; }
 .dark .brand-logo-light { display: none; }
 .dark .brand-logo-dark { display: block; }
