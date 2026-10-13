@@ -1,6 +1,11 @@
 /bin/
 /.factory/
 /.machinist/
+# Local config overlay and all env files stay out of git; templates use
+# *.example placeholders instead.
+*.env
+.env.*
+!*.env.example
 *.tmp
 __pycache__/
 *.py[cod]

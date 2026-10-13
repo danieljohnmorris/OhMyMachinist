@@ -77,7 +77,16 @@ type Config struct {
 	IssueSources issues.Config       `toml:"issue_sources"`
 	Triggers     TriggerDefinitions  `toml:"triggers"`
 	Alerts       Alerts              `toml:"alerts"`
+	Review       Review              `toml:"review"`
 	path         string
+}
+
+// Review configures the built-in PR review. DefaultProfile names the library
+// profile used when a repository has no profile of its own (repo
+// .machinist/review.yaml at the base ref and the per-project Settings choice
+// both take precedence); it falls back to the shipped `default` profile.
+type Review struct {
+	DefaultProfile string `toml:"default_profile"`
 }
 
 // Alerts configures the pending failure alert spool directory. An external

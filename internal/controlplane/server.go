@@ -37,25 +37,26 @@ const workerAvailabilityWindow = 15 * time.Second
 var webAssets embed.FS
 
 type Server struct {
-	store              *Store
-	definitionPath     string
-	triggers           []config.ResolvedTrigger
-	github             githubTriggerClient
-	issueSources       map[string]issuePoller
-	planeClients       map[string]*issues.PlaneClient
-	githubRepositories map[string]string
-	webhookSecret      string
-	resolutionEvery    time.Duration
-	planePause         time.Duration
-	schedulerEvery     time.Duration
-	now                func() time.Time
-	schedulerError     func(error)
-	shutdownTimeout    time.Duration
-	maxConcurrentJobs  int
-	workerToken        string
-	failAlerts         *failAlertWriter
-	csrfToken          string
-	handler            http.Handler
+	store                *Store
+	definitionPath       string
+	triggers             []config.ResolvedTrigger
+	github               githubTriggerClient
+	issueSources         map[string]issuePoller
+	planeClients         map[string]*issues.PlaneClient
+	githubRepositories   map[string]string
+	webhookSecret        string
+	resolutionEvery      time.Duration
+	planePause           time.Duration
+	schedulerEvery       time.Duration
+	now                  func() time.Time
+	schedulerError       func(error)
+	shutdownTimeout      time.Duration
+	maxConcurrentJobs    int
+	workerToken          string
+	reviewDefaultProfile string
+	failAlerts           *failAlertWriter
+	csrfToken            string
+	handler              http.Handler
 }
 
 // defaultResolutionEvery is the ticket reconciliation cadence: fast enough to
@@ -173,6 +174,7 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 		schedulerError:    func(err error) { log.Printf("scheduler: %v", err) },
 		failAlerts:        &failAlertWriter{directory: alertsDirectory},
 		maxConcurrentJobs: maxConcurrentJobs, workerToken: workerToken, csrfToken: csrfToken,
+		reviewDefaultProfile: definition.Review.DefaultProfile,
 	}
 	server.handler, err = server.routes()
 	if err != nil {
@@ -330,8 +332,13 @@ func (s *Server) routes() (http.Handler, error) {
 	mux.HandleFunc("DELETE /api/v1/jobs/{id}", s.authorizeSubmission(s.deleteJob))
 	mux.HandleFunc("POST /api/v1/workers/poll", s.authorizeWorker(s.poll))
 	mux.HandleFunc("POST /api/v1/webhooks/issues", s.issueWebhook)
-	mux.HandleFunc("GET /api/v1/review-instructions", s.reviewInstructions)
-	mux.HandleFunc("PUT /api/v1/review-instructions", s.authorizeSubmission(s.saveReviewInstructions))
+	mux.HandleFunc("GET /api/v1/review-profile", s.getReviewProfile)
+	mux.HandleFunc("GET /api/v1/review-profiles", s.listReviewProfiles)
+	mux.HandleFunc("PUT /api/v1/review-profiles", s.authorizeSubmission(s.saveReviewProfile))
+	mux.HandleFunc("PUT /api/v1/review-profile", s.authorizeSubmission(s.saveProjectReviewProfile))
+	mux.HandleFunc("POST /api/v1/review-profile/preview", s.previewReviewProfile)
+	mux.HandleFunc("GET /api/v1/review-default-profile", s.getReviewDefaultProfile)
+	mux.HandleFunc("PUT /api/v1/review-default-profile", s.authorizeSubmission(s.saveReviewDefaultProfile))
 	mux.HandleFunc("POST /api/v1/runs/{id}/heartbeat", s.authorizeWorker(s.heartbeat))
 	mux.HandleFunc("POST /api/v1/runs/{id}/complete", s.authorizeWorker(s.complete))
 	mux.HandleFunc("POST /api/v1/runs/{id}/events", s.authorizeWorker(s.liveEvents))

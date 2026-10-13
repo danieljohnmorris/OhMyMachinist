@@ -49,11 +49,14 @@ reviewers rerun. Each amend round counts against the retry budget:
 blocking after the budget is exhausted exits `2` (BLOCKED) and `deliver-pr.py`
 propagates it, so the run is not eligible for auto-merge.
 
-Per-project review instructions live in the control plane (`review_instructions`
-table) and are edited per project in Settings. The review fetches them from
-`MACHINIST_CONTROL_PLANE_URL` with `MACHINIST_CONTROL_PLANE_TOKEN` (exported by
-the managed worker), or reads `MACHINIST_REVIEW_INSTRUCTIONS_FILE` directly.
-Projects without stored instructions use the seeded default (Daniel's routing
-rules: `src/content` markdown goes to the write-as-dan prose pass, everything
-else to the three code reviewers).
+Per-project review configuration lives in the control plane
+(`project_review_settings` table) and is edited per project in Settings as a
+review profile (MACH-32): a library profile name, an inline YAML profile, and
+optional extra instructions. The review resolves the profile in order: a
+`.machinist/review.yaml` at the PR base ref, then the control-plane project
+setting (`MACHINIST_CONTROL_PLANE_URL` with `MACHINIST_CONTROL_PLANE_TOKEN`,
+exported by the managed worker), then the instance default profile
+(`review.default_profile` in the config), then the shipped `default` profile
+in `profiles/review/`. Legacy free-text instructions were migrated into each
+project's profile as extra instructions.
 

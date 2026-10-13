@@ -1,0 +1,105 @@
+# Shipped default review profile (MACH-32). Generic: no person- or
+# machine-specific paths, agents, or routing. Projects override it with
+# .machinist/review.yaml at the PR base ref, a project profile in Settings,
+# or the instance-wide default profile.
+name: default
+version: 1
+description: >-
+  Generic built-in PR review: per-language checks, three parallel code
+  reviewers, a docs pass, and an amend loop bounded by blocking.rounds.
+scope:
+  pin_head_sha: true
+  lanes_from: diff
+  mode: amend
+checks:
+  blocking: new_failures
+  missing_tool: blocked
+  lanes:
+    - lane: typescript
+      when: ["**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx", "**/*.mjs", "**/*.cjs"]
+      commands:
+        - run: "npx tsc --noEmit"
+          if_exists: tsconfig.json
+        - run: "npm run lint"
+          if_script: lint
+        - run: "npm run build"
+          if_script: build
+        - run: "npm test"
+          if_script: test
+    - lane: python
+      when: ["**/*.py"]
+      commands:
+        - run: "ruff check {changed}"
+        - run: "mypy"
+          if_configured: mypy
+        - run: "pytest"
+          if_configured: pytest
+    - lane: rust
+      when: ["**/*.rs", "Cargo.toml"]
+      commands:
+        - run: "cargo build"
+        - run: "cargo clippy -- -D warnings"
+        - run: "cargo fmt --check"
+    - lane: ruby
+      when: ["**/*.rb", "Gemfile"]
+      commands:
+        - run: "bin/ci"
+          if_exists: bin/ci
+          else:
+            - "bundle exec rubocop"
+            - "bundle exec brakeman --no-pager"
+        - run: "bundle exec rspec"
+          if_exists: spec
+    - lane: go
+      when: ["**/*.go", "go.mod"]
+      commands:
+        - run: "go build ./..."
+        - run: "go vet ./..."
+        - run: "go test ./..."
+    - lane: shell
+      when: ["**/*.sh", "**/*.bash"]
+      commands:
+        - run: "shellcheck {changed}"
+concurrency: 3
+reviewers:
+  - name: code-reviewer
+    skills: ["feature-dev:code-reviewer"]
+    parallel: true
+    read_only: true
+    effort: high
+  - name: silent-failure-hunter
+    skills: ["pr-review-toolkit:silent-failure-hunter"]
+    parallel: true
+    read_only: true
+  - name: test-analyzer
+    skills: ["pr-review-toolkit:pr-test-analyzer"]
+    parallel: true
+    read_only: true
+  - name: ts-review
+    lanes: [typescript]
+    skills: [typescript-code-review, typescript-jsdoc]
+    parallel: true
+    read_only: true
+    optional: true
+  - name: rust-review
+    lanes: [rust]
+    skills: [rust-review]
+    parallel: true
+    read_only: true
+    optional: true
+routing:
+  fallback: [code-reviewer, silent-failure-hunter, test-analyzer]
+reconcile:
+  dedupe: true
+  verify_against_code: true
+docs:
+  enabled: true
+  files: [README.md, AGENTS.md, CLAUDE.md, CHANGELOG.md]
+  update_pr_description: true
+blocking:
+  severities: [critical, bug]
+  amend_rounds: 3
+output:
+  pr_comment: true
+  commit_status: machinist/review
+  report: [head_sha, findings, checks, passes, docs, blockers]
