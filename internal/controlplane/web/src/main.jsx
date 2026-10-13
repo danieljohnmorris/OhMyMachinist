@@ -226,8 +226,8 @@ function App() {
       <aside className="app-sidebar sticky top-0 z-20 flex shrink-0 items-center border-b border-border bg-sidebar px-3 py-2 md:h-screen md:w-56 md:flex-col md:items-stretch md:border-b-0 md:border-r md:px-4 md:py-5">
         <div className="brand-lockup flex h-10 items-center px-1">
           <a href="#/runs" className="brand-logo-link" aria-label="Oh My Machinist home">
-            <img src="/logo-light.png" alt="oh my machinist" className="brand-logo brand-logo-light" width="168" height="49" />
-            <img src="/logo-dark.png" alt="oh my machinist" className="brand-logo brand-logo-dark" width="168" height="49" />
+            <img src="/logo-light-transparent.png" alt="oh my machinist" className="brand-logo brand-logo-light" width="116" height="30" />
+            <img src="/logo-dark-transparent.png" alt="oh my machinist" className="brand-logo brand-logo-dark" width="115" height="30" />
           </a>
         </div>
         <nav className="ml-4 flex flex-1 gap-1 overflow-x-auto md:ml-0 md:mt-9 md:block md:overflow-visible" aria-label="Primary">
