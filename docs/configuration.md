@@ -169,7 +169,10 @@ or command configured.
   be an alias of that executor.
 - `review_agent`: chosen separately from the coding agent — the same fields,
   except that `command` is the command string the built-in review runs. It takes
-  `{{model}}`, `{{effort}}`, `{{endpoint}}` and `{{env.NAME}}` placeholders.
+  `{{model}}`, `{{effort}}`, `{{endpoint}}` and `{{env.NAME}}` placeholders. It
+  must name a `kind`, and `kind = "command"` must also carry a `command`; a spec
+  that renders no command is rejected, since otherwise the project's review agent
+  would be silently ignored.
 - `models.<role>`: `coding`, `review`, or `non_coding`. Each holds `model`,
   `effort`, `endpoint` (`local` or `cloud`) and, for a local endpoint, the `url`
   of the server. A local endpoint requires a `url`.

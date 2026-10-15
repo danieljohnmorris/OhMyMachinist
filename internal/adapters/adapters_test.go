@@ -52,6 +52,23 @@ func TestValidateAllowsReviewAgentKindAlone(t *testing.T) {
 	}
 }
 
+// A review agent must render a command, so a spec that would resolve to no
+// review executor is rejected instead of being silently dropped.
+func TestValidateRejectsUnrenderableReviewAgent(t *testing.T) {
+	cases := map[string]AgentSpec{
+		"command without kind":  {Command: "my-reviewer --model {{model}}"},
+		"executor without kind": {Executor: "omp"},
+		"command kind no command": {
+			Kind: AgentCommand,
+		},
+	}
+	for name, spec := range cases {
+		if err := Validate(FactorySetting{ReviewAgent: spec}); err == nil {
+			t.Errorf("Validate(review agent %s) = nil, want error", name)
+		}
+	}
+}
+
 func TestNormalizeTrimsAndDropsEmptyEntries(t *testing.T) {
 	setting := Normalize(FactorySetting{
 		Tracker:     "  plane ",

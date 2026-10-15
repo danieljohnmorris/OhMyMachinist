@@ -243,8 +243,15 @@ func (s *Server) workerFactorySetting(ctx context.Context, repository string) (w
 		return workerFactorySettingResponse{}, err
 	}
 	response := workerFactorySettingResponse{Source: source}
-	if agent, ok := adapters.AgentFor(setting.ReviewAgent.Kind); ok {
+	if !setting.ReviewAgent.IsZero() {
+		agent, ok := adapters.AgentFor(setting.ReviewAgent.Kind)
+		if !ok {
+			return workerFactorySettingResponse{}, fmt.Errorf("review agent kind %q is unknown", setting.ReviewAgent.Kind)
+		}
 		response.ReviewExecutor = strings.TrimSpace(agent.ReviewCommand(setting.ReviewAgent, setting.Model(adapters.RoleReview)))
+		if response.ReviewExecutor == "" {
+			return workerFactorySettingResponse{}, fmt.Errorf("review agent kind %q renders no review command", setting.ReviewAgent.Kind)
+		}
 	}
 	response.CodingExecutor = setting.CodingAgent.Executor
 	response.CodingModel = setting.Model(adapters.RoleCoding).Model

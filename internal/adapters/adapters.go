@@ -132,10 +132,10 @@ func Validate(setting FactorySetting) error {
 	if setting.Tracker != "" && !slices.Contains(TrackerKinds(), setting.Tracker) {
 		return fmt.Errorf("unknown tracker %q (supported: %s)", setting.Tracker, strings.Join(TrackerKinds(), ", "))
 	}
-	if err := validateAgent("coding_agent", setting.CodingAgent, true); err != nil {
+	if err := validateAgent("coding_agent", setting.CodingAgent, false); err != nil {
 		return err
 	}
-	if err := validateAgent("review_agent", setting.ReviewAgent, false); err != nil {
+	if err := validateAgent("review_agent", setting.ReviewAgent, true); err != nil {
 		return err
 	}
 	roles := Roles()
@@ -150,10 +150,11 @@ func Validate(setting FactorySetting) error {
 	return nil
 }
 
-// validateAgent checks one agent spec. requireRunner is set for the coding
-// agent, which must name a worker executor or a command; a review agent may
-// instead rely on its adapter's default review command.
-func validateAgent(name string, spec AgentSpec, requireRunner bool) error {
+// validateAgent checks one agent spec. isReview marks the review agent, which
+// runs a command string rather than naming a worker executor: it must render a
+// command, so its kind is required and the generic "command" kind must carry a
+// command template. A coding agent needs an executor or a command instead.
+func validateAgent(name string, spec AgentSpec, isReview bool) error {
 	if spec.IsZero() {
 		return nil
 	}
@@ -169,7 +170,19 @@ func validateAgent(name string, spec AgentSpec, requireRunner bool) error {
 	if err := validateLine(name+" command", spec.Command); err != nil {
 		return err
 	}
-	if requireRunner && spec.Kind != "" && spec.Executor == "" && spec.Command == "" {
+	if isReview {
+		// A review agent renders its command through the adapter its kind
+		// names; an unset kind or a "command" kind with no template would
+		// later yield no review executor at all.
+		if spec.Kind == "" {
+			return fmt.Errorf("%s needs a kind", name)
+		}
+		if spec.Kind == AgentCommand && spec.Command == "" {
+			return fmt.Errorf("%s kind %q needs a command", name, AgentCommand)
+		}
+		return nil
+	}
+	if spec.Kind != "" && spec.Executor == "" && spec.Command == "" {
 		return fmt.Errorf("%s needs an executor or a command", name)
 	}
 	return nil

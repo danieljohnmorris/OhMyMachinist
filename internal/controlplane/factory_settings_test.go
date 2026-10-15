@@ -193,6 +193,20 @@ func TestWorkerFactorySettingRendersReviewExecutor(t *testing.T) {
 	}
 }
 
+// A review agent stored before validation tightened (the store writes without
+// validating) must surface as an error rather than be silently dropped.
+func TestWorkerFactorySettingRejectsUnrenderableReviewAgent(t *testing.T) {
+	server, store := testFactoryServer(t, "")
+	if err := store.SaveProjectFactorySetting(t.Context(), "machinist", adapters.FactorySetting{
+		ReviewAgent: adapters.AgentSpec{Executor: "omp"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.workerFactorySetting(t.Context(), "machinist"); err == nil {
+		t.Fatal("workerFactorySetting(unrenderable review agent) = nil error, want error")
+	}
+}
+
 func TestFactorySettingHTTPRoundTrip(t *testing.T) {
 	server, _ := testFactoryServer(t, "")
 	body, _ := json.Marshal(map[string]any{
