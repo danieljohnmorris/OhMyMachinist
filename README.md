@@ -125,7 +125,19 @@ A review profile is YAML (or markdown with YAML frontmatter) declaring the whole
 
 Shipped profiles live in [`profiles/review/`](profiles/review/) (`default`, and `dan-pr-review` ported from [pr-review-skill](https://github.com/danieljohnmorris/pr-review-skill/blob/main/SKILL.md) — set `default_profile = "dan-pr-review"` under `[review]` in the config, or pick it per project in Settings). A minimal worked example is at [`examples/review/basic.yaml`](examples/review/basic.yaml). The old free-text per-project instructions were migrated into each project's profile as extra instructions; nothing was lost.
 
-**Skills.** Reviewer `skills` reference names in the installed skills library (`~/.agents/skills`, seeded from `deploy/factory/review/skills/`). Nothing is fetched at review time; if a required skill is missing the pass is reported INCOMPLETE, and an `optional` pass is skipped with a note. Install additional reviewer skills with `machinist review install-skill <github SKILL.md url>`; the shared skills loader (MACH-33) extends this stub with version pinning and caching.
+**Skills.** Reviewer `skills` reference names in the versioned skills library at `~/.machinist/skills` (`MACHINIST_DATA_DIR` overrides the Machinist data directory). The library keeps every installed version at `<name>/<version>/` with a per-skill `manifest.json`; a review resolves the active version, then falls back to `~/.agents/skills`, the shipped `deploy/factory/review/skills/`, and `review/prompts/`. Nothing is fetched at review time; if a required skill is missing the pass is reported INCOMPLETE, and an `optional` pass is skipped with a note.
+
+### Skills library
+
+`machinist skills` owns one installed library with version history:
+
+- `machinist skills install <github url | directory | zip>` — resolve a GitHub `blob`/`raw`/`tree` URL (optional `@ref`) to a commit SHA and fetch the whole skill directory, or install a local directory or zip. SKILL.md frontmatter must set `name` and `description`, and every new version is scanned with `gitleaks` before it becomes active (a missing `gitleaks` warns and records `scanned: false`).
+- `machinist skills update <name> [--activate]` — re-resolve the recorded source and add a new version, keeping the old ones; the active version only moves with `--activate`.
+- `machinist skills pin <name> <version>` — set the active version (rollback included).
+- `machinist skills uninstall <name> [--force]` — remove a skill; refused while a review profile still references it unless `--force`.
+- `machinist skills list` — installed skills and their active version.
+
+`machinist review install-skill <url>` is an alias for `skills install`. Private GitHub repositories read a token from `GITHUB_TOKEN`; it is never written to the manifest, the source URL, or logs.
 
 **Settings editor.** Settings shows the resolved source, a library profile picker, an inline YAML editor, extra instructions, the global default picker, and a no-execution **preview**: paste changed-file paths and see the resolved profile source, matched lanes, checks, and reviewer passes. Saves are validated server-side and rejected with line-numbered errors (unknown keys, bad globs, unknown pass refs).
 
