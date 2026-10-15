@@ -4,6 +4,12 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { PageHeading, QuietState } from "@/components/ui/page-heading";
 import {
+  loadFactoryCatalog,
+  loadFactorySetting,
+  resetFactorySetting,
+  saveFactorySetting,
+} from "@/factory-settings";
+import {
   loadReviewProfile,
   loadReviewProfiles,
   previewReviewProfile,
@@ -211,8 +217,237 @@ export function SettingsPage({ repositories = [], csrfToken }) {
       </div>}
       {!loaded && <QuietState title={project ? "Loading review profile" : "No repositories yet"} description={project ? "Fetching the resolved profile for this project." : "Register a worker repository to edit its review profile."} role="status" />}
     </Card>
+    <FactoryCard project={project} csrfToken={csrfToken} />
     <TokensCard csrfToken={csrfToken} />
   </div>;
+}
+
+// FactoryCard edits the pluggable factory setup (MACH-37): the tracker, the
+// coding and review agents and the per-role models. Empty fields keep whatever
+// the trigger or command configured, so an untouched card changes nothing.
+const EMPTY_FACTORY_SETTING = {
+  tracker: "",
+  codingAgent: { kind: "", executor: "", command: "" },
+  reviewAgent: { kind: "", executor: "", command: "" },
+  models: {
+    coding: { model: "", effort: "", endpoint: "", url: "" },
+    review: { model: "", effort: "", endpoint: "", url: "" },
+    non_coding: { model: "", effort: "", endpoint: "", url: "" },
+  },
+};
+
+const MODEL_ROLES = ["coding", "review", "non_coding"];
+
+const MODEL_ROLE_LABELS = { coding: "Coding", review: "Review", non_coding: "Non-coding" };
+
+function FactoryCard({ project, csrfToken }) {
+  const [setting, setSetting] = useState(EMPTY_FACTORY_SETTING);
+  const [catalog, setCatalog] = useState({ trackers: [], agents: [], roles: [], endpoints: [] });
+  const [source, setSource] = useState("");
+  const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [busy, setBusy] = useState(false);
+  const loadSequence = useRef(0);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    loadFactoryCatalog(controller.signal)
+      .then((result) => setCatalog(result))
+      .catch(() => {});
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    if (!project) return;
+    const sequence = ++loadSequence.current;
+    const controller = new AbortController();
+    setLoaded(false);
+    setError("");
+    setNotice("");
+    loadFactorySetting(project, controller.signal)
+      .then((result) => {
+        if (loadSequence.current !== sequence) return;
+        setSetting(result.setting);
+        setSource(result.source);
+        setLoaded(true);
+      })
+      .catch((loadError) => {
+        if (loadError.name === "AbortError" || loadSequence.current !== sequence) return;
+        setError(loadError.message);
+        setLoaded(true);
+      });
+    return () => controller.abort();
+  }, [project]);
+
+  const patchAgent = (name, changes) => setSetting((current) => ({ ...current, [name]: { ...current[name], ...changes } }));
+
+  const patchModel = (role, changes) => setSetting((current) => ({
+    ...current,
+    models: { ...current.models, [role]: { ...(current.models[role] || {}), ...changes } },
+  }));
+
+  const save = async () => {
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await saveFactorySetting(project, setting, csrfToken);
+      setSetting(result.setting);
+      setSource(result.source);
+      setNotice(`Saved. This project now resolves its factory setup from: ${result.source}.`);
+    } catch (saveError) {
+      setError(saveError.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const revert = async () => {
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await resetFactorySetting(project, csrfToken);
+      setSetting(result.setting);
+      setSource(result.source);
+      setNotice(`Reverted. This project now resolves its factory setup from: ${result.source}.`);
+    } catch (resetError) {
+      setError(resetError.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const roles = catalog.roles.length ? catalog.roles : MODEL_ROLES;
+  const roleLabel = (role) => MODEL_ROLE_LABELS[role] || role;
+
+  return <Card className="p-4 sm:p-5">
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+      <div className="flex-1 space-y-1">
+        <h2 className="font-medium">Factory setup</h2>
+        <p className="text-sm text-muted-foreground">The tracker, the coding and review agents and the per-role models this project runs with. Empty fields keep whatever the trigger or command configured.</p>
+      </div>
+      {loaded && <Badge variant="outline" className="text-muted-foreground">Resolved from: {source || "built-in"}</Badge>}
+    </div>
+    {error && <div role="alert" className="mt-3 whitespace-pre-wrap rounded-md border border-danger/35 bg-danger/10 px-3 py-2 text-sm text-danger">{error}</div>}
+    {notice && <div role="status" className="mt-3 rounded-md border border-success/35 bg-success/10 px-3 py-2 text-sm text-success">{notice}</div>}
+    {loaded && <div className="mt-4 space-y-4">
+      <label className="flex flex-wrap items-center gap-2">
+        <span className="text-sm font-medium">Tracker</span>
+        <select
+          className="field-control w-full max-w-xs"
+          value={setting.tracker}
+          onChange={(event) => setSetting((current) => ({ ...current, tracker: event.target.value }))}
+          aria-label="Factory tracker"
+        >
+          <option value="">(keep trigger default)</option>
+          {catalog.trackers.map((tracker) => <option key={tracker} value={tracker}>{tracker}</option>)}
+        </select>
+      </label>
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="flex flex-col gap-1">
+          <span className="text-sm font-medium">Coding agent</span>
+          <select
+            className="field-control w-full max-w-xs"
+            value={setting.codingAgent.kind}
+            onChange={(event) => patchAgent("codingAgent", { kind: event.target.value })}
+            aria-label="Coding agent kind"
+          >
+            <option value="">(keep trigger default)</option>
+            {catalog.agents.map((agent) => <option key={agent} value={agent}>{agent}</option>)}
+          </select>
+        </label>
+        <label className="flex min-w-56 flex-1 flex-col gap-1">
+          <span className="text-sm font-medium">Coding executor</span>
+          <input
+            className="field-control w-full"
+            value={setting.codingAgent.executor}
+            onChange={(event) => patchAgent("codingAgent", { executor: event.target.value })}
+            aria-label="Coding agent executor"
+            placeholder="worker executor name"
+          />
+        </label>
+      </div>
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="flex flex-col gap-1">
+          <span className="text-sm font-medium">Review agent</span>
+          <select
+            className="field-control w-full max-w-xs"
+            value={setting.reviewAgent.kind}
+            onChange={(event) => patchAgent("reviewAgent", { kind: event.target.value })}
+            aria-label="Review agent kind"
+          >
+            <option value="">(keep trigger default)</option>
+            {catalog.agents.map((agent) => <option key={agent} value={agent}>{agent}</option>)}
+          </select>
+        </label>
+        <label className="flex min-w-56 flex-1 flex-col gap-1">
+          <span className="text-sm font-medium">Review command</span>
+          <input
+            className="field-control w-full font-mono text-xs"
+            value={setting.reviewAgent.command}
+            onChange={(event) => patchAgent("reviewAgent", { command: event.target.value })}
+            aria-label="Review agent command"
+            placeholder="codex exec --model {{model}}"
+            spellCheck="false"
+          />
+        </label>
+      </div>
+      <div className="space-y-3 rounded-md border p-3">
+        <div className="text-sm font-medium">Models</div>
+        {roles.map((role) => <div key={role} className="flex flex-wrap items-end gap-3">
+          <label className="flex min-w-40 flex-1 flex-col gap-1">
+            <span className="text-xs text-muted-foreground">{roleLabel(role)} model</span>
+            <input
+              className="field-control w-full"
+              value={setting.models[role]?.model ?? ""}
+              onChange={(event) => patchModel(role, { model: event.target.value })}
+              aria-label={`${roleLabel(role)} model`}
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs text-muted-foreground">Effort</span>
+            <input
+              className="field-control w-32"
+              value={setting.models[role]?.effort ?? ""}
+              onChange={(event) => patchModel(role, { effort: event.target.value })}
+              aria-label={`${roleLabel(role)} effort`}
+              placeholder="high"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs text-muted-foreground">Endpoint</span>
+            <select
+              className="field-control w-32"
+              value={setting.models[role]?.endpoint ?? ""}
+              onChange={(event) => patchModel(role, { endpoint: event.target.value })}
+              aria-label={`${roleLabel(role)} endpoint`}
+            >
+              <option value="">(unset)</option>
+              {catalog.endpoints.map((endpoint) => <option key={endpoint} value={endpoint}>{endpoint}</option>)}
+            </select>
+          </label>
+          <label className="flex min-w-40 flex-1 flex-col gap-1">
+            <span className="text-xs text-muted-foreground">URL (local endpoints)</span>
+            <input
+              className="field-control w-full"
+              value={setting.models[role]?.url ?? ""}
+              onChange={(event) => patchModel(role, { url: event.target.value })}
+              aria-label={`${roleLabel(role)} endpoint URL`}
+              placeholder="http://127.0.0.1:8080"
+            />
+          </label>
+        </div>)}
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <Button disabled={busy || !project} onClick={save}>Save</Button>
+        <Button variant="outline" disabled={busy || !project} onClick={revert}>Revert to default</Button>
+      </div>
+      <p className="text-xs text-muted-foreground">Precedence: this project's setting wins, then the global default, then the control-plane config, then the built-in empty setup. Every empty field falls back to the agent and model the trigger or command already uses, so a local endpoint needs its URL.</p>
+    </div>}
+    {!loaded && <QuietState title={project ? "Loading factory setup" : "No repositories yet"} description={project ? "Fetching the resolved factory setup for this project." : "Register a worker repository to edit its factory setup."} role="status" />}
+  </Card>;
 }
 
 // TokensCard manages scoped API tokens: the machine clients (and MCP tools)

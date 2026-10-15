@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/owainlewis/machinist/internal/adapters"
 	"github.com/owainlewis/machinist/internal/issues"
 	"github.com/owainlewis/machinist/internal/triggers"
 	"github.com/pelletier/go-toml/v2"
@@ -89,7 +90,26 @@ type Config struct {
 	Triggers     TriggerDefinitions  `toml:"triggers"`
 	Alerts       Alerts              `toml:"alerts"`
 	Review       Review              `toml:"review"`
+	Factory      Factory             `toml:"factory"`
 	path         string
+}
+
+// Factory holds the config-file default for the pluggable factory setup
+// (tracker, coding agent, review agent and per-role models). Per-project
+// Settings overrides stored in the control plane take precedence; secrets are
+// never read from here, only placeholders that resolve from the environment.
+type Factory struct {
+	Default  adapters.FactorySetting            `toml:"default"`
+	Projects map[string]adapters.FactorySetting `toml:"projects"`
+}
+
+// ProjectFactorySetting returns the config-file factory setting for a
+// repository: its per-project entry, else the global default.
+func (c Config) ProjectFactorySetting(repository string) adapters.FactorySetting {
+	if setting, ok := c.Factory.Projects[repository]; ok {
+		return setting
+	}
+	return c.Factory.Default
 }
 
 // Review configures the built-in PR review. DefaultProfile names the library
@@ -286,6 +306,17 @@ func loadConfigFile(path string) (Config, error) {
 	for _, name := range machinistConfig.WorkflowNames() {
 		if _, err := machinistConfig.ResolveTaskWorkflow(name, ""); err != nil {
 			return Config{}, err
+		}
+	}
+	if err := adapters.Validate(machinistConfig.Factory.Default); err != nil {
+		return Config{}, fmt.Errorf("parse Machinist config %q: factory.default: %w", absPath, err)
+	}
+	for repository, setting := range machinistConfig.Factory.Projects {
+		if strings.TrimSpace(repository) == "" {
+			return Config{}, fmt.Errorf("parse Machinist config %q: factory.projects has an empty repository name", absPath)
+		}
+		if err := adapters.Validate(setting); err != nil {
+			return Config{}, fmt.Errorf("parse Machinist config %q: factory.projects.%s: %w", absPath, repository, err)
 		}
 	}
 	return machinistConfig, nil

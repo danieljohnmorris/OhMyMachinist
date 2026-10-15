@@ -132,3 +132,159 @@ Plane webhook at `POST /api/v1/webhooks/issues` (HMAC-SHA256 in the
 `X-Signature` header) to resolve cards immediately on state changes. The
 shared secret comes from `issue_sources.webhook_secret` or the
 `MACHINIST_ISSUE_WEBHOOK_SECRET` environment variable.
+
+## Factory setup
+
+The factory setup picks the tracker, the coding agent, the review agent and the
+model each role uses. It is set per project in the UI, or as a global default in
+`config.toml` under `[factory]`.
+
+```toml
+[factory.default]
+tracker = "plane"
+coding_agent = { kind = "omp", executor = "omp" }
+review_agent = { kind = "codex", command = "codex exec --model {{model}}" }
+models = { coding = { model = "glm-4.6", effort = "high", endpoint = "local", url = "http://spark:8080" } }
+
+[factory.projects.my-project]
+tracker = "linear"
+models = { review = { model = "gpt-5", endpoint = "cloud" } }
+```
+
+`[factory.default]` applies to every project that has no setting of its own;
+`[factory.projects.NAME]` applies to the worker repository `NAME`. Every field is
+optional — an empty field means "unset", so that piece keeps whatever the trigger
+or command configured.
+
+### Vocabulary
+
+- `tracker`: `plane` or `linear`. Both sit behind one adapter interface that does
+  intake by label, comments, resolve-on-Done and ticket links. The project still
+  needs its connection in [`[issue_sources.plane.NAME]`](#issue-sources) or
+  `[issue_sources.linear.NAME]`, and the tracker key still comes from the
+  environment (`PLANE_API_KEY`, `LINEAR_API_KEY`).
+- `coding_agent`: `kind` is `omp`, `codex`, or `command` for a generic command
+  template. `executor` names the worker executor that runs coding steps — that is
+  the field that overrides the trigger's own agent, and the `coding` model must
+  be an alias of that executor.
+- `review_agent`: chosen separately from the coding agent — the same fields,
+  except that `command` is the command string the built-in review runs. It takes
+  `{{model}}`, `{{effort}}`, `{{endpoint}}` and `{{env.NAME}}` placeholders.
+- `models.<role>`: `coding`, `review`, or `non_coding`. Each holds `model`,
+  `effort`, `endpoint` (`local` or `cloud`) and, for a local endpoint, the `url`
+  of the server. A local endpoint requires a `url`.
+- `{{env.NAME}}` placeholders resolve on the worker, from the worker's own
+  environment, so secrets never enter `config.toml` or the control plane.
+
+### Resolution order
+
+First match wins:
+
+1. the project's setting in Settings (stored in the control plane);
+2. the instance-wide global default in Settings;
+3. `[factory.projects.NAME]` in `config.toml`;
+4. `[factory.default]` in `config.toml`;
+5. built-in — empty, so the trigger or command keeps its own agent and model.
+
+Per-project overrides live in the **Settings** page and are stored in the control
+plane, so they survive a config reload and apply to new runs without editing the
+file. Settings offers the resolved source, the supported adapters and roles, and
+saves that are validated server-side.
+
+### Worker executors, commands and model aliases
+
+Agent executors, their command templates and their model aliases stay worker-owned
+in `worker.toml`:
+
+```toml
+[executors.omp]
+command = ["omp", "--model={{machinist.model}}", "-"]
+models = { default = "glm-4.6", glm-4.6 = "glm-4.6" }
+```
+
+`coding_agent.executor` must name one of those executors, the model the `coding`
+role selects must be an alias listed in that executor's `models` table, and the
+executor's command must carry `{{machinist.model}}` — otherwise the run fails at
+resolve time, with `executor "<name>" does not support model selection` or
+`model "<name>" is not configured for executor "<name>"`.
+
+The review agent is different: it renders a **command string**, which the worker
+hands to the review harness as a shell-style command. Leave `command` empty to use
+the adapter's default for `kind`, and note that the resolved review agent wins over
+`MACHINIST_REVIEW_EXECUTOR` set in the worker's own environment:
+
+| `kind` | Default review command |
+| --- | --- |
+| `omp` | `omp --model {{model}} -` |
+| `codex` | `codex exec --model {{model}}` |
+| `command` | none — `command` is required |
+
+A local endpoint's `url` reaches the template as `{{endpoint}}`.
+
+### Worked examples
+
+**Local GLM via omp.** Plane for tickets, omp coding and reviewing, with a GLM
+model on a local server:
+
+```toml
+[factory.default]
+tracker = "plane"
+coding_agent = { kind = "omp", executor = "omp" }
+
+[factory.default.models.coding]
+model = "glm-4.6"
+effort = "high"
+endpoint = "local"
+url = "http://spark:8080"
+
+[factory.default.models.review]
+model = "glm-4.6"
+effort = "high"
+endpoint = "local"
+url = "http://spark:8080"
+```
+
+`coding_agent.executor = "omp"` names the worker's `[executors.omp]`, whose
+`models` table must list `glm-4.6` as an alias.
+
+**Linear plus a cloud Codex review.** Linear for tickets, omp coding on the local
+model, and a separate Codex CLI review agent on a cloud model:
+
+```toml
+[factory.default]
+tracker = "linear"
+coding_agent = { kind = "omp", executor = "omp" }
+review_agent = { kind = "codex", command = "codex exec --model {{model}}" }
+
+[factory.default.models.coding]
+model = "glm-4.6"
+endpoint = "local"
+url = "http://spark:8080"
+
+[factory.default.models.review]
+model = "gpt-5"
+effort = "high"
+endpoint = "cloud"
+```
+
+The coding agent and the review agent differ here: coding runs omp with the local
+model, review runs Codex with the cloud one, and `{{model}}` and `{{effort}}` in
+the review command expand to the `review` role's values.
+
+A secret a command template needs is written as a placeholder, not a value:
+
+```toml
+review_agent = { kind = "command", command = "my-reviewer --model {{model}} --effort {{effort}} --api-key {{env.MY_REVIEWER_API_KEY}}" }
+```
+
+`{{env.MY_REVIEWER_API_KEY}}` is replaced on the worker with that worker's
+environment value, so the key never appears in this file, in the Settings page or
+in the control plane.
+
+### API
+
+The Settings page reads and writes these through `/api/v1/factory-setting`
+(GET, PUT, DELETE a project's setup), `/api/v1/factory-default` (GET, PUT the
+global default) and `/api/v1/factory-catalog` (GET the supported trackers,
+agents, roles and endpoints). See the [HTTP API reference](api.md#endpoints) for
+request bodies and scopes.

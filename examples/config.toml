@@ -21,6 +21,40 @@ worker_token_file = "~/.machinist/server/worker.token"
 # [review]
 # default_profile = "dan-pr-review"
 
+# Factory setup: the tracker, coding agent, review agent and per-role models a
+# project uses. Set it per project in Settings, or here for the whole instance
+# or a single project. First match wins: project setting in Settings > global
+# default in Settings > [factory.projects.NAME] > [factory.default] > built-in
+# (empty, so the trigger and command keep their own agent and model). Each role
+# is "coding", "review" or "non_coding". A tracker still needs that project's
+# connection in [issue_sources.plane] / [issue_sources.linear]. Secrets never
+# belong in this file: use {{env.NAME}} in a review command and it resolves from
+# the worker's environment. See docs/configuration.md#factory-setup.
+#
+# [factory.default]
+# tracker = "plane"
+# coding_agent = { kind = "omp", executor = "omp" }
+# review_agent = { kind = "codex", command = "codex exec --model {{model}}" }
+#
+# [factory.default.models.coding]
+# model = "glm-4.6"
+# effort = "high"
+# endpoint = "local"
+# url = "http://spark:8080"
+#
+# Linear, Codex coding and a cloud review model, plus a custom review command,
+# for one project only. Repository names are worker repository names, "codex"
+# is a worker executor, and its models table must list the coding alias used.
+# [factory.projects.my-project]
+# tracker = "linear"
+# coding_agent = { kind = "codex", executor = "codex" }
+# review_agent = { kind = "command", command = "my-reviewer --model {{model}} --api-key {{env.MY_REVIEWER_API_KEY}}" }
+#
+# [factory.projects.my-project.models.review]
+# model = "gpt-5"
+# effort = "high"
+# endpoint = "cloud"
+
 # Take a task or GitHub issue to a reviewed pull request.
 [commands.task-to-pr]
 executor = "codex"

@@ -27,10 +27,18 @@ It keeps the upstream control plane, worker model and executors. Everything belo
 
 ## What it adds
 
+**Pluggable factory setup**
+
+- Trackers: Plane and Linear behind one adapter interface — intake, comment, resolve-on-Done and ticket links
+- Coding agents: omp, Codex CLI, or a generic command template; the review agent is picked separately and may differ from the coding agent
+- Models per role — `coding`, `review` and `non_coding` — each with a model, an effort level and a local or cloud endpoint
+- Per-project choices in Settings with an instance-wide default, then `config.toml`, then the trigger's own agent and model
+- Secrets stay in the environment: `{{env.NAME}}` in a review command resolves on the worker, so keys never enter the config or the control plane
+
 **Intake**
 
 - Plane intake by label poll or webhook, with project-to-repository mapping
-- One job per ticket (deduplicated), with Plane and PR links on every run
+- One job per ticket (deduplicated), with ticket and PR links on every run
 - Tickets resolve automatically when the ticket or its linked PR completes
 
 **Delivery**
@@ -66,8 +74,20 @@ factory label  ->  intake  ->  coding agent in a lane  ->  pull request
 
 ## Configuration today
 
-**Coding agent.** Any executor that reads a prompt on stdin: omp, Codex, Claude Code, or your own command.
-**Models.** Local or cloud, chosen per executor through model aliases.
+**Factory setup.** Tracker (Plane or Linear), coding agent (omp, Codex CLI, or your own command) and the review agent, plus models per role (`coding`, `review`, `non_coding`) with an effort level and a local or cloud endpoint. A project overrides any of it in **Settings**; resolution is first match wins:
+
+1. the project's setting in Settings
+2. the global default in Settings
+3. `[factory.projects.NAME]` in `config.toml`
+4. `[factory.default]` in `config.toml`
+5. built-in — empty, so the trigger or command keeps its own agent and model
+
+An empty field leaves that piece as it was. See [Factory setup](docs/configuration.md#factory-setup) for the schema and worked examples.
+
+**Tracker connections.** They still come from `[issue_sources.plane]` / `[issue_sources.linear]`; a project's tracker choice reuses that project's connection. Tracker keys (`PLANE_API_KEY`, `LINEAR_API_KEY`) come from the environment.
+
+**Secrets.** A review agent command takes `{{model}}`, `{{effort}}`, `{{endpoint}}` and `{{env.NAME}}`. `{{env.NAME}}` is resolved on the worker from its own environment, so cloud API keys never reach the config or the control plane.
+
 **Lanes and concurrency.** Set how many jobs run at once and which repositories each worker may use.
 **Review profile.** Choose the review executor and timeout with `MACHINIST_REVIEW_EXECUTOR` and `MACHINIST_REVIEW_TIMEOUT_SECONDS`.
 
@@ -131,14 +151,9 @@ Shipped profiles live in [`profiles/review/`](profiles/review/) (`default`, and 
 
 **Secrets.** Profiles and the PR comment never echo credentials: token-shaped strings in check and reviewer output are redacted before publication, the installer refuses payloads with secret findings, and CI runs a gitleaks scan on every PR. Secrets come only from the environment or a systemd `EnvironmentFile` outside git.
 
-## In progress
-
-- **Pluggable trackers.** Plane today, Linear planned.
-- **Per-project choice** of tracker, coding agent and models in Settings (MACH-37).
-
 ## Example setup
 
-One way to run it, not a requirement: Plane for tickets, omp as the coding agent, and a local GLM model served on a pair of NVIDIA DGX Sparks. Swap any piece for Linear, Codex, Claude Code or a cloud model.
+One way to run it, not a requirement: Plane for tickets, omp as the coding agent, and a local GLM model served on a pair of NVIDIA DGX Sparks. Swap any piece — Linear for tickets, Codex CLI or a command template for coding, a cloud model for local — per project in Settings or as the instance default in `config.toml`. [Factory setup](docs/configuration.md#factory-setup) walks through both the local and the cloud flavour.
 
 ## Install
 
@@ -183,7 +198,7 @@ Commands, executors, workflows, workers and deployment are documented upstream a
 | Guide | What it covers |
 | --- | --- |
 | [Upstream Machinist](https://github.com/owainlewis/machinist#readme) | The core project |
-| [Configuration](docs/configuration.md) | Commands, executors, workers, models, repositories |
+| [Configuration](docs/configuration.md) | Commands, executors, workers, models, factory setup, repositories |
 | [HTTP API](docs/api.md) | Versioned `/api/v1` endpoints with scoped bearer tokens |
 | [MCP server](docs/mcp.md) | MCP tools over streamable HTTP at `/mcp` |
 | [Workflows](docs/workflows.md) | Multi-step workflows and approvals |

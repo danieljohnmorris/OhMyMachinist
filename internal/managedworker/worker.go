@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/owainlewis/machinist/internal/adapters"
 	"github.com/owainlewis/machinist/internal/config"
 	"github.com/owainlewis/machinist/internal/protocol"
 	"github.com/owainlewis/machinist/internal/runner"
@@ -241,6 +242,31 @@ func (w *Worker) reviewEnv() []string {
 	return env
 }
 
+// factoryEnv asks the control plane for the project's resolved factory setup
+// and turns the review agent into MACHINIST_REVIEW_EXECUTOR for the built-in
+// review. A configured project review agent wins over the worker environment;
+// {{env.NAME}} placeholders resolve from the worker's environment here, so
+// secrets never reach the control plane. Failures are logged and skipped so a
+// missing setting never fails a run.
+func (w *Worker) factoryEnv(ctx context.Context, repository string) []string {
+	if w.client == nil || strings.TrimSpace(repository) == "" {
+		return nil
+	}
+	var response struct {
+		ReviewExecutor string `json:"review_executor"`
+	}
+	path := "/api/v1/worker/factory-setting?project=" + url.QueryEscape(repository)
+	if err := w.client.Get(ctx, path, &response); err != nil {
+		fmt.Fprintf(w.stderr, "machinist: factory setting for %s: %v\n", repository, err)
+		return nil
+	}
+	executor := strings.TrimSpace(adapters.RenderCommand(response.ReviewExecutor, adapters.ModelSpec{}, os.Getenv))
+	if executor == "" {
+		return nil
+	}
+	return []string{"MACHINIST_REVIEW_EXECUTOR=" + executor}
+}
+
 func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Completion {
 	completion := protocol.Completion{InstanceID: w.instanceID, LeaseToken: spec.LeaseToken, State: "failed", ExitCode: 1}
 	repository, err := w.config.ResolveRepository(spec.Repository)
@@ -268,7 +294,7 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 		ArtifactKey:   spec.LeaseToken,
 		Command:       command,
 		Repository:    repository,
-		ExtraEnv:      w.reviewEnv(),
+		ExtraEnv:      append(w.reviewEnv(), w.factoryEnv(ctx, spec.Repository)...),
 		DataDirectory: w.config.DataDirectory,
 		Stdout:        w.stdout,
 		Stderr:        w.stderr,

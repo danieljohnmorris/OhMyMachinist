@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/owainlewis/machinist/internal/adapters"
 )
 
 func TestLoadWorkerResolvesRelativePathsFromConfig(t *testing.T) {
@@ -496,5 +498,47 @@ func TestLoadConfigRejectsRemovedShepherdSchedules(t *testing.T) {
 	_, err := LoadDefinitions(path)
 	if err == nil || !strings.Contains(err.Error(), "shepherd schedules were removed") {
 		t.Fatalf("error = %v, want removed shepherd schedule guidance", err)
+	}
+}
+
+func TestLoadConfigParsesFactorySetup(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "config.toml")
+	writeTestFile(t, path, `
+[factory.default]
+tracker = "plane"
+coding_agent = { kind = "omp", executor = "omp" }
+models = { coding = { model = "glm-4.6", effort = "high", endpoint = "local", url = "http://spark:8080" } }
+
+[factory.projects."my-project"]
+tracker = "linear"
+review_agent = { kind = "codex", command = "codex exec --model {{model}}" }
+models = { review = { model = "gpt-5", endpoint = "cloud" } }
+`)
+	definition, err := LoadDefinitions(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if definition.Factory.Default.Tracker != adapters.TrackerPlane || definition.Factory.Default.CodingAgent.Executor != "omp" {
+		t.Fatalf("default = %+v", definition.Factory.Default)
+	}
+	if got := definition.Factory.Default.Models[adapters.RoleCoding]; got.Model != "glm-4.6" || got.URL != "http://spark:8080" {
+		t.Fatalf("coding model = %+v", got)
+	}
+	if got := definition.ProjectFactorySetting("my-project"); got.Tracker != adapters.TrackerLinear {
+		t.Fatalf("project setting = %+v", got)
+	}
+	if got := definition.ProjectFactorySetting("other"); got.Tracker != adapters.TrackerPlane {
+		t.Fatalf("fallback project setting = %+v", got)
+	}
+}
+
+func TestLoadConfigRejectsUnknownFactoryAdapter(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "config.toml")
+	writeTestFile(t, path, "[factory.default]\ntracker = \"jira\"\n")
+	_, err := LoadDefinitions(path)
+	if err == nil || !strings.Contains(err.Error(), "unknown tracker") {
+		t.Fatalf("error = %v, want unknown tracker rejection", err)
 	}
 }
