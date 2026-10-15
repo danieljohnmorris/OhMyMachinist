@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/owainlewis/machinist/internal/adapters"
 	"github.com/owainlewis/machinist/internal/config"
 	"github.com/owainlewis/machinist/internal/issues"
 	"github.com/owainlewis/machinist/internal/protocol"
@@ -57,6 +58,7 @@ type Server struct {
 	reviewDefaultProfile string
 	failAlerts           *failAlertWriter
 	csrfToken            string
+	trackerFactory       func(ctx context.Context, repository, kind string) (adapters.Tracker, error)
 	handler              http.Handler
 }
 
@@ -347,6 +349,13 @@ func (s *Server) routes() (http.Handler, error) {
 	mux.HandleFunc("POST /api/v1/review-profile/preview", s.previewReviewProfile)
 	mux.HandleFunc("GET /api/v1/review-default-profile", s.getReviewDefaultProfile)
 	mux.HandleFunc("PUT /api/v1/review-default-profile", s.authorizeSubmission(s.saveReviewDefaultProfile))
+	mux.HandleFunc("GET /api/v1/factory-setting", s.authorizeRead(s.getFactorySetting))
+	mux.HandleFunc("PUT /api/v1/factory-setting", s.authorizeWrite(s.saveFactorySetting))
+	mux.HandleFunc("DELETE /api/v1/factory-setting", s.authorizeWrite(s.deleteFactorySetting))
+	mux.HandleFunc("GET /api/v1/factory-default", s.authorizeRead(s.getFactoryDefault))
+	mux.HandleFunc("PUT /api/v1/factory-default", s.authorizeWrite(s.saveFactoryDefault))
+	mux.HandleFunc("GET /api/v1/factory-catalog", s.authorizeRead(s.getFactoryCatalog))
+	mux.HandleFunc("GET /api/v1/worker/factory-setting", s.authorizeWorker(s.getWorkerFactorySetting))
 	mux.HandleFunc("POST /api/v1/runs/{id}/heartbeat", s.authorizeWorker(s.heartbeat))
 	mux.HandleFunc("POST /api/v1/runs/{id}/complete", s.authorizeWorker(s.complete))
 	mux.HandleFunc("POST /api/v1/runs/{id}/events", s.authorizeWorker(s.liveEvents))
@@ -560,6 +569,14 @@ func (s *Server) queueJob(ctx context.Context, input submitRequest, identity Tok
 		return bad(err)
 	}
 	command.Model = input.Model
+	// The project's factory setup picks the agent and default model; an
+	// explicit request model still wins.
+	if err := s.applyFactoryToCommand(ctx, input.Repository, &command); err != nil {
+		return bad(err)
+	}
+	if input.Model != "" {
+		command.Model = input.Model
+	}
 	jobID, err := s.store.CreateJobWithOptions(ctx, input.Prompt, input.Repository, input.Command, command, CreateJobOptions{Title: input.Title, Project: project})
 	if err != nil {
 		return "", err

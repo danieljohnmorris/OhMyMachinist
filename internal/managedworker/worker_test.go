@@ -525,3 +525,29 @@ func TestWorkflowStopsProcessAfterLeaseRejection(t *testing.T) {
 		t.Fatal("workflow kept executing after definitive lease rejection")
 	}
 }
+
+func TestWorkerFactoryEnvRendersReviewExecutor(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/api/v1/worker/factory-setting" || request.URL.Query().Get("project") != "machinist" {
+			t.Errorf("unexpected request: %s %s", request.URL.Path, request.URL.RawQuery)
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`{"source":"project","review_executor":"codex exec --model {{env.MACHINIST_TEST_REVIEW_MODEL}}"}`))
+	}))
+	defer server.Close()
+
+	t.Setenv("MACHINIST_TEST_REVIEW_MODEL", "gpt-5")
+	worker := &Worker{client: &Client{base: server.URL, token: "token", http: server.Client()}, stderr: io.Discard}
+	env := worker.factoryEnv(t.Context(), "machinist")
+	want := "MACHINIST_REVIEW_EXECUTOR=codex exec --model gpt-5"
+	if len(env) != 1 || env[0] != want {
+		t.Fatalf("factoryEnv = %v, want [%s]", env, want)
+	}
+
+	if got := worker.factoryEnv(t.Context(), ""); got != nil {
+		t.Fatalf("factoryEnv(empty repository) = %v, want nil", got)
+	}
+	if got := (&Worker{stderr: io.Discard}).factoryEnv(t.Context(), "machinist"); got != nil {
+		t.Fatalf("factoryEnv(nil client) = %v, want nil", got)
+	}
+}

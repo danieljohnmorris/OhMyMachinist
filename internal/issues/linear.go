@@ -16,6 +16,10 @@ const linearEndpoint = "https://api.linear.app/graphql"
 type LinearConfig struct {
 	APIKey  string
 	Project string
+	// Endpoint overrides the Linear GraphQL endpoint. Empty uses the public
+	// api.linear.app endpoint; it exists so tests and proxies can point the
+	// client elsewhere.
+	Endpoint string
 }
 
 type LinearClient struct {
@@ -29,7 +33,11 @@ func NewLinearClient(config LinearConfig) (*LinearClient, error) {
 	if err := requiresValue(config.APIKey, "LINEAR_API_KEY"); err != nil {
 		return nil, err
 	}
-	return &LinearClient{config: config, project: config.Project, endpoint: linearEndpoint, client: &http.Client{Timeout: 30 * time.Second}}, nil
+	endpoint := strings.TrimSpace(config.Endpoint)
+	if endpoint == "" {
+		endpoint = linearEndpoint
+	}
+	return &LinearClient{config: config, project: config.Project, endpoint: endpoint, client: &http.Client{Timeout: 30 * time.Second}}, nil
 }
 
 func (l *LinearClient) FetchIssue(ctx context.Context, key string) (Issue, error) {

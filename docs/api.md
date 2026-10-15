@@ -49,6 +49,9 @@ All requests and responses are `application/json`. Errors are
 | GET | `/api/v1/review-profiles` | Stored review profiles. |
 | GET | `/api/v1/review-profile?project=X` | Resolved review profile for a project. |
 | GET | `/api/v1/review-default-profile` | The global default profile name. |
+| GET | `/api/v1/factory-catalog` | Supported trackers, agents, model roles and endpoints. |
+| GET | `/api/v1/factory-setting?project=X` | Resolved factory setup (tracker, agents, models) for a project. |
+| GET | `/api/v1/factory-default` | The global default factory setup. |
 
 `GET /api/v1/status` (board state: jobs, workers, triggers, plus the CSRF
 token) and `GET /api/v1/catalog` and `GET /api/v1/definitions` remain open so
@@ -68,12 +71,16 @@ the browser UI can bootstrap; they serve no secrets.
 | PUT | `/api/v1/review-profiles` | Save a library review profile. |
 | PUT | `/api/v1/review-profile` | Save a project review profile. |
 | PUT | `/api/v1/review-default-profile` | Set the global default profile name. |
+| PUT | `/api/v1/factory-setting` | Save a project factory setup. Body: `{"project": "…", "setting": {…}}`. |
+| DELETE | `/api/v1/factory-setting?project=X` | Reset a project to the global default setup. |
+| PUT | `/api/v1/factory-default` | Set the global default factory setup. Body: `{"setting": {…}}`. |
 
 ### Worker endpoints (worker token)
 
 `POST /api/v1/workers/poll`, `POST /api/v1/runs/{id}/heartbeat`,
 `POST /api/v1/runs/{id}/complete`, `POST /api/v1/runs/{id}/events`,
-`PUT /api/v1/runs/{id}/artifacts`. These are the internal worker protocol and
+`PUT /api/v1/runs/{id}/artifacts`, `GET /api/v1/worker/factory-setting?project=X`.
+These are the internal worker protocol and
 are not part of the documented bot API.
 
 ## Example

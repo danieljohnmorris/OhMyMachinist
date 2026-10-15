@@ -283,6 +283,10 @@ CREATE TABLE IF NOT EXISTS project_review_settings (
  profile_body TEXT NOT NULL DEFAULT '',
  extra_instructions TEXT NOT NULL DEFAULT '',
  updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS project_factory_settings (
+ repository TEXT PRIMARY KEY,
+ setting TEXT NOT NULL,
+ updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS settings (
  key TEXT PRIMARY KEY,
  value TEXT NOT NULL);

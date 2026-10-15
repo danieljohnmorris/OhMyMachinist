@@ -62,6 +62,12 @@ func (s *Server) processIssueTrigger(ctx context.Context, trigger config.Resolve
 	var failures []error
 	admitted := 0
 	source := s.issueSources[trigger.Identity]
+	// A project may override the trigger's tracker in Settings.
+	if override, ok, overrideErr := s.trackerSourceFor(ctx, trigger.Repository); overrideErr != nil {
+		failures = append(failures, overrideErr)
+	} else if ok {
+		source = override
+	}
 	if source == nil {
 		failures = append(failures, fmt.Errorf("issue source %q is unavailable", trigger.Identity))
 	} else {
@@ -104,6 +110,10 @@ func (s *Server) admitIssue(ctx context.Context, trigger config.ResolvedTrigger,
 		return 0, renderErr
 	}
 	command.Model = trigger.Model
+	// A project may override the trigger's coding agent and model in Settings.
+	if err := s.applyFactoryToCommand(ctx, trigger.Repository, &command); err != nil {
+		return 0, err
+	}
 	subject := issue.URL
 	if subject == "" {
 		subject = issue.Key
