@@ -270,11 +270,25 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	var streams sync.WaitGroup
 	streams.Add(2)
 	usageCollector := newUsageCollector(options.Command.Executor, executorCommand)
+	// omp emits its agent events as JSONL on stdout in --mode json; the parser
+	// turns them into typed transcript events while the raw JSON lines are
+	// dropped so the transcript stays readable.
+	var ompStream *ompStreamParser
+	if ompExecutor(options.Command.Executor, executorCommand) {
+		ompStream = newOmpStreamParser(log)
+	}
 	stdoutDestination := options.Stdout
 	if usageCollector != nil {
 		stdoutDestination = io.MultiWriter(options.Stdout, usageCollector)
 	}
-	go pumpStream(&streams, stdoutReader, stdoutDestination, "stdout", log, streamErrors)
+	if ompStream != nil {
+		stdoutDestination = io.MultiWriter(stdoutDestination, ompStream)
+	}
+	var stdoutLog *eventLog
+	if ompStream == nil {
+		stdoutLog = log
+	}
+	go pumpStream(&streams, stdoutReader, stdoutDestination, "stdout", stdoutLog, streamErrors)
 	go pumpStream(&streams, stderrReader, options.Stderr, "stderr", log, streamErrors)
 	streamsDone := make(chan struct{})
 	go func() {
@@ -303,6 +317,11 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	if usageCollector != nil {
 		collectedTokenUsage = usageCollector.tokenUsage()
 		result.FinalMessage = usageCollector.lastMessage()
+	}
+	if ompStream != nil {
+		collectedTokenUsageIsAuthoritative = true
+		collectedTokenUsage = ompStream.tokenUsage()
+		result.FinalMessage = ompStream.lastMessage()
 	}
 	if err := finish(&result, log, runDirectory, state, exitCode, outcome, collectedTokenUsage, collectedTokenUsageIsAuthoritative); err != nil {
 		if outcome != nil {
@@ -582,9 +601,13 @@ func pumpStream(group *sync.WaitGroup, source *os.File, destination io.Writer, s
 				sendError(errorsChannel, fmt.Errorf("write %s: %w", stream, writeErr))
 				return
 			}
-			if err := log.appendOutput(stream, chunk); err != nil {
-				sendError(errorsChannel, err)
-				return
+			// A nil log means the stream is consumed by a structured parser
+			// that records typed events instead of raw output.
+			if log != nil {
+				if err := log.appendOutput(stream, chunk); err != nil {
+					sendError(errorsChannel, err)
+					return
+				}
 			}
 		}
 		if readErr != nil {

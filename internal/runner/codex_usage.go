@@ -39,6 +39,9 @@ func newUsageCollector(executor string, command []string) *structuredUsageCollec
 }
 
 func structuredCommand(executor string, command []string) []string {
+	if ompCommand := structuredOmpCommand(executor, command); !slices.Equal(ompCommand, command) {
+		return ompCommand
+	}
 	if codexCommand := structuredCodexCommand(executor, command); !slices.Equal(codexCommand, command) {
 		return codexCommand
 	}

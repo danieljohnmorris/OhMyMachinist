@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { transcriptIsLive, transcriptLines } from "./transcript.js";
+import { transcriptEntries, transcriptIsLive } from "./transcript.js";
 
 const b64 = (text) => Buffer.from(text, "utf8").toString("base64");
 const line = (event) => JSON.stringify(event);
@@ -13,19 +13,36 @@ test("joins base64 output chunks into whole lines per stream", () => {
     line({ type: "process.output", stream: "stderr", encoding: "base64", data: b64("warn\n") }),
     line({ type: "run.completed", message: "state=succeeded" }),
   ].join("\n");
-  assert.deepEqual(transcriptLines(events), [
-    { stream: "event", text: "run.started: command=build" },
-    { stream: "stdout", text: "hello" },
-    { stream: "stderr", text: "warn" },
-    { stream: "event", text: "run.completed: state=succeeded" },
-    { stream: "stdout", text: "wor" },
+  assert.deepEqual(transcriptEntries(events), [
+    { kind: "event", text: "run.started: command=build" },
+    { kind: "output", stream: "stdout", text: "hello" },
+    { kind: "output", stream: "stderr", text: "warn" },
+    { kind: "event", text: "run.completed: state=succeeded" },
+    { kind: "output", stream: "stdout", text: "wor" },
   ]);
 });
 
-test("shows malformed lines as raw output and keeps only the newest lines", () => {
+test("turns structured agent events into readable transcript entries", () => {
+  const events = [
+    line({ type: "agent.thinking", message: "considering\n" }),
+    line({ type: "agent.tool_call", tool: "bash", tool_args: '{"command":"echo hi"}' }),
+    line({ type: "agent.tool_result", tool: "bash", message: "hi\n", bytes: 3 }),
+    line({ type: "agent.tool_result", tool: "bash", message: "boom", bytes: 4, failed: true }),
+    line({ type: "agent.message", message: "**Done**." }),
+  ].join("\n");
+  assert.deepEqual(transcriptEntries(events), [
+    { kind: "thinking", text: "considering\n" },
+    { kind: "tool-call", tool: "bash", args: '{\n  "command": "echo hi"\n}', text: "" },
+    { kind: "tool-result", tool: "bash", text: "hi\n", bytes: 3, failed: false },
+    { kind: "tool-result", tool: "bash", text: "boom", bytes: 4, failed: true },
+    { kind: "message", text: "**Done**." },
+  ]);
+});
+
+test("shows malformed lines as raw output and keeps only the newest entries", () => {
   const events = ["not json", ...Array.from({ length: 5 }, (_, i) => line({ type: "tick", message: String(i) }))].join("\n");
-  assert.deepEqual(transcriptLines(events, 6).map((entry) => entry.text), ["not json", "tick: 0", "tick: 1", "tick: 2", "tick: 3", "tick: 4"]);
-  assert.deepEqual(transcriptLines(""), []);
+  assert.deepEqual(transcriptEntries(events, 6).map((entry) => entry.text), ["not json", "tick: 0", "tick: 1", "tick: 2", "tick: 3", "tick: 4"]);
+  assert.deepEqual(transcriptEntries(""), []);
 });
 
 test("polls only while the run is active", () => {

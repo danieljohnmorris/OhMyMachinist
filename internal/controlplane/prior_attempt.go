@@ -159,6 +159,17 @@ func decodeEventTranscript(events string) []string {
 			flush(stream, false)
 			continue
 		}
+		// Typed agent events (MACH-42) carry the structured session; keep the
+		// tool name and its arguments so a retry can see what the previous
+		// attempt actually ran.
+		if event.Type == "agent.tool_call" && event.Args != "" {
+			lines = append(lines, "agent.tool_call: "+event.Tool+" "+event.Args)
+			continue
+		}
+		if event.Type == "agent.tool_result" {
+			lines = append(lines, fmt.Sprintf("agent.tool_result: %s (%d bytes): %s", event.Tool, event.Bytes, event.Message))
+			continue
+		}
 		if event.Message != "" {
 			lines = append(lines, event.Type+": "+event.Message)
 			continue

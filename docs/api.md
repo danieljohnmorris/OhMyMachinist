@@ -54,6 +54,15 @@ All requests and responses are `application/json`. Errors are
 token) and `GET /api/v1/catalog` and `GET /api/v1/definitions` remain open so
 the browser UI can bootstrap; they serve no secrets.
 
+The run transcript is JSON Lines. `process.output` carries base64 command
+output; coding agents that run in a JSON mode contribute typed agent events the
+run page renders readably: `agent.message` (assistant text, markdown),
+`agent.thinking` (a thinking summary, dimmed), `agent.tool_call` (`tool` name
+and `tool_args` JSON) and `agent.tool_result` (`tool`, `message` truncated to
+2 KB, `bytes` for the full size, `failed` when the tool reported an error).
+Tool-call and tool-result payloads are redacted for credential shapes before
+they reach the log.
+
 ### Changing state (write scope)
 
 | Method | Path | Description |

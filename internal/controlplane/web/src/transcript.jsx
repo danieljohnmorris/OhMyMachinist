@@ -1,13 +1,16 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { transcriptIsLive, transcriptLines, transcriptPollMillis } from "./transcript.js";
+import { TranscriptEntry } from "./transcript-entry.js";
+import { transcriptEntries, transcriptIsLive, transcriptPollMillis } from "./transcript.js";
 
 // How close to the bottom the scroller must stay for auto-scroll to follow new
 // output; scrolling further up pauses following until the user returns.
 const followThresholdPixels = 24;
 
 // Shows the agent transcript for a run, polling while it is still active so the
-// log grows live, then keeping the full log once the run finishes.
+// log grows live, then keeping the full log once the run finishes. Structured
+// agent events (messages, thinking, tool calls and results) render readably;
+// tool calls and results collapse so long transcripts stay scannable.
 export function Transcript({ run, csrfToken }) {
   const [state, setState] = useState({ runID: null, events: "", error: "", attempt: 0 });
   const scroller = useRef(null);
@@ -43,7 +46,7 @@ export function Transcript({ run, csrfToken }) {
       clearTimeout(timer);
     };
   }, [run?.id, run?.state, csrfToken, state.attempt]);
-  const lines = state.runID === run?.id ? transcriptLines(state.events) : [];
+  const entries = state.runID === run?.id ? transcriptEntries(state.events) : [];
   // The transcript grows with the page (no inner scroll box). While live, the
   // window follows new output as long as the reader is near the bottom.
   useEffect(() => {
@@ -61,13 +64,13 @@ export function Transcript({ run, csrfToken }) {
       const page = document.scrollingElement || document.documentElement;
       window.scrollTo({ top: page.scrollHeight });
     }
-  }, [lines.length, live]);
+  }, [entries.length, live]);
   function retry() {
     setState((current) => ({ ...current, error: "", attempt: current.attempt + 1 }));
   }
   if (!run?.id) return null;
   return (
-    <section aria-label="Agent transcript" className="space-y-2">
+    <section aria-label="Agent transcript" className="space-y-2" ref={scroller}>
       <div className="flex items-center justify-between gap-2">
         <h2 className="text-sm font-semibold">Transcript</h2>
         {live && !state.error && <span className="text-xs text-muted-foreground">Live</span>}
@@ -79,21 +82,16 @@ export function Transcript({ run, csrfToken }) {
             Retry
           </Button>
         </div>
+      ) : entries.length ? (
+        <div className="space-y-2 rounded-md border border-border bg-muted/40 p-3 text-xs leading-5">
+          {entries.map((entry, index) => (
+            <TranscriptEntry key={index} entry={entry} />
+          ))}
+        </div>
       ) : (
-        <pre
-          ref={scroller}
-          className="whitespace-pre-wrap break-words rounded-md border border-border bg-muted/40 p-3 font-mono text-xs leading-5"
-        >
-          {lines.length
-            ? lines.map((entry, index) => (
-                <div key={index} className={entry.stream === "stderr" ? "text-danger" : entry.stream === "event" ? "text-muted-foreground" : undefined}>
-                  {entry.text}
-                </div>
-              ))
-            : live
-              ? "Waiting for output…"
-              : "No output recorded for this run."}
-        </pre>
+        <p className="rounded-md border border-border bg-muted/40 p-3 text-xs text-muted-foreground">
+          {live ? "Waiting for output…" : "No output recorded for this run."}
+        </p>
       )}
     </section>
   );
