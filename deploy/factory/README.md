@@ -17,6 +17,20 @@ runs as a plain script, with the skills available to the machinist user):
     sudo install -m755 deploy/factory/deliver-pr.py deploy/factory/post_pr_review.py /usr/local/lib/machinist-factory/
     sudo cp -R deploy/factory/review /usr/local/lib/machinist-factory/review
     sudo -u machinist deploy/factory/install-review-skills.sh
+    sudo install -m755 deploy/factory/omp-glm deploy/factory/omp-glm-pr /usr/local/lib/machinist-factory/
+
+## omp executors (omp-glm, omp-glm-pr)
+
+`omp-glm` is the sandboxed omp executor (`omp-glm <low|medium>`, prompt on
+stdin) and `omp-glm-pr` wraps it with `deliver-pr.py` for coding jobs. Both are
+trusted, root-owned and installed next to `deliver-pr.py`.
+
+MACH-42: `omp-glm` runs omp in `--mode text` or `--mode json` from
+`MACHINIST_OMP_MODE` (default `text`). `omp-glm-pr` sets `MACHINIST_OMP_MODE=json`
+for its coding run only, so the worker receives the session as JSONL and renders
+every assistant message, thinking block, tool call and tool result in the run
+transcript. The built-in review calls `omp-glm` without that variable and keeps
+parsing the reviewer's text findings.
 
 Reviewers and the amend pass run under the executor from
 `MACHINIST_REVIEW_EXECUTOR`; if that is unset, `deliver-pr.py` uses

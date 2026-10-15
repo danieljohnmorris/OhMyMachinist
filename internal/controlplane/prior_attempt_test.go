@@ -151,3 +151,24 @@ func TestRequeuedTriggeredJobPromptIncludesPriorAttempt(t *testing.T) {
 		}
 	}
 }
+
+func TestDecodeEventTranscriptRendersAgentToolCalls(t *testing.T) {
+	events := strings.Join([]string{
+		`{"type":"agent.thinking","message":"weighing options"}`,
+		`{"type":"agent.tool_call","tool":"bash","tool_args":"{\"command\":\"go test ./...\"}"}`,
+		`{"type":"agent.tool_result","tool":"bash","message":"ok","bytes":42}`,
+		`{"type":"agent.message","message":"done"}`,
+		outputEvent("stdout", "plain\n"),
+	}, "\n")
+	got := decodeEventTranscript(events)
+	want := []string{
+		"agent.thinking: weighing options",
+		`agent.tool_call: bash {"command":"go test ./..."}`,
+		"agent.tool_result: bash (42 bytes): ok",
+		"agent.message: done",
+		"plain",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("transcript = %#v", got)
+	}
+}

@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Machinist omp executor (trusted, root-owned; agents cannot edit). 2026-10-11.
+#   omp-glm <low|medium>     prompt on stdin, runs in $PWD (the job's repo checkout)
+# Runs omp -p against local GLM Flash on the Sparks with a FIXED effort (never auto):
+#   medium = coding (smoke, build-pr);  low = non-coding (foreman, audit, shepherd).
+# Sandbox (bwrap) replaces Codex's workspace-write: whole FS read-only except the repo,
+# omp state and build caches; repo .git read-only; ~/.ssh, ~/.config/gh and
+# ~/.machinist hidden, so the model cannot commit/push/open PRs or read secrets.
+# Network stays on (omp itself must reach spark1:8888).
+#
+# MACH-42: output mode defaults to text so the built-in review, which parses the
+# reviewer's stdout findings, keeps working. Coding executors call this wrapper
+# with MACHINIST_OMP_MODE=json so the worker can stream the session as JSONL.
+set -uo pipefail
+effort="${1:-}"
+case "$effort" in low|medium) ;; *) echo "omp-glm: effort must be low|medium (got '$effort')" >&2; exit 2;; esac
+H=/home/machinist
+OMP="${MACHINIST_OMP_BIN:-$H/.local/bin/omp}"
+MODEL="${MACHINIST_OMP_MODEL:-sparks/deepseek-v4.1-flash}"  # 2026-10-15: was sparks/GLM-5.3-Flash-EXL3-bg; spark1 serves DeepSeek
+MODE="${MACHINIST_OMP_MODE:-text}"
+case "$MODE" in text|json) ;; *) echo "omp-glm: MACHINIST_OMP_MODE must be text|json (got '$MODE')" >&2; exit 2;; esac
+repo="$(pwd -P)"
+b=(--ro-bind / / --dev /dev --proc /proc --tmpfs /tmp
+   --bind "$repo" "$repo"
+   --bind "$H/.omp" "$H/.omp")
+for d in "$H/.cache" "$H/.npm" "$H/go"; do [ -d "$d" ] && b+=(--bind "$d" "$d"); done
+[ -e "$repo/.git" ] && b+=(--ro-bind "$repo/.git" "$repo/.git")
+for d in "$H/.ssh" "$H/.config/gh" "$H/.machinist"; do [ -d "$d" ] && b+=(--tmpfs "$d"); done
+b+=(--die-with-parent --unshare-pid --new-session --chdir "$repo")
+echo "omp-glm: model=$MODEL thinking=$effort mode=$MODE repo=$repo" >&2
+exec /usr/bin/bwrap "${b[@]}" -- "$OMP" -p --model "$MODEL" --thinking "$effort" --mode "$MODE" \
+  --no-session --no-title --no-extensions --auto-approve --approval-mode yolo

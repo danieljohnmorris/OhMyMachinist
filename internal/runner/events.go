@@ -23,6 +23,13 @@ type Event struct {
 	Message  string    `json:"message,omitempty"`
 	Encoding string    `json:"encoding,omitempty"`
 	Data     string    `json:"data,omitempty"`
+	// Agent transcript fields. agent.tool_call carries the tool name and its
+	// JSON arguments, agent.tool_result the possibly truncated text plus the
+	// full byte count, and failed marks a tool result that reported an error.
+	Tool   string `json:"tool,omitempty"`
+	Args   string `json:"tool_args,omitempty"`
+	Bytes  int    `json:"bytes,omitempty"`
+	Failed bool   `json:"failed,omitempty"`
 }
 
 func (log *eventLog) appendOutput(stream string, data []byte) error {
@@ -103,6 +110,23 @@ func (log *eventLog) append(eventType, stream, message string) error {
 		return fmt.Errorf("write event log: %w", err)
 	}
 	return nil
+}
+
+// appendTyped records a structured agent event (message, thinking, tool call,
+// tool result) in the log. It is best effort: an event that would overflow the
+// log is dropped so a large transcript cannot abort the run, and the raw
+// process output remains the audit trail when the caller records it.
+func (log *eventLog) appendTyped(event Event) error {
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	fits, err := log.eventFits(event, truncationEventReserve)
+	if err != nil {
+		return err
+	}
+	if !fits {
+		return nil
+	}
+	return log.writeEvent(event)
 }
 
 func (log *eventLog) eventFits(event Event, reserve int64) (bool, error) {

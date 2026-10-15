@@ -80,10 +80,15 @@ class ReviewExecutorDefaultTests(unittest.TestCase):
                 self.assertEqual(deliver.review_executor_cmd(), f"{omp} medium")
 
     def test_none_when_no_executor_available(self) -> None:
-        deliver = _load_deliver_from(_FACTORY / "deliver-pr.py")
-        env = {k: v for k, v in os.environ.items() if k != "MACHINIST_REVIEW_EXECUTOR"}
-        with mock.patch.dict(os.environ, env, clear=True):
-            self.assertIsNone(deliver.review_executor_cmd())
+        # The repo now ships omp-glm next to deliver-pr.py, so the "no executor"
+        # case needs an install directory that holds only the script.
+        with tempfile.TemporaryDirectory() as temp:
+            tmp = Path(temp)
+            shutil.copy(_FACTORY / "deliver-pr.py", tmp / "deliver-pr.py")
+            deliver = _load_deliver_from(tmp / "deliver-pr.py")
+            env = {k: v for k, v in os.environ.items() if k != "MACHINIST_REVIEW_EXECUTOR"}
+            with mock.patch.dict(os.environ, env, clear=True):
+                self.assertIsNone(deliver.review_executor_cmd())
 
 
 class DeliverExitPolicyTests(unittest.TestCase):
