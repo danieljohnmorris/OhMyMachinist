@@ -335,7 +335,7 @@ func (s *Server) getFactoryDefault(response http.ResponseWriter, request *http.R
 		}
 		source = "global"
 	} else {
-		definition, err := config.LoadDefinitions(s.definitionPath)
+		definition, err := s.loadDefinition()
 		if err != nil {
 			writeError(response, http.StatusInternalServerError, err)
 			return

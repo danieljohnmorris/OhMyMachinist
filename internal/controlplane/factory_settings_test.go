@@ -243,6 +243,23 @@ func TestFactorySettingHTTPRoundTrip(t *testing.T) {
 	}
 }
 
+func TestFactoryDefaultFallsBackToBuiltInWithoutConfigPath(t *testing.T) {
+	server, _ := testFactoryServer(t, "")
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/factory-default", nil)
+	recorder := httptest.NewRecorder()
+	server.getFactoryDefault(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var result factorySettingResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Source != "built-in" || !result.Setting.IsZero() {
+		t.Fatalf("response = %#v, want empty built-in default", result)
+	}
+}
+
 func TestFactorySettingHTTPRejectsUnknownAdapter(t *testing.T) {
 	server, _ := testFactoryServer(t, "")
 	body, _ := json.Marshal(map[string]any{
