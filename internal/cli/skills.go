@@ -140,7 +140,11 @@ func newSkillsUninstallCommand(options *commandOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := library.Uninstall(args[0], skills.UninstallOptions{Referenced: skillReferenced(args[0]), Force: force}); err != nil {
+			referenced, err := skillReferenced(args[0])
+			if err != nil {
+				return err
+			}
+			if err := library.Uninstall(args[0], skills.UninstallOptions{Referenced: referenced, Force: force}); err != nil {
 				return err
 			}
 			_, err = fmt.Fprintf(options.stdout, "uninstalled skill %s\n", args[0])
@@ -152,15 +156,16 @@ func newSkillsUninstallCommand(options *commandOptions) *cobra.Command {
 }
 
 // skillReferenced reports whether any shipped review profile still references
-// the named skill.
-func skillReferenced(name string) bool {
+// the named skill. An error means the reference set could not be read; callers
+// must not treat that as "unreferenced".
+func skillReferenced(name string) (bool, error) {
 	key, err := skills.Key(name)
 	if err != nil {
-		return false
+		return false, err
 	}
 	entries, err := review.FS.ReadDir(".")
 	if err != nil {
-		return false
+		return false, fmt.Errorf("read review profiles: %w", err)
 	}
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".yaml") {
@@ -168,13 +173,13 @@ func skillReferenced(name string) bool {
 		}
 		body, err := review.FS.ReadFile(entry.Name())
 		if err != nil {
-			continue
+			return false, fmt.Errorf("read review profile %s: %w", entry.Name(), err)
 		}
 		for _, reference := range skills.ProfileReferences(string(body)) {
 			if referenceKey, err := skills.Key(reference); err == nil && referenceKey == key {
-				return true
+				return true, nil
 			}
 		}
 	}
-	return false
+	return false, nil
 }
