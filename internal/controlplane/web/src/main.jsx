@@ -15,7 +15,7 @@ import { Card } from "@/components/ui/card";
 import { PageHeading } from "@/components/ui/page-heading";
 import { cn } from "@/lib/utils";
 import { routeFromHash } from "@/routes";
-import { attemptTime, boardCardTimestamp, boardColumns, boardDateFilters, boardFiltersFromHash, boardHash, canCancelJob, collapseIssueAttempts, collapseJobsByTicket, currentRun, filterBoardJobs, filterJobsByDate, groupEntriesByBoardColumn, groupJobsByBoardColumn, jobCounts, jobDisplayTitle, resolutionLabel } from "@/runs-board";
+import { attemptTime, boardCardTimestamp, boardColumns, boardDateFilters, boardFiltersFromHash, boardHash, canCancelJob, canMoveToQueue, collapseIssueAttempts, collapseJobsByTicket, currentRun, filterBoardJobs, filterJobsByDate, groupEntriesByBoardColumn, groupJobsByBoardColumn, jobCounts, jobDisplayTitle, resolutionLabel } from "@/runs-board";
 import { groupEntriesByProject, groupJobsByProject } from "@/project";
 import { concurrencyLabel } from "@/concurrency";
 import { createStatusLoader } from "@/status-loader";
@@ -174,6 +174,22 @@ function App() {
     } catch (error) { setTaskActionError(error.message); }
   }
 
+  // Move to queue (MACH-66): one button stops the current attempt and queues
+  // the same job again as the next attempt on the same card. It asks first,
+  // because it stops a running agent, and says what happens to the work.
+  async function moveJobToQueue(job) {
+    const title = jobDisplayTitle(job);
+    if (!window.confirm(`Move ${title} back to the queue?\n\nThis stops the current attempt, saves its uncommitted work in the checkout, and queues the same job again as the next attempt.`)) return;
+    setTaskActionError("");
+    try {
+      const response = await fetch(`/api/v1/jobs/${encodeURIComponent(job.id)}/move-to-queue`, {
+        method: "POST", headers: { "X-Machinist-CSRF": status.csrf_token },
+      });
+      if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.error || "Unable to move the job to the queue"); }
+      await statusLoader.current.refresh();
+    } catch (error) { setTaskActionError(error.message); }
+  }
+
   async function deleteJob(job) {
     if (!window.confirm(`Delete task ${shortId(job.id)} and all of its stored run data?`)) return;
     setDeletingJob(job.id);
@@ -256,7 +272,7 @@ function App() {
       </aside>
 
       <main className="workshop min-w-0 flex-1">
-        {view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={displayJob} jobs={status.jobs} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} onCancelJob={cancelJob} onAttemptChange={selectTaskAttempt} tab={route.tab} onTabChange={selectTaskTab} /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : view === "workers" ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} /> : view === "factory" ? <FactoryPage factory={status.factory} csrfToken={status.csrf_token} onChanged={refreshStatus} loaded={statusLoaded} error={statusError} /> : view === "triggers" ? <TriggersPage triggers={status.triggers || []} loaded={statusLoaded} error={statusError} /> : view === "skills" ? <SkillsPage csrfToken={status.csrf_token} /> : view === "settings" ? <SettingsPage repositories={status.repositories || []} csrfToken={status.csrf_token} /> : ["commands", "workflows"].includes(view) ? <CommandsPage /> : <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
+        {view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={displayJob} jobs={status.jobs} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} onCancelJob={cancelJob} onMoveToQueue={moveJobToQueue} onAttemptChange={selectTaskAttempt} tab={route.tab} onTabChange={selectTaskTab} /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : view === "workers" ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} /> : view === "factory" ? <FactoryPage factory={status.factory} csrfToken={status.csrf_token} onChanged={refreshStatus} loaded={statusLoaded} error={statusError} /> : view === "triggers" ? <TriggersPage triggers={status.triggers || []} loaded={statusLoaded} error={statusError} /> : view === "skills" ? <SkillsPage csrfToken={status.csrf_token} /> : view === "settings" ? <SettingsPage repositories={status.repositories || []} csrfToken={status.csrf_token} /> : ["commands", "workflows"].includes(view) ? <CommandsPage /> : <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
           <PageHeading title="Tasks" description="Describe the work. Review the result.">
             <div className="flex items-center gap-2">
               <Button className="text-xs!" onClick={() => setComposerOpen(true)}><Plus className="size-4" />New task</Button>
@@ -264,7 +280,7 @@ function App() {
           </PageHeading>
 
           {composerOpen && <RunComposer title={title} setTitle={setTitle} sourceURL={sourceURL} setSourceURL={setSourceURL} choices={choices} repositories={repositories} selection={selection} setSelection={setSelection} repository={repository} setRepository={setRepository} prompt={prompt} setPrompt={setPrompt} model={model} setModel={setModel} submitting={submitting} submit={submit} close={() => setComposerOpen(false)} />}
-          {(statusError || submitError) && <div role="alert" className="rounded-md border border-danger/35 bg-danger/10 px-3 py-2 text-sm text-danger">{submitError || statusError}</div>}
+          {(statusError || submitError || taskActionError) && <div role="alert" className="rounded-md border border-danger/35 bg-danger/10 px-3 py-2 text-sm text-danger">{submitError || statusError || taskActionError}</div>}
 
           <section>
             <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -290,8 +306,8 @@ function App() {
               </div>
             </div>
 
-            {filters.runsView === "board" ? (filters.boardLayout === "projects" ? <ProjectRunBoard entries={boardEntries} onCancelJob={cancelJob} /> : <RunBoard entries={boardEntries} onCancelJob={cancelJob} />) : <Card className="overflow-hidden">
-              {visibleJobs.length ? visibleJobs.map((job) => <RunRow key={job.id} job={job} onCancelJob={cancelJob} />) : <EmptyRuns filtered={!filters.showSucceeded} openComposer={() => setComposerOpen(true)} />}
+            {filters.runsView === "board" ? (filters.boardLayout === "projects" ? <ProjectRunBoard entries={boardEntries} onCancelJob={cancelJob} onMoveToQueue={moveJobToQueue} /> : <RunBoard entries={boardEntries} onCancelJob={cancelJob} onMoveToQueue={moveJobToQueue} />) : <Card className="overflow-hidden">
+              {visibleJobs.length ? visibleJobs.map((job) => <RunRow key={job.id} job={job} onCancelJob={cancelJob} onMoveToQueue={moveJobToQueue} />) : <EmptyRuns filtered={!filters.showSucceeded} openComposer={() => setComposerOpen(true)} />}
             </Card>}
           </section>
 
@@ -323,14 +339,14 @@ function RunComposer({ title,setTitle,sourceURL,setSourceURL,choices,repositorie
   </Card>;
 }
 
-function RunBoard({ entries, onCancelJob }) {
+function RunBoard({ entries, onCancelJob, onMoveToQueue }) {
   const groupedEntries = groupEntriesByBoardColumn(entries);
   return <div className="grid min-w-0 gap-4 md:grid-cols-2 xl:grid-cols-4">
-    {boardColumns.map((column) => <RunColumn key={column.id} column={column} entries={groupedEntries[column.id]} idPrefix="board" onCancelJob={onCancelJob} />)}
+    {boardColumns.map((column) => <RunColumn key={column.id} column={column} entries={groupedEntries[column.id]} idPrefix="board" onCancelJob={onCancelJob} onMoveToQueue={onMoveToQueue} />)}
   </div>;
 }
 
-function ProjectRunBoard({ entries, onCancelJob }) {
+function ProjectRunBoard({ entries, onCancelJob, onMoveToQueue }) {
   const projectGroups = groupEntriesByProject(entries);
   return <div className="grid min-w-0 gap-6">
     {projectGroups.map(([project, projectEntries]) => {
@@ -341,21 +357,21 @@ function ProjectRunBoard({ entries, onCancelJob }) {
           <Badge className="shrink-0 border-border bg-surface text-muted-foreground" aria-label={`${projectEntries.length} visible ${project} runs`}>{projectEntries.length}</Badge>
         </header>
         <div className="grid min-w-0 gap-4 md:grid-cols-2 xl:grid-cols-4">
-          {boardColumns.map((column) => <RunColumn key={column.id} column={column} entries={groupedEntries[column.id]} idPrefix={`project-${project}`} onCancelJob={onCancelJob} />)}
+          {boardColumns.map((column) => <RunColumn key={column.id} column={column} entries={groupedEntries[column.id]} idPrefix={`project-${project}`} onCancelJob={onCancelJob} onMoveToQueue={onMoveToQueue} />)}
         </div>
       </section>;
     })}
   </div>;
 }
 
-function RunColumn({ column, entries, idPrefix, onCancelJob }) {
+function RunColumn({ column, entries, idPrefix, onCancelJob, onMoveToQueue }) {
   return <section className="run-column min-w-0 border border-border bg-muted/20" aria-labelledby={`${idPrefix}-${column.id}`}>
     <header className="flex items-center justify-between gap-3 border-b border-border px-3 py-2.5">
       <div className="min-w-0"><h2 id={`${idPrefix}-${column.id}`} className="text-sm font-semibold">{column.title}</h2><p className="break-words text-xs text-muted-foreground">{column.description}</p></div>
       <Badge className="shrink-0 border-border bg-surface text-muted-foreground" aria-label={`${entries.length} visible ${column.title.toLowerCase()} runs`}>{entries.length}</Badge>
     </header>
     <div className="grid min-w-0 gap-2 p-2">
-      {entries.length ? entries.map((entry) => <RunCard key={entry.latest.id} job={entry.latest} priors={entry.priors} onCancelJob={onCancelJob} />) : <p className="px-2 py-8 text-center text-xs text-muted-foreground">No runs</p>}
+      {entries.length ? entries.map((entry) => <RunCard key={entry.latest.id} job={entry.latest} priors={entry.priors} onCancelJob={onCancelJob} onMoveToQueue={onMoveToQueue} />) : <p className="px-2 py-8 text-center text-xs text-muted-foreground">No runs</p>}
     </div>
   </section>;
 }
@@ -368,7 +384,18 @@ function attemptBadges(job) {
   </div>;
 }
 
-function RunCard({ job, priors = [], onCancelJob }) {
+// MoveToQueueButton stops the current attempt and queues the job again as the
+// next attempt on the same card (MACH-66). The confirm lives in the handler,
+// so every surface asks the same question.
+function MoveToQueueButton({ job, onMoveToQueue }) {
+  const [busy, setBusy] = useState(false);
+  return <Button size="sm" variant="outline" disabled={busy} aria-label={`Move task ${jobDisplayTitle(job)} back to the queue`}
+    onClick={async () => { setBusy(true); try { await onMoveToQueue(job); } finally { setBusy(false); } }}>
+    {busy ? "Moving…" : "Move to queue"}
+  </Button>;
+}
+
+function RunCard({ job, priors = [], onCancelJob, onMoveToQueue }) {
   const title = jobDisplayTitle(job);
   const run = currentRun(job);
   const timestamp = boardCardTimestamp(job);
@@ -386,14 +413,14 @@ function RunCard({ job, priors = [], onCancelJob }) {
     </a>{priors.length > 0 && <div className="flex flex-wrap items-center gap-1.5 border-t border-border px-4 py-2.5">
       <Badge className="border-border bg-surface text-muted-foreground" aria-label={`${attemptCount} attempts`}>{attemptCount} attempts</Badge>
       {priors.map((prior) => <a key={prior.id} href={`#/runs/${encodeURIComponent(prior.id)}`} className="text-xs text-muted-foreground underline hover:text-foreground" aria-label={`Open prior attempt ${stateLabel(prior.state)} ${relativeTime(attemptTime(prior))}`}>{stateLabel(prior.state)} · {relativeTime(attemptTime(prior))}</a>)}
-    </div>}{canCancelJob(job) && <div className="flex justify-end px-4 pb-4"><Button size="sm" variant="outline" aria-label={`Cancel task ${title}`} onClick={() => onCancelJob(job)}>Cancel</Button></div>}</Card>;
+    </div>}{canCancelJob(job) && <div className="flex justify-end px-4 pb-4"><Button size="sm" variant="outline" aria-label={`Cancel task ${title}`} onClick={() => onCancelJob(job)}>Cancel</Button></div>}{canMoveToQueue(job) && <div className="flex justify-end px-4 pb-4"><MoveToQueueButton job={job} onMoveToQueue={onMoveToQueue} /></div>}</Card>;
 }
 
-function RunRow({ job, onCancelJob }) {
+function RunRow({ job, onCancelJob, onMoveToQueue }) {
   const title=jobDisplayTitle(job);
   const run=currentRun(job);
   const resolution=resolutionLabel(job);
-  return <article className="border-b border-border last:border-b-0"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="flex items-center justify-between gap-4 px-5 py-4 hover:bg-muted/35" aria-label={`Open task ${title}`}><div className="min-w-0"><p className="break-words text-sm font-medium" title={title}>{title}</p><p className="mt-1 text-xs text-muted-foreground">{job.repository} · {friendlyName(run?.command || job.command)}</p>{resolution && <p className="mt-1 text-xs text-success">{resolution}</p>}{attemptBadges(job)}</div><div className="flex shrink-0 flex-col items-end gap-1"><State value={job.state} /><time className="text-xs text-muted-foreground" dateTime={job.created_at}>{relativeTime(job.created_at)}</time>{canCancelJob(job) && <Button size="sm" variant="outline" aria-label={`Cancel task ${title}`} onClick={() => onCancelJob(job)}>Cancel</Button>}</div></a></article>;
+  return <article className="border-b border-border last:border-b-0"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="flex items-center justify-between gap-4 px-5 py-4 hover:bg-muted/35" aria-label={`Open task ${title}`}><div className="min-w-0"><p className="break-words text-sm font-medium" title={title}>{title}</p><p className="mt-1 text-xs text-muted-foreground">{job.repository} · {friendlyName(run?.command || job.command)}</p>{resolution && <p className="mt-1 text-xs text-success">{resolution}</p>}{attemptBadges(job)}</div><div className="flex shrink-0 flex-col items-end gap-1"><State value={job.state} /><time className="text-xs text-muted-foreground" dateTime={job.created_at}>{relativeTime(job.created_at)}</time>{canCancelJob(job) && <Button size="sm" variant="outline" aria-label={`Cancel task ${title}`} onClick={() => onCancelJob(job)}>Cancel</Button>}{canMoveToQueue(job) && <MoveToQueueButton job={job} onMoveToQueue={onMoveToQueue} />}</div></a></article>;
 }
 
 function EmptyRuns({ filtered, openComposer }) {

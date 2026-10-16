@@ -11,7 +11,7 @@ import { Transcript } from "./transcript.jsx";
 import { taskPresentation } from "./task-presentation.js";
 import { linkifyText } from "./linkify.js";
 import { Markdown } from "./markdown.js";
-import { jobDisplayTitle, canCancelJob, resolutionLabel, supersededJob, ticketAttempts, attemptStart, attemptDurationMillis } from "./runs-board.js";
+import { jobDisplayTitle, canCancelJob, canMoveToQueue, resolutionLabel, supersededJob, ticketAttempts, attemptStart, attemptDurationMillis } from "./runs-board.js";
 import { runSidebarLinks } from "./run-links.js";
 import { formatDurationMillis, formatTokenUsage } from "./run-metrics.js";
 import { activityRows } from "./run-activity.js";
@@ -32,6 +32,7 @@ export function TaskDetail({
   onDelete,
   onWorkflowAction,
   onCancelJob,
+  onMoveToQueue,
   onAttemptChange,
   tab,
   onTabChange,
@@ -68,7 +69,10 @@ export function TaskDetail({
           <h1 className="min-w-0 break-words text-2xl font-semibold">
             {jobDisplayTitle(job)}
           </h1>
-          <State value={job.state} />
+          <div className="flex flex-wrap items-center gap-3">
+            <State value={job.state} />
+            {canMoveToQueue(job) && <MoveToQueueButton job={job} onMoveToQueue={onMoveToQueue} />}
+          </div>
         </div>
         {resolutionLabel(job) && (
           <p className="text-sm text-success" data-testid="resolution-label">{resolutionLabel(job)}</p>
@@ -309,7 +313,19 @@ export function TaskDetail({
               id: "transcript",
               label: "Transcript",
               content: latest ? (
-                <Transcript run={latest} csrfToken={csrfToken} />
+                <div className="space-y-3">
+                  {canMoveToQueue(job) && (
+                    <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-muted/40 px-3 py-2">
+                      <p className="text-xs text-muted-foreground">
+                        This attempt is still in flight. Moving the job back to
+                        the queue stops it, saves its uncommitted work and
+                        starts a new attempt.
+                      </p>
+                      <MoveToQueueButton job={job} onMoveToQueue={onMoveToQueue} />
+                    </div>
+                  )}
+                  <Transcript run={latest} csrfToken={csrfToken} />
+                </div>
               ) : (
                 <p className="text-sm text-muted-foreground">
                   No transcript yet.
@@ -595,6 +611,7 @@ function ExecutionDetails({ run }) {
           }
         />
         <RunMetric label="Model" value={run.model || "Executor default"} />
+        {run.wip && <RunMetric label="Saved work" value={run.wip} />}
         <RunMetric
           label="Tokens"
           value={
@@ -639,6 +656,31 @@ function CancelJobButton({ job, onCancel }) {
       }}
     >
       {busy ? "Cancelling…" : "Cancel task"}
+    </Button>
+  );
+}
+
+// MoveToQueueButton is the one action for a running or stalled attempt
+// (MACH-66): it stops the attempt, saves the lane's uncommitted work and puts
+// the same job back in the queue as the next attempt. The confirm lives in
+// the handler, so every surface asks the same question.
+function MoveToQueueButton({ job, onMoveToQueue }) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <Button
+      variant="outline"
+      disabled={busy}
+      aria-label={`Move task ${jobDisplayTitle(job)} back to the queue`}
+      onClick={async () => {
+        setBusy(true);
+        try {
+          await onMoveToQueue(job);
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      {busy ? "Moving…" : "Move to queue"}
     </Button>
   );
 }
