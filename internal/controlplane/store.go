@@ -217,7 +217,7 @@ func OpenStore(path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) initialize(ctx context.Context) error {
-	const schemaVersion = 9
+	const schemaVersion = 10
 	var version int
 	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		return fmt.Errorf("read database schema version: %w", err)
@@ -340,7 +340,12 @@ END;`
 			return fmt.Errorf("upgrade database schema to version 9: %w", err)
 		}
 	}
-	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+jobMetadataSchema+"PRAGMA user_version=9;")
+	if version < 10 {
+		if _, err := s.db.ExecContext(ctx, planeSchema); err != nil {
+			return fmt.Errorf("upgrade database schema to version 10: %w", err)
+		}
+	}
+	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+jobMetadataSchema+planeSchema+"PRAGMA user_version=10;")
 	return err
 }
 

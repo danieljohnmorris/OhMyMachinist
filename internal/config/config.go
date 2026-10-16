@@ -89,6 +89,7 @@ type Config struct {
 	Triggers     TriggerDefinitions  `toml:"triggers"`
 	Alerts       Alerts              `toml:"alerts"`
 	Review       Review              `toml:"review"`
+	Plane        Plane               `toml:"plane"`
 	path         string
 }
 

@@ -5,13 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"regexp"
 	"slices"
 	"strings"
 
 	"github.com/owainlewis/machinist/internal/config"
-	"github.com/owainlewis/machinist/internal/controlplane"
 	"github.com/owainlewis/machinist/internal/managedworker"
 	"github.com/owainlewis/machinist/internal/runner"
 	"github.com/owainlewis/machinist/internal/updater"
@@ -72,6 +70,7 @@ func newRootCommand(options *commandOptions) *cobra.Command {
 	root.AddCommand(newUpdateCommand(options))
 	root.AddCommand(newReviewCommand(options))
 	root.AddCommand(newSkillsCommand(options))
+	root.AddCommand(newPlaneCommand(options))
 
 	worker := &cobra.Command{Use: "worker", Short: "Run or connect a Machinist Worker"}
 	worker.AddCommand(newRunCommand(options))
@@ -251,33 +250,7 @@ func newStartCommand(options *commandOptions) *cobra.Command {
 		Short: "Start the Machinist control plane",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			machinistConfig, err := config.LoadConfig(options.configPath)
-			if err != nil {
-				return err
-			}
-			serverConfig := machinistConfig.Server
-			if options.listen != "" {
-				serverConfig.Listen = options.listen
-			}
-			if err := config.ValidateListenAuth(serverConfig.Auth, serverConfig.Listen); err != nil {
-				return err
-			}
-			token, err := serverConfig.WorkerToken()
-			if err != nil {
-				return err
-			}
-			store, err := controlplane.OpenStore(serverConfig.Database)
-			if err != nil {
-				return err
-			}
-			defer store.Close()
-			server, err := controlplane.NewServer(store, machinistConfig.Path(), token, serverConfig.ConcurrentJobLimit(), serverConfig.Auth)
-			if err != nil {
-				return err
-			}
-			return server.Serve(command.Context(), serverConfig.Listen, func(address net.Addr) {
-				fmt.Fprintf(options.stderr, "machinist: control plane listening on http://%s\n", address)
-			})
+			return startControlPlane(command.Context(), options)
 		},
 	}
 	start.Flags().StringVar(&options.listen, "listen", "", "loopback listen address (default 127.0.0.1:7331)")

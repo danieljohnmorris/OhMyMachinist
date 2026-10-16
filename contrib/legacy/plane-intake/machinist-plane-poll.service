@@ -1,0 +1,15 @@
+[Unit]
+Description=Plane poll intake for Machinist (one pass; needs PLANE_API_KEY in secrets env)
+After=network-online.target machinist-control.service
+
+[Service]
+Type=oneshot
+User=machinist
+Group=machinist
+WorkingDirectory=/home/machinist
+Environment=HOME=/home/machinist
+Environment=PATH=/home/machinist/.local/share/mise/shims:/home/machinist/.local/bin:/usr/local/bin:/usr/bin
+NoNewPrivileges=yes
+PrivateTmp=yes
+EnvironmentFile=/home/machinist/.machinist/secrets/plane-intake.env
+ExecStart=/usr/bin/python3 /home/machinist/.local/bin/plane-intake.py poll
