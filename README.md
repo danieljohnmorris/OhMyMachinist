@@ -217,6 +217,28 @@ git remote add upstream https://github.com/owainlewis/machinist.git
 git fetch upstream && git merge upstream/main
 ```
 
+## Self-hosting the factory
+
+Everything the factory needs to run on a host lives in the repository under
+[`deploy/`](deploy/README.md): the factory scripts, the systemd units and
+drop-ins, a generic `config.toml`/`worker.toml` template and the `*.env.example`
+templates. Install or upgrade with one idempotent command:
+
+```sh
+sudo deploy/install.sh          # add --dry-run to preview
+```
+
+The installer copies the scripts to `/usr/local/lib/machinist-factory/`, the
+units to `/etc/systemd/system/`, runs `daemon-reload`, restarts only changed
+services, records the deployed git SHA, and refuses to install from a tree with
+gitleaks findings. Instance values live in `/etc/machinist/config.local.toml` /
+`worker.local.toml`, merged on top of the tracked config (base first, overlay
+wins); secrets come only from `/etc/machinist/*.env` systemd `EnvironmentFile`s
+outside git. A periodic drift check diffs the installed files against the repo at
+the deployed SHA and alerts on any hand-edited file. See
+[`deploy/README.md`](deploy/README.md) for the merge order, units and the drift
+check.
+
 ## Core docs
 
 Commands, executors, workflows, workers and deployment are documented upstream and in [`docs/`](docs/README.md):
@@ -229,6 +251,7 @@ Commands, executors, workflows, workers and deployment are documented upstream a
 | [MCP server](docs/mcp.md) | MCP tools over streamable HTTP at `/mcp` |
 | [Workflows](docs/workflows.md) | Multi-step workflows and approvals |
 | [VM deployment](docs/vm-deployment.md) | Running the control plane and worker as services |
+| [Self-hosting the factory](deploy/README.md) | Installer, units, config overlay, drift check |
 | [Factory review](deploy/factory/README.md) | The built-in PR review |
 
 ## Licence

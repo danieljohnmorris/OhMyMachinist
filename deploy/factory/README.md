@@ -1,6 +1,31 @@
 # Factory scripts
 
-Trusted post-agent tooling that runs outside the Codex sandbox on pipsqueek.
+Trusted post-agent tooling that runs outside the coding-agent sandbox.
+
+Install or upgrade every script here (and the systemd units, config and env
+templates) with the idempotent installer from the repository root:
+
+    sudo deploy/install.sh          # add --dry-run to preview
+
+It copies these scripts to `/usr/local/lib/machinist-factory/`, refuses to
+install from a tree with gitleaks findings, and records the deployed git SHA.
+The install snippets below are only for a one-off manual copy.
+
+## Scripts
+
+- `deliver-pr.py` — branch + commit + push + `gh pr create` delivery.
+- `post_pr_review.py` — the built-in PR review (checks, reviewers, docs pass,
+  secret scan, `machinist/review` commit status).
+- `omp-glm`, `omp-glm-pr`, `codex` — coding-executor wrappers: run the agent in
+  the sandbox, then deliver the PR outside it.
+- `fail.py` — failure hook and Plane notifier (`hook`, `notify`, `sweep`,
+  `dry-run`) called by the wrapper and by the fail-notify/fail-sweep units.
+- `lane-clean.sh` — dirty-lane guard run as `ExecStartPre` on the worker units.
+- `restart-when-idle.sh` — restart a worker unit only when its lane is idle.
+- `install-review-skills.sh` — install the review skills and pinned TruffleHog.
+
+Instance values (allowed owners, git identity, omp model, Plane host) come from
+the environment / `/etc/machinist/*.env`, never from these scripts.
 
 ## deliver-pr.py
 
@@ -11,24 +36,15 @@ env files (`.env.example`, `.env.sample`, `.env.template`, `.env.dist`,
 staged added lines of those templates are still scanned for real-looking
 secrets (see `tests/test_deliver_pr.py`).
 
-Install (MACH-31: the review must be installed next to `deliver-pr.py` so it
-runs as a plain script, with the skills available to the machinist user):
-
-    sudo install -m755 deploy/factory/deliver-pr.py deploy/factory/post_pr_review.py /usr/local/lib/machinist-factory/
-    sudo cp -R deploy/factory/review /usr/local/lib/machinist-factory/review
-    sudo -u machinist deploy/factory/install-review-skills.sh
-    sudo install -m755 deploy/factory/omp-glm deploy/factory/omp-glm-pr /usr/local/lib/machinist-factory/
-
-`install-review-skills.sh` also installs the pinned, checksum-verified TruffleHog
-binary the review uses for its secret scan (`MACHINIST_TOOL_DIR` overrides the
-destination; default `/usr/local/bin` when writable, else `~/.local/bin`). If
-`trufflehog` is already on `PATH` the installer leaves it alone.
-
 ## omp executors (omp-glm, omp-glm-pr)
 
 `omp-glm` is the sandboxed omp executor (`omp-glm <low|medium>`, prompt on
 stdin) and `omp-glm-pr` wraps it with `deliver-pr.py` for coding jobs. Both are
-trusted, root-owned and installed next to `deliver-pr.py`.
+trusted, root-owned and installed next to `deliver-pr.py`. `install-review-skills.sh`
+also installs the pinned, checksum-verified TruffleHog binary the review uses for
+its secret scan (`MACHINIST_TOOL_DIR` overrides the destination; default
+`/usr/local/bin` when writable, else `~/.local/bin`). If `trufflehog` is already
+on `PATH` the installer leaves it alone.
 
 MACH-42: `omp-glm` runs omp in `--mode text` or `--mode json` from
 `MACHINIST_OMP_MODE` (default `text`). `omp-glm-pr` sets `MACHINIST_OMP_MODE=json`

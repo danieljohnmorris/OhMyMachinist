@@ -498,3 +498,106 @@ func TestLoadConfigRejectsRemovedShepherdSchedules(t *testing.T) {
 		t.Fatalf("error = %v, want removed shepherd schedule guidance", err)
 	}
 }
+
+func TestLoadConfigMergesLocalOverlay(t *testing.T) {
+	directory := t.TempDir()
+	writeTestFile(t, filepath.Join(directory, "token"), "secret")
+	path := filepath.Join(directory, "config.toml")
+	writeTestFile(t, path, `[server]
+worker_token_file = "token"
+
+[commands.plan]
+executor = "base"
+`)
+	writeTestFile(t, filepath.Join(directory, "config.local.toml"), `[server]
+listen = "127.0.0.1:9999"
+
+[commands.plan]
+executor = "overlay"
+
+[commands.extra]
+executor = "extra"
+`)
+	machinistConfig, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if machinistConfig.Server.Listen != "127.0.0.1:9999" {
+		t.Fatalf("listen = %q, want overlay value", machinistConfig.Server.Listen)
+	}
+	if machinistConfig.Commands["plan"].Executor != "overlay" {
+		t.Fatalf("plan executor = %q, want overlay to win", machinistConfig.Commands["plan"].Executor)
+	}
+	if machinistConfig.Commands["extra"].Executor != "extra" {
+		t.Fatalf("extra command = %#v, want overlay to add it", machinistConfig.Commands["extra"])
+	}
+	if machinistConfig.Path() != path {
+		t.Fatalf("path = %q, want base config path %q", machinistConfig.Path(), path)
+	}
+}
+
+func TestLoadConfigOverlayEnvSelectsAlternateFile(t *testing.T) {
+	directory := t.TempDir()
+	writeTestFile(t, filepath.Join(directory, "token"), "secret")
+	path := filepath.Join(directory, "config.toml")
+	writeTestFile(t, path, "[server]\nworker_token_file = \"token\"\n")
+	overlay := filepath.Join(directory, "instance.toml")
+	writeTestFile(t, overlay, "[server]\nlisten = \"127.0.0.1:8123\"\n")
+	t.Setenv("MACHINIST_CONFIG_OVERLAY", overlay)
+
+	machinistConfig, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if machinistConfig.Server.Listen != "127.0.0.1:8123" {
+		t.Fatalf("listen = %q, want env-selected overlay", machinistConfig.Server.Listen)
+	}
+}
+
+func TestLoadConfigMissingExplicitOverlayFails(t *testing.T) {
+	directory := t.TempDir()
+	writeTestFile(t, filepath.Join(directory, "token"), "secret")
+	path := filepath.Join(directory, "config.toml")
+	writeTestFile(t, path, "[server]\nworker_token_file = \"token\"\n")
+	t.Setenv("MACHINIST_CONFIG_OVERLAY", filepath.Join(directory, "absent.toml"))
+
+	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("error = %v, want missing overlay failure", err)
+	}
+}
+
+func TestLoadConfigOverlayRejectsUnknownField(t *testing.T) {
+	directory := t.TempDir()
+	writeTestFile(t, filepath.Join(directory, "token"), "secret")
+	path := filepath.Join(directory, "config.toml")
+	writeTestFile(t, path, "[server]\nworker_token_file = \"token\"\n")
+	writeTestFile(t, filepath.Join(directory, "config.local.toml"), "[nonsense]\nvalue = 1\n")
+
+	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "strict mode") {
+		t.Fatalf("error = %v, want unknown overlay field failure", err)
+	}
+}
+
+func TestLoadWorkerMergesLocalOverlay(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "worker.toml")
+	writeTestFile(t, path, `name = "lane"
+data_directory = "state"
+
+[executors.omp]
+command = ["omp", "-"]
+`)
+	writeTestFile(t, filepath.Join(directory, "worker.local.toml"), `[repositories.my-project]
+path = "repo"
+`)
+	worker, err := LoadWorker(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := worker.Repositories["my-project"]; !ok {
+		t.Fatalf("repositories = %#v, want overlay to add my-project", worker.Repositories)
+	}
+	if worker.Name != "lane" || worker.DataDirectory != filepath.Join(directory, "state") {
+		t.Fatalf("worker = %#v, want base values preserved", worker)
+	}
+}

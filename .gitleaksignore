@@ -1,4 +1,7 @@
 # Gitleaks allowlist: pre-existing test fixtures with obviously fake values.
-# Fingerprint format: <file>:<rule>:<line>.
+# Fingerprint format: <file>:<rule>:<line>, relative to the scan source. CI runs
+# a working-tree scan from the repo root and a deploy-only scan (whose paths are
+# relative to deploy/), so both forms of the same fixture are listed.
 deploy/factory/tests/test_deliver_pr.py:generic-api-key:74
+factory/tests/test_deliver_pr.py:generic-api-key:74
 internal/runner/runner_test.go:generic-api-key:224
