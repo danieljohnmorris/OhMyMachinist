@@ -134,7 +134,7 @@ Shipped profiles live in [`profiles/review/`](profiles/review/) (`default`, and 
 - `machinist skills install <github url | directory | zip>` — resolve a GitHub `blob`/`raw`/`tree` URL (optional `@ref`) to a commit SHA and fetch the whole skill directory, or install a local directory or zip. SKILL.md frontmatter must set `name` and `description`, and every new version is scanned with `gitleaks` before it becomes active (a missing `gitleaks` warns and records `scanned: false`).
 - `machinist skills update <name> [--activate]` — re-resolve the recorded source and add a new version, keeping the old ones; the active version only moves with `--activate`.
 - `machinist skills pin <name> <version>` — set the active version (rollback included).
-- `machinist skills uninstall <name> [--force]` — remove a skill; refused while a review profile still references it unless `--force`.
+- `machinist skills uninstall <name> [--force]` — remove a skill; refused while a shipped review profile still references it unless `--force`. Profiles that live in a repository or come from Settings are not consulted, so they can still point at a removed skill.
 - `machinist skills list` — installed skills and their active version.
 
 `machinist review install-skill <url>` is an alias for `skills install`. Private GitHub repositories read a token from `GITHUB_TOKEN`; it is never written to the manifest, the source URL, or logs.
