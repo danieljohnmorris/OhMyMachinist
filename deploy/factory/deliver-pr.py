@@ -177,6 +177,60 @@ def review_status(out_dir):
     except (OSError, ValueError, AttributeError):
         return None
 
+def _commit_or_stash_review_edits(repo, branch, run_id):
+    """A review that stopped (budget exhausted, timeout, crash) may leave its
+    last fix edits uncommitted in the lane. Commit and push them; if that is
+    not possible (secret-like files, no remote), stash them under a labelled
+    stash and write a patch into the run artifacts, MACH-61."""
+    g = lambda *c, **k: run("git", *NOHOOKS, *c, cwd=repo, **k)
+    if not g("status", "--porcelain", check=False):
+        return
+    label = f"machinist-review-budget-{run_id or 'manual'}"
+    before = g("rev-parse", "HEAD", check=False).strip()
+    try:
+        run("git", *NOHOOKS, "add", "-A", cwd=repo)
+        files = [f for f in g("diff", "--cached", "--name-only").splitlines() if f]
+        bad = secret_like(files)
+        if bad:
+            raise RuntimeError(f"secret-like files {bad}")
+        run("git", *NOHOOKS, "-c", "user.name=Machinist Factory",
+            "-c", "user.email=danieljohnmorris@users.noreply.github.com",
+            "commit", "--no-verify", "-q", "-m", f"Review fixes ({label})", cwd=repo)
+        run("git", *NOHOOKS, "push", "--no-verify", "origin", f"HEAD:refs/heads/{branch}", cwd=repo)
+        log(f"review lane: committed and pushed leftover review fixes ({label})")
+        return
+    except RuntimeError as error:
+        # Undo the local commit if one landed so the edits can be stashed whole.
+        if before:
+            run("git", *NOHOOKS, "reset", "--soft", before, cwd=repo, check=False)
+        else:
+            run("git", *NOHOOKS, "reset", "-q", cwd=repo, check=False)
+        log(f"review lane: could not commit+push leftover edits ({error}); stashing")
+    g("stash", "push", "-u", "-m", label, check=False)
+    out = os.environ.get("MACHINIST_OUTPUT_DIR")
+    if out:
+        patch = os.path.join(out, f"{label}.patch")
+        try:
+            text = g("stash", "show", "-p", "--include-untracked", "stash@{0}", check=False)
+            os.makedirs(out, exist_ok=True)
+            with open(patch, "w") as handle:
+                handle.write(text)
+            log(f"review lane: stashed leftover review fixes ({label}); patch at {patch}")
+        except OSError as io_error:
+            log(f"review lane: could not write patch {patch}: {io_error}")
+    else:
+        log(f"review lane: stashed leftover review fixes ({label})")
+
+def finalize_after_review(repo, branch, pr, run_id):
+    """Whatever verdict the review returned, delivery must still finish: leave
+    the lane clean (commit+push or stash any leftover edits) and the PR open
+    (reopen if it went missing), MACH-61."""
+    _commit_or_stash_review_edits(repo, branch, run_id)
+    if pr:
+        state = run("gh", "pr", "view", pr, "--json", "state", "--jq", ".state", check=False)
+        if state.strip().upper() != "OPEN":
+            run("gh", "pr", "reopen", pr, check=False)
+
 def run(*cmd, check=True, cwd=None):
     r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
     if check and r.returncode != 0:
@@ -353,6 +407,7 @@ def main():
         result["pr"] = pr
         result["review_pr"] = pr
         review_rc = run_review(repo, pr)
+        finalize_after_review(repo, branch, pr, run_id)
         if review_rc not in (None, 0):
             log("review did not pass; upstream PR not opened")
             return finish(review_rc)
@@ -367,6 +422,7 @@ def main():
         pr = open_pr(full, base, branch, "Not merged. Review before merging.")
         result["pr"] = pr
         review_rc = run_review(repo, pr)
+        finalize_after_review(repo, branch, pr, run_id)
         if review_rc not in (None, 0):
             return finish(review_rc)
     log(f"PR: {pr}")

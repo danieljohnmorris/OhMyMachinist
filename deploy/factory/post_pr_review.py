@@ -57,6 +57,12 @@ except ModuleNotFoundError:
 EXIT_CODES = {"PASS": 0, "BLOCKED": 2, "INCOMPLETE": 0}
 STATUS_STATES = {"PASS": "success", "BLOCKED": "failure", "INCOMPLETE": "error"}
 
+# MACH-61: the review gets its own budget (rounds + wall-clock minutes) so it
+# cannot consume the whole job timeout. When the budget runs out the verdict is
+# INCOMPLETE ("review budget exhausted"), never PASS and never a job failure.
+DEFAULT_DELIVERY_RESERVE_SECONDS = 300.0
+BUDGET_EXHAUSTED = "review budget exhausted"
+
 
 class ReviewError(Exception):
     pass
@@ -72,6 +78,7 @@ class ReviewOptions:
     json_out: str | None
     timeout: int
     amend_rounds: int | None = None
+    max_minutes: float | None = None
     profile_file: str | None = None
     authorized: set[str] = field(default_factory=set)
 
@@ -93,6 +100,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--amend-rounds",
         type=int,
         help="Retry budget override for amend rounds; default profile blocking.amend_rounds or MACHINIST_REVIEW_AMEND_ROUNDS",
+    )
+    parser.add_argument(
+        "--max-minutes",
+        type=float,
+        help="Wall-clock budget override (minutes) for the whole review stage; default profile blocking.max_minutes or MACHINIST_REVIEW_MAX_MINUTES (MACH-61)",
     )
     parser.add_argument(
         "--profile-file",
@@ -760,6 +772,123 @@ def final_status(blocking: bool, incomplete: bool) -> str:
     return "INCOMPLETE" if incomplete else "PASS"
 
 
+def job_seconds_left(environ: dict[str, str] | None = None, *, now: float | None = None) -> float | None:
+    """Seconds until the enclosing job's timeout, from the runner-provided
+    ``MACHINIST_JOB_TIMEOUT_SECONDS`` / ``MACHINIST_JOB_STARTED_EPOCH``
+    (MACH-61). ``None`` when the job timeout is not exposed (tests, direct
+    runs): the review then only applies its own rounds/minutes budget."""
+    env = os.environ if environ is None else environ
+    raw = env.get("MACHINIST_JOB_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return None
+    try:
+        total = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if total <= 0:
+        return None
+    started_raw = env.get("MACHINIST_JOB_STARTED_EPOCH", "").strip()
+    started: float | None = None
+    if started_raw:
+        try:
+            started = float(started_raw)
+        except (TypeError, ValueError):
+            started = None
+    current = time.time() if now is None else now
+    elapsed = max(0.0, current - started) if started is not None else 0.0
+    return max(0.0, total - elapsed)
+
+
+def delivery_reserve_seconds(environ: dict[str, str] | None = None) -> float:
+    """Time reserved after the review for delivery (commit, push, PR update,
+    branch switch). ``MACHINIST_REVIEW_DELIVERY_RESERVE_SECONDS`` overrides the
+    default of 5 minutes (MACH-61)."""
+    env = os.environ if environ is None else environ
+    raw = env.get("MACHINIST_REVIEW_DELIVERY_RESERVE_SECONDS", "").strip()
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except (TypeError, ValueError):
+            pass
+    return DEFAULT_DELIVERY_RESERVE_SECONDS
+
+
+class ReviewBudget:
+    """The review stage's own budget (MACH-61): a maximum number of review/fix
+    rounds, a maximum wall-clock time in minutes, and — when the enclosing job
+    timeout is known — a guard that keeps the budget inside the job's remaining
+    time, reserving time for delivery afterwards.
+
+    ``can_start`` is the only gate; it must be checked before every round and
+    every fix pass. It records ``exhausted_reason`` the first time a pass is
+    denied so the caller can report an INCOMPLETE verdict with the reason."""
+
+    def __init__(
+        self,
+        rounds: int,
+        minutes: float,
+        *,
+        round_seconds: float,
+        reserve_seconds: float,
+        job_seconds: float | None = None,
+        clock: Any = time.monotonic,
+    ) -> None:
+        self.rounds = max(0, int(rounds))
+        self.remaining = self.rounds
+        self.round_seconds = max(0.0, float(round_seconds))
+        self.reserve_seconds = max(0.0, float(reserve_seconds))
+        self.job_seconds = job_seconds
+        configured_minutes = max(0.0, float(minutes))
+        if job_seconds is not None:
+            # MACH-61: the review budget must fit inside the job timeout, so it
+            # cannot spend more than the job has left after the delivery reserve.
+            configured_minutes = min(configured_minutes, max(0.0, float(job_seconds) - self.reserve_seconds) / 60.0)
+        self.minutes = configured_minutes
+        self.clock = clock
+        self.started = clock()
+        self.exhausted_reason: str | None = None
+
+    @property
+    def used(self) -> int:
+        return self.rounds - self.remaining
+
+    def elapsed_minutes(self) -> float:
+        return max(0.0, (self.clock() - self.started) / 60.0)
+
+    def job_seconds_left(self) -> float | None:
+        if self.job_seconds is None:
+            return None
+        return max(0.0, self.job_seconds - (self.clock() - self.started))
+
+    def can_start(self) -> bool:
+        if self.exhausted_reason is not None:
+            return False
+        if self.remaining <= 0:
+            self.exhausted_reason = f"{BUDGET_EXHAUSTED} (rounds)"
+            return False
+        left = self.job_seconds_left()
+        if left is not None and left < self.reserve_seconds + self.round_seconds:
+            self.exhausted_reason = f"{BUDGET_EXHAUSTED} (job time)"
+            return False
+        if self.elapsed_minutes() >= self.minutes:
+            self.exhausted_reason = f"{BUDGET_EXHAUSTED} (minutes)"
+            return False
+        return True
+
+    def take(self) -> None:
+        self.remaining = max(0, self.remaining - 1)
+
+    def summary(self) -> dict[str, Any]:
+        left = self.job_seconds_left()
+        return {
+            "rounds": {"used": self.used, "limit": self.rounds},
+            "minutes": {"used": round(self.elapsed_minutes(), 3), "limit": self.minutes},
+            "reserve_seconds": self.reserve_seconds,
+            "job_seconds_left": None if left is None else round(left, 3),
+            "exhausted": self.exhausted_reason,
+        }
+
+
 def write_json(path: str, summary: dict[str, Any]) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -868,6 +997,15 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
             "source": resolved.source,
             "skills": profile_mod.skill_versions(resolved.body),
         }
+        # MACH-61: start the review's own budget clock before the checks run so
+        # the whole review stage (checks, reviewers, fixes, docs) is bounded.
+        budget = ReviewBudget(
+            profile_mod.amend_rounds_budget(resolved, options.amend_rounds),
+            profile_mod.review_minutes_budget(resolved, options.max_minutes),
+            round_seconds=options.timeout,
+            reserve_seconds=delivery_reserve_seconds(),
+            job_seconds=job_seconds_left(),
+        )
         try:
             loaded = skill_library.loaded_skills()
         except skill_library.RequiredSkillError as error:
@@ -964,8 +1102,6 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
         remaining_new = outstanding_failures(checks)
 
         executor_args = executor_command(options.executor_cmd)
-        budget = profile_mod.amend_rounds_budget(resolved, options.amend_rounds)
-        budget_limit = budget
         amend_allowed = (resolved.body.get("scope") or {}).get("mode", "amend") == "amend"
         extra_instructions = str(resolved.body.get("extra_instructions", "") or resolved.extra_instructions)
         concurrency = int(resolved.body.get("concurrency", 3) or 3)
@@ -989,9 +1125,9 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
                 {"name": str(reviewer.get("name", "reviewer")), "skills": reviewer.get("skills") or [], "ran": False, "skipped": False, "findings": [], "error": "reviewers not run: no executor"}
                 for reviewer in selected
             ]
-        elif remaining_new and amend_allowed and budget > 0:
-            # First amend round: fix new check failures before reviewers run.
-            budget -= 1
+        elif remaining_new and amend_allowed and budget.can_start():
+            # First fix pass: fix new check failures before reviewers run.
+            budget.take()
             rerun_new_failures(
                 options.repo,
                 checks,
@@ -1012,10 +1148,10 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
             # Blocking findings send the job back to amend on the same branch.
             # Each send-back consumes one retry-budget round; the checks and
             # reviewers rerun until a pass comes back clean or the budget is
-            # spent, at which point the review is BLOCKED.
+            # spent, at which point the review is INCOMPLETE (MACH-61).
             findings = profile_mod.blocking_findings(merged_findings())
-            while findings and amend_allowed and budget > 0:
-                budget -= 1
+            while findings and amend_allowed and budget.can_start():
+                budget.take()
                 run_executor(
                     executor_args,
                     prompt=amend_prompt(remaining_new, findings),
@@ -1036,8 +1172,8 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
                     blocking_mode,
                 )
                 remaining_new = outstanding_failures(checks)
-                if remaining_new and amend_allowed and budget > 0:
-                    budget -= 1
+                if remaining_new and amend_allowed and budget.can_start():
+                    budget.take()
                     rerun_new_failures(
                         options.repo,
                         checks,
@@ -1066,7 +1202,12 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
                 findings = profile_mod.blocking_findings(merged_findings())
 
         docs_config = resolved.body.get("docs") or {}
-        if executor_args is not None and not remaining_new and docs_config.get("enabled", True):
+        if (
+            executor_args is not None
+            and not remaining_new
+            and budget.exhausted_reason is None
+            and docs_config.get("enabled", True)
+        ):
             docs, docs_changed = run_docs(
                 options.repo,
                 owner,
@@ -1096,7 +1237,14 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
             incomplete = True
         if secret_scan.get("error"):
             incomplete = True
-        status = final_status(blocking, incomplete)
+        notes.append(
+            f"review budget: {budget.used}/{budget.rounds} rounds, "
+            f"{budget.elapsed_minutes():.1f}/{budget.minutes:g} minutes used"
+        )
+        if budget.exhausted_reason:
+            incomplete = True
+            notes.append(budget.exhausted_reason)
+        status = "INCOMPLETE" if budget.exhausted_reason else final_status(blocking, incomplete)
         summary.update(
             {
                 "status": status,
@@ -1116,7 +1264,8 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
                 "findings": redact_value(merged),
                 "secret_scan": redact_value(secret_scan),
                 "docs": redact_value({key: value for key, value in docs.items() if key != "raw"}),
-                "amend_rounds": {"used": budget_limit - budget, "limit": budget_limit},
+                "amend_rounds": {"used": budget.used, "limit": budget.rounds},
+                "budget": budget.summary(),
                 "notes": notes,
             }
         )
@@ -1126,10 +1275,17 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
             options, owner, name, number_text, head_sha, resolved, status, comment
         )
         if status == "INCOMPLETE":
+            reason = f": {budget.exhausted_reason}" if budget.exhausted_reason else ""
             print(
-                "post-pr review warning: review incomplete; exiting 0 so the delivery job does not fail",
+                f"post-pr review warning: review incomplete{reason}; exiting 0 so the delivery job does not fail",
                 file=sys.stderr,
             )
+        print(
+            f"post-pr review budget: {budget.used}/{budget.rounds} rounds, "
+            f"{budget.elapsed_minutes():.1f}/{budget.minutes:g} minutes"
+            + (f" ({budget.exhausted_reason})" if budget.exhausted_reason else ""),
+            file=sys.stderr,
+        )
         return EXIT_CODES[status], summary
     finally:
         # MACH-59: never leave the lane dirty before switching back. The docs
@@ -1160,6 +1316,7 @@ def main(argv: list[str] | None = None) -> int:
             json_out=args.json_out,
             timeout=timeout,
             amend_rounds=args.amend_rounds,
+            max_minutes=args.max_minutes,
             profile_file=args.profile_file,
             authorized={item.strip() for item in (args.authorized or "").split(",") if item.strip()},
         )

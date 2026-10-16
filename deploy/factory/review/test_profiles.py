@@ -551,6 +551,37 @@ class AmendBudgetTests(unittest.TestCase):
         self.assertEqual(profile_mod.amend_rounds_budget(self._profile(5), 2, {"MACHINIST_REVIEW_AMEND_ROUNDS": "1"}), 2)
 
 
+class ReviewMinutesBudgetTests(unittest.TestCase):
+    """MACH-61: the review's wall-clock budget in minutes."""
+
+    def _profile(self, minutes=None):
+        body = profile_mod.parse_profile(VALID, "test")
+        if minutes is not None:
+            body["blocking"] = {"max_minutes": minutes}
+        return profile_mod.ResolvedProfile(body=body, raw=VALID, source="test")
+
+    def test_profile_value_used_by_default(self):
+        self.assertEqual(profile_mod.review_minutes_budget(self._profile(5), None, {}), 5.0)
+
+    def test_default_is_thirty_minutes(self):
+        self.assertEqual(profile_mod.review_minutes_budget(self._profile(), None, {}), 30.0)
+
+    def test_env_overrides_profile(self):
+        self.assertEqual(profile_mod.review_minutes_budget(self._profile(5), None, {"MACHINIST_REVIEW_MAX_MINUTES": "1"}), 1.0)
+
+    def test_cli_overrides_env(self):
+        self.assertEqual(profile_mod.review_minutes_budget(self._profile(5), 2, {"MACHINIST_REVIEW_MAX_MINUTES": "1"}), 2.0)
+
+    def test_invalid_max_minutes_is_rejected(self):
+        for bad in ("-1", "soon"):
+            with self.assertRaises(profile_mod.ProfileError):
+                profile_mod.parse_profile(f"name: t\nversion: 1\nblocking:\n  max_minutes: {bad}\n", "test")
+
+    def test_valid_max_minutes_parses(self):
+        body = profile_mod.parse_profile("name: t\nversion: 1\nblocking:\n  max_minutes: 12.5\n", "test")
+        self.assertEqual(body["blocking"]["max_minutes"], 12.5)
+
+
 class ReviewFixRegressionTests(unittest.TestCase):
     def parse(self, text: str):
         return profile_mod.parse_profile(text, "test")

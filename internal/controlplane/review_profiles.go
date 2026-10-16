@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -586,9 +587,12 @@ func validateProfileNode(root *yaml.Node) []ProfileIssue {
 		if blocking.Kind != yaml.MappingNode {
 			issues = append(issues, ProfileIssue{Line: nodeLine(blocking), Message: "blocking must be a mapping"})
 		} else {
-			validateMappingKeys(blocking, map[string]bool{"severities": true, "amend_rounds": true}, "blocking")
+			validateMappingKeys(blocking, map[string]bool{"severities": true, "amend_rounds": true, "max_minutes": true}, "blocking")
 			if rounds := mappingValue(blocking, "amend_rounds"); rounds != nil && (rounds.Kind != yaml.ScalarNode || !isNonNegativeInt(rounds.Value)) {
 				issues = append(issues, ProfileIssue{Line: nodeLine(rounds), Message: "blocking.amend_rounds must be a non-negative integer"})
+			}
+			if minutes := mappingValue(blocking, "max_minutes"); minutes != nil && (minutes.Kind != yaml.ScalarNode || !isNonNegativeNumber(minutes.Value)) {
+				issues = append(issues, ProfileIssue{Line: nodeLine(minutes), Message: "blocking.max_minutes must be a non-negative number"})
 			}
 		}
 	}
@@ -601,6 +605,11 @@ func validateProfileNode(root *yaml.Node) []ProfileIssue {
 var integerPattern = regexp.MustCompile(`^\d+$`)
 
 func isNonNegativeInt(value string) bool { return integerPattern.MatchString(value) }
+
+func isNonNegativeNumber(value string) bool {
+	parsed, err := strconv.ParseFloat(value, 64)
+	return err == nil && parsed >= 0
+}
 
 func isPositiveInt(value string) bool {
 	return integerPattern.MatchString(value) && value != "0" && (len(value) == 1 || value[0] != '0')
