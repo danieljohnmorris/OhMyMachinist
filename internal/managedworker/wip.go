@@ -24,7 +24,13 @@ func saveLaneWIP(workerConfig config.Worker, repository string) (string, error) 
 	}
 	status := exec.Command("git", "-C", lane, "status", "--porcelain")
 	output, statusErr := status.Output()
-	if statusErr != nil || len(strings.TrimSpace(string(output))) == 0 {
+	if statusErr != nil {
+		if exitErr, ok := statusErr.(*exec.ExitError); ok && len(exitErr.Stderr) > 0 {
+			return "", fmt.Errorf("git status: %s: %w", strings.TrimSpace(string(exitErr.Stderr)), statusErr)
+		}
+		return "", fmt.Errorf("git status: %w", statusErr)
+	}
+	if len(strings.TrimSpace(string(output))) == 0 {
 		return "", nil
 	}
 	label := "machinist-lane-wip-" + time.Now().UTC().Format("20060102-150405")

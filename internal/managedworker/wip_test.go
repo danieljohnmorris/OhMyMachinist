@@ -107,3 +107,12 @@ func TestSaveLaneWIPWithoutDataDirectoryStillStashes(t *testing.T) {
 		t.Fatalf("saved record = %q", saved)
 	}
 }
+
+// A lane git cannot inspect is a failure, not a clean checkout: the error
+// must reach the caller so the dirty lane is reported, never swallowed.
+func TestSaveLaneWIPReportsGitStatusFailure(t *testing.T) {
+	workerConfig := config.Worker{Repositories: map[string]config.Repository{"machinist": {Path: filepath.Join(t.TempDir(), "not-a-repo")}}}
+	if saved, err := saveLaneWIP(workerConfig, "machinist"); err == nil {
+		t.Fatalf("git status failure = %q, want error", saved)
+	}
+}

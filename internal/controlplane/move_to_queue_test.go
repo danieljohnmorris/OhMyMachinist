@@ -312,6 +312,60 @@ func TestMoveToQueueRefusesNonRunningAndWorkflowJobs(t *testing.T) {
 	if _, err := store.MoveToQueue(t.Context(), workflowID); !errors.Is(err, ErrMoveNotAvailable) {
 		t.Fatalf("workflow job = %v, want ErrMoveNotAvailable", err)
 	}
+
+	// A failed job whose ticket has a newer submission carries a chain link
+	// (superseded_by), not a completed move: still refused. Its own lane
+	// keeps the claim below deterministic.
+	failedID, err := store.CreateJobWithOptions(t.Context(), "first pass", "solo", "build", testAgent("build", "{{machinist.prompt}}"), CreateJobOptions{Title: "MACH-65 failed pass"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failedRun, err := store.Poll(t.Context(), pollRequest("worker-solo", []string{"codex"}, []string{"solo"}))
+	if err != nil || failedRun == nil {
+		t.Fatalf("poll = %#v, %v", failedRun, err)
+	}
+	if err := store.Complete(t.Context(), failedRun.ID, protocol.Completion{InstanceID: "worker-solo", LeaseToken: failedRun.LeaseToken, State: "failed", ExitCode: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateJobWithOptions(t.Context(), "retry pass", "solo", "build", testAgent("build", "{{machinist.prompt}}"), CreateJobOptions{Title: "MACH-65 failed pass again"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.linkTicketAttempts(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	failed, err := store.GetJob(t.Context(), failedID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.State != "failed" || failed.SupersededBy == "" {
+		t.Fatalf("failed job = %#v", failed)
+	}
+	if _, err := store.MoveToQueue(t.Context(), failedID); !errors.Is(err, ErrMoveNotAvailable) {
+		t.Fatalf("failed job with chain link = %v, want ErrMoveNotAvailable", err)
+	}
+
+	// The same refusal covers a queued job with a chain link.
+	var chainQueuedID string
+	chainQueuedID, err = store.CreateJobWithOptions(t.Context(), "queued pass", "solo", "build", testAgent("build", "{{machinist.prompt}}"), CreateJobOptions{Title: "MACH-65 queued pass"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateJobWithOptions(t.Context(), "queued pass again", "solo", "build", testAgent("build", "{{machinist.prompt}}"), CreateJobOptions{Title: "MACH-65 queued pass again"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.linkTicketAttempts(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	queuedLinked, err := store.GetJob(t.Context(), chainQueuedID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queuedLinked.State != "queued" || queuedLinked.SupersededBy == "" {
+		t.Fatalf("queued job = %#v", queuedLinked)
+	}
+	if _, err := store.MoveToQueue(t.Context(), chainQueuedID); !errors.Is(err, ErrMoveNotAvailable) {
+		t.Fatalf("queued job with chain link = %v, want ErrMoveNotAvailable", err)
+	}
 }
 
 func TestMoveToQueueHTTPRequiresWriteToken(t *testing.T) {

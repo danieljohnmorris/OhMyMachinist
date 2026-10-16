@@ -45,11 +45,23 @@ func (s *Store) MoveToQueue(ctx context.Context, jobID string) (string, error) {
 	}
 	// Idempotency: a move already happened for this job, whether through this
 	// action or a later submission for the same card. Return that attempt.
-	// A running job's superseded_by is only the next job in its ticket chain
-	// (attempt_links), not a completed move: the run still has to be
-	// cancelled and requeued below, and the workflow refusal must apply.
+	// superseded_by alone is not proof of a move: the attempt linkers
+	// (linkTicketAttempts, linkPriorAttempt) record chain links on jobs in
+	// every state, so a failed, interrupted, or queued job with a newer
+	// same-ticket submission carries a successor but has no completed move
+	// and must still be refused below. A completed move is the only thing
+	// that writes moveReason on the job's run. A running job's superseded_by
+	// is likewise only the next job in its ticket chain (attempt_links), not
+	// a completed move: the run still has to be cancelled and requeued
+	// below, and the workflow refusal must apply.
 	if state != "running" && supersededBy != "" {
-		return supersededBy, nil
+		var moved bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM runs WHERE job_id=? AND state='cancelled' AND error=?)`, jobID, moveReason).Scan(&moved); err != nil {
+			return "", err
+		}
+		if moved {
+			return supersededBy, nil
+		}
 	}
 	var workflow bool
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM workflow_jobs WHERE job_id=?)`, jobID).Scan(&workflow); err != nil {
