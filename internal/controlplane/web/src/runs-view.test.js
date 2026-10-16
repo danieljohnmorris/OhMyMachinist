@@ -98,10 +98,18 @@ test("runs default to board view and share filters when switching views", async 
   assert.match(document.body.textContent, /Failed fixture/);
   assert.doesNotMatch(document.body.textContent, /Succeeded fixture/);
 
-  // Ticking it shows succeeded and resolved tickets and updates the URL.
-  showSucceeded.click();
+  // The Finished column counts the cards the filter hides instead of a bare zero.
+  const finishedBadge = document.querySelector('[aria-label="1 visible finished runs, 2 hidden"]');
+  assert.ok(finishedBadge, "finished column badge counts hidden cards");
+  assert.match(finishedBadge.textContent, /1 · 2 hidden/);
+  const showHidden = [...document.querySelectorAll("button")].find((element) => element.textContent === "Show");
+  assert.ok(showHidden, "hidden line offers a Show button");
+
+  // "Show" turns the tickbox on and the URL param stays in sync.
+  showHidden.click();
   await eventually(() => assert.match(document.body.textContent, /Succeeded fixture/));
   assert.equal(window.location.hash, "#/runs?succeeded=1");
+  assert.equal(document.querySelector('input[type="checkbox"]').checked, true);
 
   button("List").click();
   await eventually(() => assert.equal(button("List").getAttribute("aria-pressed"), "true"));
