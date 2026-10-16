@@ -299,6 +299,55 @@ func TestLoadRepoBundleReadsBaseRef(t *testing.T) {
 	}
 }
 
+func TestLoadRepoBundleUnknownRefFails(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init", "--quiet")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	writeFile(t, filepath.Join(dir, "file.txt"), "hi\n")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "--quiet", "-m", "init")
+
+	if _, err := LoadRepoBundle(context.Background(), dir, "no-such-ref"); err == nil {
+		t.Fatal("LoadRepoBundle on an unknown ref: want error, got nil")
+	}
+}
+
+func TestLoadRepoBundleNotARepositoryFails(t *testing.T) {
+	if _, err := LoadRepoBundle(context.Background(), t.TempDir(), "HEAD"); err == nil {
+		t.Fatal("LoadRepoBundle outside a repository: want error, got nil")
+	}
+}
+
+func TestLoadRepoBundleEmptyRepositoryIsNotAnError(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init", "--quiet")
+
+	bundle, err := LoadRepoBundle(context.Background(), dir, "HEAD")
+	if err != nil {
+		t.Fatalf("LoadRepoBundle in an empty repository: %v", err)
+	}
+	if bundle.Commit != "" || len(bundle.Entries) != 0 || len(bundle.Skills) != 0 {
+		t.Fatalf("bundle = %+v, want empty", bundle)
+	}
+}
+
+func TestLoadRepoBundleLsTreeFailureFails(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init", "--quiet")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	writeFile(t, filepath.Join(dir, "file.txt"), "hi\n")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "--quiet", "-m", "init")
+
+	// A ref that rev-parse accepts (a blob path) but ls-tree cannot resolve
+	// must not be silently treated as "no bundled skills".
+	if _, err := LoadRepoBundle(context.Background(), dir, "HEAD:file.txt"); err == nil {
+		t.Fatal("LoadRepoBundle with an unresolvable tree: want error, got nil")
+	}
+}
+
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	command := exec.Command("git", append([]string{"-C", dir}, args...)...)

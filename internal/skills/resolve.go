@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
@@ -109,8 +110,13 @@ func LoadRepoBundle(ctx context.Context, dir, ref string) (RepoBundle, error) {
 	bundle := RepoBundle{Skills: map[string]string{}}
 	commit, err := gitShow(ctx, dir, "rev-parse", ref)
 	if err != nil {
-		// An empty repository (or an unknown ref) has no repo-scoped skills.
-		return bundle, nil
+		// A repository with no commits has no repo-scoped skills; every other
+		// failure (unknown ref, missing git, not a repository) must surface so
+		// a repo's skills.yaml and bundled skills are never silently skipped.
+		if empty, probeErr := isEmptyRepository(ctx, dir); probeErr == nil && empty {
+			return bundle, nil
+		}
+		return RepoBundle{}, fmt.Errorf("resolve repository ref %q: %w", ref, err)
 	}
 	bundle.Commit = strings.TrimSpace(commit)
 	if body, err := gitShow(ctx, dir, "show", ref+":"+repoConfigPath); err == nil {
@@ -120,9 +126,12 @@ func LoadRepoBundle(ctx context.Context, dir, ref string) (RepoBundle, error) {
 		}
 		bundle.Entries = entries
 	}
+	// An absent path is not an error (ls-tree exits 0 with empty output); any
+	// non-zero exit is a real failure and must surface rather than dropping
+	// every repo-bundled skill.
 	tree, err := gitShow(ctx, dir, "ls-tree", "-r", "--name-only", ref, "--", repoSkillsPath)
 	if err != nil {
-		return bundle, nil
+		return RepoBundle{}, fmt.Errorf("list repo-bundled skills at %q: %w", ref, err)
 	}
 	for _, path := range strings.Split(tree, "\n") {
 		path = strings.TrimSpace(path)
@@ -152,6 +161,21 @@ func gitShow(ctx context.Context, dir string, args ...string) (string, error) {
 		return "", err
 	}
 	return string(output), nil
+}
+
+// isEmptyRepository reports whether dir is a git repository with no commits.
+// It lets LoadRepoBundle tolerate a genuinely empty repository while still
+// surfacing every other rev-parse failure.
+func isEmptyRepository(ctx context.Context, dir string) (bool, error) {
+	output, err := gitShow(ctx, dir, "rev-list", "--count", "--all")
+	if err != nil {
+		return false, err
+	}
+	count, err := strconv.Atoi(strings.TrimSpace(output))
+	if err != nil {
+		return false, err
+	}
+	return count == 0, nil
 }
 
 // ResolveRequest describes one run's skills layers.
