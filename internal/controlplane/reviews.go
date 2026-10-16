@@ -93,7 +93,7 @@ func requestChanges(ctx context.Context, tx *sql.Tx, job, gate, repository, plan
 		return err
 	}
 	// The producing stage was already authorized; don't repeat its entry gate.
-	if err = enqueueStep(ctx, tx, job, repository, index-1, steps[index-1], true, now); err != nil {
+	if _, err = enqueueStep(ctx, tx, job, repository, index-1, steps[index-1], true, now); err != nil {
 		return err
 	}
 	var next string
