@@ -306,6 +306,33 @@ func TestSkillsAPIUpload(t *testing.T) {
 		t.Fatalf("uploaded skills = %#v", listed.Skills)
 	}
 
+	// An uploaded skill records a stable sentinel source, never the deleted
+	// staging path.
+	sources := map[string]any{}
+	for _, skill := range listed.Skills {
+		sources[skill["name"].(string)] = skill["source"]
+	}
+	if sources["feature-dev:code-reviewer"] != "upload:feature-dev:code-reviewer" || sources["docs-reviewer"] != "upload:docs-reviewer" {
+		t.Fatalf("uploaded sources = %#v", sources)
+	}
+
+	// Updating an uploaded skill reports it must be re-uploaded instead of
+	// failing to stat the removed temporary file.
+	response = authRequest(t, http.MethodPost, webServer.URL+"/api/v1/skills/feature-dev:code-reviewer/update", writeSecret, nil)
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("uploaded update status = %d, want 400", response.StatusCode)
+	}
+	var failure struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&failure); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if !strings.Contains(failure.Error, "re-upload") {
+		t.Fatalf("uploaded update error = %q, want a re-upload message", failure.Error)
+	}
+
 	// Unsupported upload types and a missing field are rejected.
 	response = uploadSkill(t, endpoint, writeSecret, "file", "notes.txt", []byte("nothing"))
 	if response.StatusCode != http.StatusBadRequest {

@@ -49,7 +49,7 @@ scope.
 | `list_skills` | read | — | Installed skills with versions and `used_by` references. |
 | `get_skill` | read | `name` | One installed skill with every version. |
 | `install_skill` | write | `source` | Install a skill from a GitHub URL, directory or zip archive. |
-| `update_skill` | write | `name`, `activate?` | Re-resolve the recorded source and add the new version; `activate` makes it active. |
+| `update_skill` | write | `name`, `activate?` | Re-resolve the recorded source and add the new version; `activate` makes it active. A skill installed from an upload must be re-uploaded instead. |
 | `pin_skill` | write | `name`, `version` | Set the active version of an installed skill. |
 | `uninstall_skill` | write | `name` | Remove a skill and every installed version. |
 

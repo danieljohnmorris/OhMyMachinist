@@ -132,6 +132,35 @@ func TestInstallFromZip(t *testing.T) {
 	}
 }
 
+// TestInstallFromUploadRecordsSentinel pins the source recorded for an upload:
+// the caller's staged bytes are gone once the install finishes, so the
+// manifest holds an "upload:" sentinel and Update asks for a re-upload instead
+// of statting the deleted temporary path.
+func TestInstallFromUploadRecordsSentinel(t *testing.T) {
+	library := newTestLibrary(t)
+	directory := t.TempDir()
+	writeSkillDir(t, directory, "reviewer", validSkill)
+
+	result, err := library.Install(context.Background(), Source{Kind: SourceDirectory, Location: directory, Uploaded: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "upload:feature-dev:code-reviewer"
+	if result.Source != want {
+		t.Fatalf("uploaded install source = %q, want %q", result.Source, want)
+	}
+	manifest := readManifestFile(t, library.Root, "feature-dev_code-reviewer")
+	if manifest.Source != want {
+		t.Fatalf("manifest source = %q, want %q", manifest.Source, want)
+	}
+	if strings.Contains(manifest.Source, directory) {
+		t.Fatalf("manifest source leaked the staged path: %q", manifest.Source)
+	}
+	if _, err := library.Update(context.Background(), "feature-dev:code-reviewer", false); err == nil || !strings.Contains(err.Error(), "re-upload") {
+		t.Fatalf("update of an uploaded skill = %v, want a re-upload error", err)
+	}
+}
+
 func TestInstallFromGitHubResolvesRefToSHA(t *testing.T) {
 	library := newTestLibrary(t)
 	const sha = "0123456789abcdef0123456789abcdef01234567"

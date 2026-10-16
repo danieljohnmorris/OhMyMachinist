@@ -100,7 +100,10 @@ func (s *Server) installSkill(ctx context.Context, source string) (skills.Instal
 }
 
 // installSkillArchive installs an uploaded zip archive or a bare SKILL.md by
-// staging the bytes in a temporary directory the library can read.
+// staging the bytes in a temporary directory the library can read. The install
+// records an "upload:" sentinel source, not the staging path: the staged bytes
+// are removed once the version is written, so a later update reports that the
+// skill must be re-uploaded.
 func (s *Server) installSkillArchive(ctx context.Context, filename string, content []byte) (skills.InstallResult, error) {
 	directory, err := os.MkdirTemp("", "machinist-skill-upload-*")
 	if err != nil {
@@ -108,19 +111,28 @@ func (s *Server) installSkillArchive(ctx context.Context, filename string, conte
 	}
 	defer os.RemoveAll(directory)
 	base := filepath.Base(strings.TrimSpace(filename))
-	var source string
+	var parsed skills.Source
 	switch {
 	case strings.EqualFold(base, "SKILL.md"):
-		source = filepath.Join(directory, "SKILL.md")
+		parsed = skills.Source{Kind: skills.SourceDirectory, Location: directory}
+		if err := os.WriteFile(filepath.Join(directory, "SKILL.md"), content, 0o600); err != nil {
+			return skills.InstallResult{}, err
+		}
 	case strings.EqualFold(filepath.Ext(base), ".zip"):
-		source = filepath.Join(directory, "upload.zip")
+		archive := filepath.Join(directory, "upload.zip")
+		if err := os.WriteFile(archive, content, 0o600); err != nil {
+			return skills.InstallResult{}, err
+		}
+		parsed = skills.Source{Kind: skills.SourceZip, Location: archive}
 	default:
 		return skills.InstallResult{}, errors.New("upload must be a .zip archive or a SKILL.md file")
 	}
-	if err := os.WriteFile(source, content, 0o600); err != nil {
+	parsed.Uploaded = true
+	library, err := s.openSkills()
+	if err != nil {
 		return skills.InstallResult{}, err
 	}
-	return s.installSkill(ctx, source)
+	return library.Install(ctx, parsed)
 }
 
 // updateSkill re-resolves a skill's recorded source and adds the new version.

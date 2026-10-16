@@ -159,3 +159,9 @@ always present and currently empty; reference tracking lands with the skills
 configuration work. Recorded sources and manifests never contain credentials, so
 no response returns a token or a token-bearing URL. Every install, update, pin
 and removal is audit-logged with the token's name.
+
+A skill installed through `/api/v1/skills/upload` records its source as the
+sentinel `upload:<name>` rather than the staging path, which the server deletes
+once the version is written. Updating such a skill fails with `400` and
+`skill "…" was installed from an upload; re-upload it to add a version`; upload
+the archive or `SKILL.md` again to add a version.

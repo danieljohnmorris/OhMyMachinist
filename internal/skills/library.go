@@ -193,6 +193,9 @@ func (l *Library) Update(ctx context.Context, name string, activate bool) (Insta
 	if err != nil {
 		return InstallResult{}, err
 	}
+	if isUploadSource(manifest.Source) {
+		return InstallResult{}, fmt.Errorf("skill %q was installed from an upload; re-upload it to add a version", manifest.Name)
+	}
 	source, err := ParseSource(manifest.Source)
 	if err != nil {
 		return InstallResult{}, fmt.Errorf("re-resolve source for %q: %w", manifest.Name, err)
@@ -373,5 +376,8 @@ func (l *Library) fetch(ctx context.Context, source Source) (fetched, error) {
 		return fetched{}, err
 	}
 	resolved.name = name
+	if source.Uploaded {
+		resolved.source = uploadSource(name)
+	}
 	return resolved, nil
 }
