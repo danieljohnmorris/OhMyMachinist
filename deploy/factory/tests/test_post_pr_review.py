@@ -249,6 +249,60 @@ class SecretScanTests(unittest.TestCase):
         self.assertTrue(scan["verified"][0]["blocking"])
         self.assertFalse(scan["unverified"][0]["blocking"])
 
+    def test_failed_reporting_scan_reports_an_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            script = bin_dir / "trufflehog"
+            script.write_text(
+                "#!/bin/sh\n"
+                'case "$*" in\n'
+                '  *"--results=verified"*) sed -n \'1p\' "$TH_FIXTURE" ;;\n'
+                '  *"--results=unverified,unknown"*) exit 3 ;;\n'
+                "esac\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            os.chmod(script, 0o755)
+            env = os.environ.copy()
+            env.update({"PATH": f"{bin_dir}:{env['PATH']}", "TH_FIXTURE": str(_FIXTURE)})
+            with mock.patch.dict(os.environ, env, clear=True):
+                scan = post.run_secret_scan(root, "base", "feature", 5)
+        self.assertFalse(scan["ran"])
+        self.assertTrue(scan["error"])
+        # The verified pass still reported its blocking credential.
+        self.assertEqual([finding["location"] for finding in scan["verified"]], ["src/config.py:12"])
+        body = post.render_comment(
+            "BLOCKED", [], [], {"ran": True, "changed": []}, _resolved_profile(), [], "headsha", [], scan
+        )
+        self.assertIn("1 verified credential(s) — blocking", body)
+        self.assertIn(f"- not run: {scan['error']}", body)
+
+    def test_unparseable_reporting_scan_reports_an_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            script = bin_dir / "trufflehog"
+            script.write_text(
+                "#!/bin/sh\n"
+                'case "$*" in\n'
+                '  *"--results=verified"*) sed -n \'1p\' "$TH_FIXTURE" ;;\n'
+                '  *"--results=unverified,unknown"*) printf \'{"SourceID":1}\\n\' ;;\n'
+                "esac\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            os.chmod(script, 0o755)
+            env = os.environ.copy()
+            env.update({"PATH": f"{bin_dir}:{env['PATH']}", "TH_FIXTURE": str(_FIXTURE)})
+            with mock.patch.dict(os.environ, env, clear=True):
+                scan = post.run_secret_scan(root, "base", "feature", 5)
+        self.assertFalse(scan["ran"])
+        self.assertIn("result missing detector metadata", scan["error"])
+        self.assertEqual([finding["location"] for finding in scan["verified"]], ["src/config.py:12"])
+
     def test_missing_binary_reports_error(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             env = os.environ.copy()

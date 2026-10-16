@@ -151,9 +151,22 @@ def trufflehog_scan_args(repo: str, base_sha: str, head_ref: str, results: str) 
     ]
 
 
+class TruffleHogParseError(ValueError):
+    """TruffleHog emitted a structured line that is neither a result nor one of
+    its own log lines. Raised instead of dropping the line: an unparsed result
+    can hide a live credential behind a clean-looking scan."""
+
+
+_TRUFFLEHOG_LOG_KEYS = ("level", "logger", "msg")
+
+
 def parse_trufflehog_output(output: str) -> list[dict[str, Any]]:
-    """Parse TruffleHog's newline-delimited JSON results, ignoring its log
-    lines and any other non-result noise."""
+    """Parse TruffleHog's newline-delimited JSON results.
+
+    The banner and TruffleHog's own JSON log lines (``level``/``logger``/
+    ``msg``) are skipped, but any other structured line must be a result:
+    a malformed or schema-drifted line raises ``TruffleHogParseError`` rather
+    than being silently discarded."""
     findings: list[dict[str, Any]] = []
     for line in output.splitlines():
         line = line.strip()
@@ -161,12 +174,18 @@ def parse_trufflehog_output(output: str) -> list[dict[str, Any]]:
             continue
         try:
             payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+        except json.JSONDecodeError as error:
+            raise TruffleHogParseError(f"malformed result line: {redact(line)}") from error
+        if not isinstance(payload, dict):
+            raise TruffleHogParseError(f"unexpected result: {redact(line)}")
         # Results carry the detector/source metadata; trufflehog's own JSON
         # log lines carry "level"/"logger"/"msg" and nothing else.
-        if isinstance(payload, dict) and ("DetectorName" in payload or "SourceMetadata" in payload):
+        if "DetectorName" in payload or "SourceMetadata" in payload:
             findings.append(payload)
+        elif any(key in payload for key in _TRUFFLEHOG_LOG_KEYS):
+            continue
+        else:
+            raise TruffleHogParseError(f"result missing detector metadata: {redact(line)}")
     return findings
 
 

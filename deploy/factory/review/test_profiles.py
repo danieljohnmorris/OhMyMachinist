@@ -465,6 +465,16 @@ class TruffleHogTests(unittest.TestCase):
         text = "\U0001f437 banner\n" + log_line + "\n" + self.FIXTURE.read_text(encoding="utf-8") + "not json\n"
         self.assertEqual(len(core.parse_trufflehog_output(text)), 2)
 
+    def test_parse_rejects_a_malformed_result_line(self):
+        verified_line = self.FIXTURE.read_text(encoding="utf-8").splitlines()[0]
+        with self.assertRaises(core.TruffleHogParseError) as caught:
+            core.parse_trufflehog_output(verified_line[:-5] + "\n")
+        self.assertIn("malformed result line", str(caught.exception))
+
+    def test_parse_rejects_a_result_missing_detector_metadata(self):
+        with self.assertRaises(core.TruffleHogParseError):
+            core.parse_trufflehog_output('{"SourceID":1,"Verified":true}\n')
+
     def test_verified_finding_blocks_and_redacts(self):
         payloads = self.payloads()
         finding = core.trufflehog_finding(payloads[0], True)

@@ -292,14 +292,29 @@ def run_secret_scan(repo: Path, base_sha: str, head_ref: str, timeout: int) -> d
     if not verified.ok:
         scan["error"] = core.redact(verified.output) or "trufflehog scan failed"
         return scan
-    scan["verified"] = [core.trufflehog_finding(payload, True) for payload in core.parse_trufflehog_output(verified.stdout)]
+    try:
+        verified_payloads = core.parse_trufflehog_output(verified.stdout)
+    except core.TruffleHogParseError as error:
+        scan["error"] = f"trufflehog verified scan: {error}"
+        return scan
+    scan["verified"] = [core.trufflehog_finding(payload, True) for payload in verified_payloads]
     unverified = run_command(
         core.trufflehog_scan_args(repo.as_posix(), base_sha, head_ref, "unverified,unknown"),
         cwd=repo,
         timeout=timeout,
     )
-    if unverified.ok and not unverified.timed_out:
-        scan["unverified"] = [core.trufflehog_finding(payload, False) for payload in core.parse_trufflehog_output(unverified.stdout)]
+    if unverified.timed_out:
+        scan["error"] = "trufflehog unverified scan timed out"
+        return scan
+    if not unverified.ok:
+        scan["error"] = core.redact(unverified.output) or "trufflehog unverified scan failed"
+        return scan
+    try:
+        unverified_payloads = core.parse_trufflehog_output(unverified.stdout)
+    except core.TruffleHogParseError as error:
+        scan["error"] = f"trufflehog unverified scan: {error}"
+        return scan
+    scan["unverified"] = [core.trufflehog_finding(payload, False) for payload in unverified_payloads]
     scan["ran"] = True
     return scan
 
@@ -546,22 +561,21 @@ def render_comment(
         lines.extend(f"- {note}" for note in notes)
     if secret_scan is not None:
         lines.extend(["", "## Secret scan (TruffleHog)"])
-        if secret_scan.get("ran"):
-            verified = secret_scan.get("verified") or []
-            unverified = secret_scan.get("unverified") or []
-            if verified:
-                lines.append(f"- {len(verified)} verified credential(s) — blocking")
-                for finding in verified[:20]:
-                    lines.append(f"- {finding['severity']} | {finding['location']} | {finding['message']}")
-            else:
-                lines.append("- No verified credentials.")
-            if unverified:
-                lines.append(f"- {len(unverified)} unverified finding(s) — not blocking")
-                for finding in unverified[:20]:
-                    lines.append(f"- {finding['severity']} | {finding['location']} | {finding['message']}")
-                if len(unverified) > 20:
-                    lines.append(f"- ... and {len(unverified) - 20} more")
-        else:
+        verified = secret_scan.get("verified") or []
+        unverified = secret_scan.get("unverified") or []
+        if verified:
+            lines.append(f"- {len(verified)} verified credential(s) — blocking")
+            for finding in verified[:20]:
+                lines.append(f"- {finding['severity']} | {finding['location']} | {finding['message']}")
+        elif secret_scan.get("ran"):
+            lines.append("- No verified credentials.")
+        if unverified:
+            lines.append(f"- {len(unverified)} unverified finding(s) — not blocking")
+            for finding in unverified[:20]:
+                lines.append(f"- {finding['severity']} | {finding['location']} | {finding['message']}")
+            if len(unverified) > 20:
+                lines.append(f"- ... and {len(unverified) - 20} more")
+        if not secret_scan.get("ran"):
             lines.append(f"- not run: {secret_scan.get('error', 'secret scan did not run')}")
     severities = resolved.severities()
     blocking = [finding for finding in merged if finding.get("blocking")]
