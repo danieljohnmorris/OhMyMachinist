@@ -384,6 +384,7 @@ func (s *Server) routes() (http.Handler, error) {
 	mux.HandleFunc("PUT /api/v1/review-default-profile", s.authorizeSubmission(s.saveReviewDefaultProfile))
 	mux.HandleFunc("POST /api/v1/runs/{id}/heartbeat", s.authorizeWorker(s.heartbeat))
 	mux.HandleFunc("POST /api/v1/runs/{id}/complete", s.authorizeWorker(s.complete))
+	mux.HandleFunc("POST /api/v1/runs/{id}/oom", s.authorizeWorker(s.reportOOM))
 	mux.HandleFunc("POST /api/v1/runs/{id}/events", s.authorizeWorker(s.liveEvents))
 	mux.HandleFunc("GET /api/v1/runs/{id}/events", s.authorizeArtifact(s.runEvents))
 	// Documented machine API (docs/api.md): scoped bearer tokens required.
@@ -715,6 +716,35 @@ func (s *Server) writeFailAlert(ctx context.Context, runID string) {
 	if err := s.failAlerts.write(alert); err != nil {
 		log.Printf("write fail alert for run %q: %v", runID, err)
 	}
+}
+
+// reportOOM records that a worker died from an out-of-memory kill while
+// running a run, so the run is failed with the OOM class and never re-leased
+// into another lane (MACH-62).
+func (s *Server) reportOOM(response http.ResponseWriter, request *http.Request) {
+	if !limitRequestBody(response, request, maxRequestBytes) {
+		return
+	}
+	var input protocol.OOMReport
+	if err := decodeJSON(request, &input); err != nil {
+		writeDecodeError(response, err)
+		return
+	}
+	err := s.store.MarkRunOOM(request.Context(), request.PathValue("id"), input.Name, input.PeakMemoryBytes, input.Detail)
+	if errors.Is(err, ErrLeaseConflict) {
+		writeError(response, http.StatusConflict, err)
+		return
+	}
+	if errors.Is(err, ErrRunState) || errors.Is(err, sql.ErrNoRows) {
+		writeError(response, http.StatusConflict, errors.New("run is not running"))
+		return
+	}
+	if err != nil {
+		log.Printf("report OOM for run %q: %v", request.PathValue("id"), err)
+		writeError(response, http.StatusInternalServerError, errors.New("report OOM"))
+		return
+	}
+	response.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) heartbeat(response http.ResponseWriter, request *http.Request) {

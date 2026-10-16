@@ -25,6 +25,10 @@ type FailAlert struct {
 	ElapsedMillis int64  `json:"elapsed_millis"`
 	ExitCode      int    `json:"exit_code"`
 	Reason        string `json:"reason"`
+	// ErrorClass is "oom" for an out-of-memory kill and PeakMemoryBytes is the
+	// job's peak before it was killed (MACH-62).
+	ErrorClass      string `json:"error_class,omitempty"`
+	PeakMemoryBytes int64  `json:"peak_memory_bytes,omitempty"`
 }
 
 // alertingState reports whether a terminal process state emits a fail alert.
@@ -72,8 +76,8 @@ func (s *Store) pendingFailAlert(ctx context.Context, runID string) (FailAlert, 
 	var alert FailAlert
 	var state, jobID, title, metadata string
 	var exitCode, durationMillis int64
-	err := s.db.QueryRowContext(ctx, `SELECT r.state,r.job_id,COALESCE(r.command,''),r.timeout_ms,COALESCE(r.exit_code,0),COALESCE(r.duration_millis,0),COALESCE(j.title,''),COALESCE((SELECT metadata FROM job_metadata WHERE job_id=j.id),'') FROM runs r JOIN jobs j ON j.id=r.job_id WHERE r.id=?`,
-		runID).Scan(&state, &jobID, &alert.Command, &alert.TimeoutMillis, &exitCode, &durationMillis, &title, &metadata)
+	err := s.db.QueryRowContext(ctx, `SELECT r.state,r.job_id,COALESCE(r.command,''),r.timeout_ms,COALESCE(r.exit_code,0),COALESCE(r.duration_millis,0),COALESCE(j.title,''),COALESCE((SELECT metadata FROM job_metadata WHERE job_id=j.id),''),COALESCE(r.error_class,''),COALESCE(r.peak_memory_bytes,0) FROM runs r JOIN jobs j ON j.id=r.job_id WHERE r.id=?`,
+		runID).Scan(&state, &jobID, &alert.Command, &alert.TimeoutMillis, &exitCode, &durationMillis, &title, &metadata, &alert.ErrorClass, &alert.PeakMemoryBytes)
 	if errors.Is(err, sql.ErrNoRows) {
 		return FailAlert{}, false, nil
 	}

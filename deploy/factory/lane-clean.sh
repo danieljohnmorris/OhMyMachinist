@@ -5,9 +5,14 @@
 # starts, so this worker cannot hold any lane yet. Each lane checkout belongs to one
 # worker only (LANES.md). It still refuses to touch anything if the DB shows a run
 # 'running' (or the DB can't be read) for this worker name.
-# For each repo in the toml whose basename is in CLEAN_REPOS and whose tracked files are
-# modified: save patch + files list to backups/lane-clean/, git stash push (labelled),
-# leave the branch as is (the worker checks out the base branch itself). Never fails the unit.
+# For each repo in the toml whose basename is in CLEAN_REPOS and that is dirty: save a
+# patch (tracked changes) + a tar of the untracked files + a files list to
+# backups/lane-clean/, then git stash push --include-untracked (labelled) so the lane is
+# clean again; leave the branch as is (the worker checks out the base branch itself).
+# MACH-62: "dirty" is the same definition the runner and omp-glm-pr use
+# (`git status --porcelain`: tracked modifications AND untracked files, ignored files
+# never count), so untracked leftovers are stashed instead of being left behind.
+# Never fails the unit.
 #
 # CLEAN_REPOS defaults to every repository in the toml when unset; set it to a
 # space-separated basename list to limit which lanes are cleaned.
@@ -31,15 +36,24 @@ sed -n 's/^path *= *"\(.*\)"/\1/p' "$TOML" | while read -r repo; do
   fi
   [ -d "$repo/.git" ] || continue
   g() { runuser -u "$MACHINIST_USER" -- git -C "$repo" -c core.hooksPath=/dev/null "$@"; }
-  dirty=$(g status --porcelain -uno 2>/dev/null)
+  dirty=$(g status --porcelain 2>/dev/null)
   [ -n "$dirty" ] || continue
   ts=$(date +%Y%m%d-%H%M%S); base="$OUT/${W}-${b}-${ts}"
   br=$(g rev-parse --abbrev-ref HEAD 2>/dev/null); head=$(g rev-parse HEAD 2>/dev/null)
   g diff --binary HEAD > "$base.patch" || { log "diff failed for $repo; skip"; continue; }
+  # Untracked leftovers are part of the dirty lane but invisible to `git diff`, so tar
+  # them before the stash. `--exclude-standard` mirrors --porcelain: ignored files
+  # never count. An empty tar is written when there are none so the file always exists.
+  untracked=$(g ls-files --others --exclude-standard 2>/dev/null)
+  if [ -n "$untracked" ]; then
+    printf '%s\n' "$untracked" | tar -C "$repo" -cf "$base.untracked.tar" -T -
+  else
+    tar -C "$repo" -cf "$base.untracked.tar" -T /dev/null
+  fi
   { echo "worker: $W"; echo "repo: $repo"; echo "branch: $br"; echo "HEAD: $head"; echo "$dirty"; } > "$base.files.txt"
-  chown "$MACHINIST_USER:$MACHINIST_USER" "$base.patch" "$base.files.txt"
-  if g stash push -q -m "lane-clean $W $ts (dirty on worker start; patch $base.patch)"; then
-    log "stashed dirty $repo [$br] -> $base.patch"
+  chown "$MACHINIST_USER:$MACHINIST_USER" "$base.patch" "$base.untracked.tar" "$base.files.txt"
+  if g stash push -q --include-untracked -m "lane-clean $W $ts (dirty on worker start; patch $base.patch)"; then
+    log "stashed dirty $repo [$br] -> $base.patch + $base.untracked.tar"
   else
     log "stash failed for $repo; left as is"
   fi

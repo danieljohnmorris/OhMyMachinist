@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -51,7 +52,135 @@ type Worker struct {
 	ControlPlane  ControlPlane          `toml:"control_plane"`
 	Executors     map[string]Executor   `toml:"executors"`
 	Repositories  map[string]Repository `toml:"repositories"`
+	Memory        MemoryLimit           `toml:"memory"`
 	configDir     string
+}
+
+// MemoryLimit is the per-job memory cap applied by the runner (MACH-62). Each
+// job runs in its own memory-limited cgroup scope so a runaway job is killed
+// instead of the worker. Values use systemd size syntax (K/M/G/T, binary:
+// 1G = 1024^3) or plain bytes; "max"/"none" disables that limit. Empty values
+// fall back to the documented defaults in applyWorkerDefaults.
+type MemoryLimit struct {
+	High    string `toml:"high"`
+	Max     string `toml:"max"`
+	SwapMax string `toml:"swap_max"`
+}
+
+// ResolvedMemory is a MemoryLimit parsed into bytes. A zero field means the
+// limit is unset (unlimited).
+type ResolvedMemory struct {
+	High    int64
+	Max     int64
+	SwapMax int64
+}
+
+const (
+	// Safe per-job defaults (MACH-62): a job may use at most 10 GiB, is
+	// throttled at 8 GiB before that, and may swap at most 2 GiB. The
+	// worker-level systemd drop-in (MemoryMax=12G) is the backstop.
+	defaultMemoryHigh    = "8G"
+	defaultMemoryMax     = "10G"
+	defaultMemorySwapMax = "2G"
+)
+
+// ResolveMemory parses the worker's memory settings, substituting the safe
+// defaults for empty fields.
+func (w Worker) ResolveMemory() (ResolvedMemory, error) {
+	return resolveMemorySettings(w.Memory)
+}
+
+func resolveMemorySettings(limit MemoryLimit) (ResolvedMemory, error) {
+	var resolved ResolvedMemory
+	for _, field := range []struct {
+		name     string
+		value    string
+		fallback string
+		target   *int64
+	}{
+		{"memory.high", limit.High, defaultMemoryHigh, &resolved.High},
+		{"memory.max", limit.Max, defaultMemoryMax, &resolved.Max},
+		{"memory.swap_max", limit.SwapMax, defaultMemorySwapMax, &resolved.SwapMax},
+	} {
+		value := strings.TrimSpace(field.value)
+		if value == "" {
+			value = field.fallback
+		}
+		bytes, err := ParseByteSize(value)
+		if err != nil {
+			return ResolvedMemory{}, fmt.Errorf("worker %s: %w", field.name, err)
+		}
+		*field.target = bytes
+	}
+	if resolved.Max > 0 && resolved.High > 0 && resolved.High > resolved.Max {
+		return ResolvedMemory{}, fmt.Errorf("worker memory.high (%s) must not exceed memory.max (%s)", limit.High, limit.Max)
+	}
+	return resolved, nil
+}
+
+// ParseByteSize parses a systemd-style size string (binary units) and returns
+// bytes. "max", "none", "infinity" and "0" mean unlimited (0). Plain integers
+// are bytes. Suffixes are B, K, M, G, T (case-insensitive) and their
+// "iB" spellings; a trailing "B" is accepted (e.g. "512MB").
+func ParseByteSize(value string) (int64, error) {
+	text := strings.ToLower(strings.TrimSpace(value))
+	if text == "" {
+		return 0, errors.New("empty size")
+	}
+	switch text {
+	case "max", "none", "infinity":
+		return 0, nil
+	}
+	digits := text
+	multiplier := int64(1)
+	for _, suffix := range []struct {
+		suffix     string
+		multiplier int64
+	}{
+		{"kib", 1 << 10}, {"mib", 1 << 20}, {"gib", 1 << 30}, {"tib", 1 << 40},
+		{"kb", 1 << 10}, {"mb", 1 << 20}, {"gb", 1 << 30}, {"tb", 1 << 40},
+		{"k", 1 << 10}, {"m", 1 << 20}, {"g", 1 << 30}, {"t", 1 << 40},
+		{"b", 1},
+	} {
+		if strings.HasSuffix(digits, suffix.suffix) {
+			digits = strings.TrimSuffix(digits, suffix.suffix)
+			multiplier = suffix.multiplier
+			break
+		}
+	}
+	digits = strings.TrimSpace(digits)
+	if digits == "" {
+		return 0, fmt.Errorf("invalid size %q", value)
+	}
+	number, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil || number < 0 {
+		return 0, fmt.Errorf("invalid size %q", value)
+	}
+	if number > 0 && number > (1<<62)/multiplier {
+		return 0, fmt.Errorf("size %q is too large", value)
+	}
+	return number * multiplier, nil
+}
+
+// FormatByteSize renders bytes as a short binary size ("8G", "512M", "1.5G").
+func FormatByteSize(bytes int64) string {
+	if bytes <= 0 {
+		return "0"
+	}
+	for _, unit := range []struct {
+		suffix string
+		scale  int64
+	}{{"T", 1 << 40}, {"G", 1 << 30}, {"M", 1 << 20}, {"K", 1 << 10}} {
+		if bytes >= unit.scale {
+			whole := bytes / unit.scale
+			remainder := bytes % unit.scale
+			if remainder == 0 {
+				return fmt.Sprintf("%d%s", whole, unit.suffix)
+			}
+			return strings.TrimSuffix(strings.TrimRight(fmt.Sprintf("%.1f", float64(bytes)/float64(unit.scale)), "0"), ".") + unit.suffix
+		}
+	}
+	return fmt.Sprintf("%dB", bytes)
 }
 
 type ControlPlane struct {
@@ -576,6 +705,9 @@ func applyWorkerDefaultsWithHostname(worker Worker, getHostname func() (string, 
 		}
 		repository.Path = path
 		worker.Repositories[name] = repository
+	}
+	if _, err := resolveMemorySettings(worker.Memory); err != nil {
+		return Worker{}, err
 	}
 	for name, executor := range worker.Executors {
 		if err := validateCommand(name, executor.Command); err != nil {

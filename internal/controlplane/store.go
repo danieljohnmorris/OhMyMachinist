@@ -34,7 +34,9 @@ const leaseDuration = 30 * time.Second
 const maxTriggerErrorLength = 2000
 
 // reclaimExpiredLeasesSQL returns running runs whose lease lapsed to the queue.
-const reclaimExpiredLeasesSQL = `UPDATE runs SET state='queued',worker_instance=NULL,worker_name='',lease_token=NULL,lease_expires_at=NULL,started_at=NULL WHERE state='running' AND (lease_expires_at IS NULL OR lease_expires_at<=?)`
+// A run classified as an out-of-memory kill is never re-queued: a run that
+// killed a worker must not be leased into another lane (MACH-62).
+const reclaimExpiredLeasesSQL = `UPDATE runs SET state='queued',worker_instance=NULL,worker_name='',lease_token=NULL,lease_expires_at=NULL,started_at=NULL WHERE state='running' AND COALESCE(error_class,'')<>'oom' AND (lease_expires_at IS NULL OR lease_expires_at<=?)`
 
 type Store struct {
 	artifactStore artifacts.Store
@@ -77,24 +79,29 @@ type StateTransition struct {
 }
 
 type Run struct {
-	Revision       *protocol.Revision  `json:"revision,omitempty"`
-	ReviewedRunID  string              `json:"reviewed_run_id,omitempty"`
-	Skills         *protocol.RunSkills `json:"skills,omitempty"`
-	Step           *int                `json:"step,omitempty"`
-	Outcome        string              `json:"outcome,omitempty"`
-	Summary        string              `json:"summary,omitempty"`
-	ID             string              `json:"id"`
-	Command        string              `json:"command"`
-	Executor       string              `json:"executor"`
-	Model          string              `json:"model,omitempty"`
-	State          string              `json:"state"`
-	WorkerName     string              `json:"worker_name,omitempty"`
-	ExitCode       *int                `json:"exit_code,omitempty"`
-	Error          string              `json:"error,omitempty"`
-	StartedAt      time.Time           `json:"started_at,omitempty"`
-	CompletedAt    time.Time           `json:"completed_at,omitempty"`
-	DurationMillis *int64              `json:"duration_millis,omitempty"`
-	TokenUsage     *int64              `json:"token_usage,omitempty,string"`
+	Revision      *protocol.Revision  `json:"revision,omitempty"`
+	ReviewedRunID string              `json:"reviewed_run_id,omitempty"`
+	Skills        *protocol.RunSkills `json:"skills,omitempty"`
+	Step          *int                `json:"step,omitempty"`
+	Outcome       string              `json:"outcome,omitempty"`
+	Summary       string              `json:"summary,omitempty"`
+	ID            string              `json:"id"`
+	Command       string              `json:"command"`
+	Executor      string              `json:"executor"`
+	Model         string              `json:"model,omitempty"`
+	State         string              `json:"state"`
+	WorkerName    string              `json:"worker_name,omitempty"`
+	ExitCode      *int                `json:"exit_code,omitempty"`
+	Error         string              `json:"error,omitempty"`
+	// ErrorClass classifies an infrastructure failure ("oom" for an
+	// out-of-memory kill) and PeakMemoryBytes is the peak before the kill
+	// (MACH-62).
+	ErrorClass      string    `json:"error_class,omitempty"`
+	PeakMemoryBytes int64     `json:"peak_memory_bytes,omitempty"`
+	StartedAt       time.Time `json:"started_at,omitempty"`
+	CompletedAt     time.Time `json:"completed_at,omitempty"`
+	DurationMillis  *int64    `json:"duration_millis,omitempty"`
+	TokenUsage      *int64    `json:"token_usage,omitempty,string"`
 }
 
 type Worker struct {
@@ -217,7 +224,7 @@ func OpenStore(path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) initialize(ctx context.Context) error {
-	const schemaVersion = 10
+	const schemaVersion = 11
 	var version int
 	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		return fmt.Errorf("read database schema version: %w", err)
@@ -345,8 +352,35 @@ END;`
 			return fmt.Errorf("upgrade database schema to version 10: %w", err)
 		}
 	}
-	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+jobMetadataSchema+planeSchema+"PRAGMA user_version=10;")
+	if version < 11 {
+		if err := s.addRunOOMColumns(ctx); err != nil {
+			return fmt.Errorf("upgrade database schema to version 11: %w", err)
+		}
+	}
+	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+jobMetadataSchema+planeSchema+"PRAGMA user_version=11;")
 	return err
+}
+
+// addRunOOMColumns records an out-of-memory classification on a run so it can
+// be shown and never re-leased into another lane (MACH-62).
+func (s *Store) addRunOOMColumns(ctx context.Context) error {
+	for _, column := range []string{
+		"error_class TEXT NOT NULL DEFAULT ''",
+		"peak_memory_bytes INTEGER NOT NULL DEFAULT 0",
+	} {
+		name, _, _ := strings.Cut(column, " ")
+		var present int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name=?`, name).Scan(&present); err != nil {
+			return err
+		}
+		if present > 0 {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE runs ADD COLUMN `+column); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // addJobResolution adds the ticket-resolution columns to jobs. Existing rows
@@ -1304,6 +1338,13 @@ func (s *Store) Complete(ctx context.Context, runID string, completion protocol.
 	if err := validateOutcome(completion.State, completion.ExitCode); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidCompletion, err)
 	}
+	errorClass := strings.TrimSpace(completion.ErrorClass)
+	if len(errorClass) > 32 || strings.ContainsAny(errorClass, "\x00\r\n") {
+		return fmt.Errorf("%w: invalid error class %q", ErrInvalidCompletion, errorClass)
+	}
+	if completion.PeakMemoryBytes < 0 {
+		return fmt.Errorf("%w: invalid peak memory", ErrInvalidCompletion)
+	}
 	durationMillis, tokenUsage := resultMetrics(completion.Result)
 	completedAt := s.now().UTC()
 	now := completedAt.Format(time.RFC3339Nano)
@@ -1318,7 +1359,7 @@ func (s *Store) Complete(ctx context.Context, runID string, completion protocol.
 		}
 		skillsJSON = string(encoded)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE runs SET state=?,exit_code=?,error=?,result=?,events=?,skills=?,lease_expires_at=NULL,completed_at=?,duration_millis=?,token_usage=? WHERE id=?`, completion.State, completion.ExitCode, completion.Error, string(completion.Result), completion.Events, skillsJSON, now, durationMillis, tokenUsage, runID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE runs SET state=?,exit_code=?,error=?,error_class=?,peak_memory_bytes=?,result=?,events=?,skills=?,lease_expires_at=NULL,completed_at=?,duration_millis=?,token_usage=? WHERE id=?`, completion.State, completion.ExitCode, completion.Error, errorClass, completion.PeakMemoryBytes, string(completion.Result), completion.Events, skillsJSON, now, durationMillis, tokenUsage, runID); err != nil {
 		return err
 	}
 	if handled, err := completeWorkflow(ctx, tx, jobID, runID, completion, now); handled || err != nil {
@@ -1414,6 +1455,51 @@ func (s *Store) DeleteJob(ctx context.Context, jobID string) error {
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM jobs WHERE id=?`, jobID); err != nil {
 		return fmt.Errorf("delete job: %w", err)
+	}
+	return tx.Commit()
+}
+
+// MarkRunOOM records that a worker died from an out-of-memory kill while
+// running this run. The run is failed with the OOM class and an explicit
+// message, and its job is failed, so a run that killed a worker is never
+// re-leased into another lane (MACH-62). A run that is already terminal is
+// left as is. laneName, when set, must match the run's worker so a worker can
+// only report its own death.
+func (s *Store) MarkRunOOM(ctx context.Context, runID, laneName string, peakBytes int64, detail string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var jobID, state, workerName string
+	if err := tx.QueryRowContext(ctx, `SELECT job_id,state,worker_name FROM runs WHERE id=?`, runID).Scan(&jobID, &state, &workerName); err != nil {
+		return err
+	}
+	if laneName != "" && workerName != "" && workerName != laneName {
+		return ErrLeaseConflict
+	}
+	if terminalRunState(state) {
+		return tx.Commit()
+	}
+	if state != "running" && state != "queued" {
+		return ErrRunState
+	}
+	if peakBytes < 0 {
+		peakBytes = 0
+	}
+	message := strings.TrimSpace(detail)
+	if message == "" {
+		message = "worker was out of memory"
+	}
+	if !strings.Contains(message, "out of memory in ") {
+		message = "out of memory in " + message
+	}
+	now := s.now().UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `UPDATE runs SET state='failed',exit_code=137,error=?,error_class='oom',peak_memory_bytes=?,lease_expires_at=NULL,lease_token=NULL,completed_at=? WHERE id=? AND state IN ('running','queued')`, boundedTriggerError(message), peakBytes, now, runID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET state='failed',updated_at=? WHERE id=?`, now, jobID); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
@@ -1540,7 +1626,7 @@ func (s *Store) RunOutput(ctx context.Context, runID string) (RunOutput, error) 
 // jobID restricts the result to that job.
 func (s *Store) listJobs(ctx context.Context, jobID string) ([]Job, error) {
 	query := `SELECT j.id,j.title,j.prompt,j.repository,j.github_issue_title,j.command,j.trigger_identity,j.occurrence_key,j.trigger_subject,j.state,j.previous_job_id,j.attempt,COALESCE(j.superseded_by,''),j.issue_key,j.resolution_kind,j.resolution_detail,COALESCE(j.resolved_at,''),j.created_at,j.updated_at,
-COALESCE(r.id,''),COALESCE(r.command,''),COALESCE(r.executor,''),COALESCE(r.model,''),COALESCE(r.state,''),COALESCE(NULLIF(r.worker_name,''),w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,''),r.duration_millis,r.token_usage,COALESCE(r.skills,''),a.step,COALESCE(a.outcome,''),COALESCE(NULLIF(a.summary,''),CASE WHEN json_valid(r.result) THEN json_extract(r.result,'$.final_message') END,'')
+COALESCE(r.id,''),COALESCE(r.command,''),COALESCE(r.executor,''),COALESCE(r.model,''),COALESCE(r.state,''),COALESCE(NULLIF(r.worker_name,''),w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.error_class,''),COALESCE(r.peak_memory_bytes,0),COALESCE(r.started_at,''),COALESCE(r.completed_at,''),r.duration_millis,r.token_usage,COALESCE(r.skills,''),a.step,COALESCE(a.outcome,''),COALESCE(NULLIF(a.summary,''),CASE WHEN json_valid(r.result) THEN json_extract(r.result,'$.final_message') END,'')
 FROM jobs j LEFT JOIN runs r ON r.job_id=j.id LEFT JOIN workers w ON w.instance_id=r.worker_instance LEFT JOIN workflow_attempts a ON a.run_id=r.id`
 	args := []any{}
 	if jobID != "" {
@@ -1560,7 +1646,7 @@ FROM jobs j LEFT JOIN runs r ON r.job_id=j.id LEFT JOIN workers w ON w.instance_
 		var created, updated, started, completed string
 		var resolutionKind, resolutionDetail, resolvedAt, skillsRaw string
 		if err := rows.Scan(&job.ID, &job.Title, &job.Prompt, &job.Repository, &job.GitHubIssueTitle, &job.Command, &job.TriggerID, &job.OccurrenceKey, &job.TriggerSubject, &job.State, &job.PreviousJobID, &job.Attempt, &job.SupersededBy, &job.IssueKey, &resolutionKind, &resolutionDetail, &resolvedAt, &created, &updated,
-			&run.ID, &run.Command, &run.Executor, &run.Model, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &started, &completed, &run.DurationMillis, &run.TokenUsage, &skillsRaw, &run.Step, &run.Outcome, &run.Summary); err != nil {
+			&run.ID, &run.Command, &run.Executor, &run.Model, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &run.ErrorClass, &run.PeakMemoryBytes, &started, &completed, &run.DurationMillis, &run.TokenUsage, &skillsRaw, &run.Step, &run.Outcome, &run.Summary); err != nil {
 			return nil, err
 		}
 		run.Skills = decodeRunSkills(skillsRaw)
@@ -1629,9 +1715,9 @@ func (s *Store) GetJob(ctx context.Context, jobID string) (Job, error) {
 func (s *Store) GetRun(ctx context.Context, runID string) (Run, error) {
 	var run Run
 	var started, completed, skillsRaw string
-	err := s.db.QueryRowContext(ctx, `SELECT r.id,r.command,r.executor,r.model,r.state,COALESCE(NULLIF(r.worker_name,''),w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,''),r.duration_millis,r.token_usage,COALESCE(r.skills,''),a.step,COALESCE(a.outcome,''),COALESCE(NULLIF(a.summary,''),CASE WHEN json_valid(r.result) THEN json_extract(r.result,'$.final_message') END,'')
+	err := s.db.QueryRowContext(ctx, `SELECT r.id,r.command,r.executor,r.model,r.state,COALESCE(NULLIF(r.worker_name,''),w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.error_class,''),COALESCE(r.peak_memory_bytes,0),COALESCE(r.started_at,''),COALESCE(r.completed_at,''),r.duration_millis,r.token_usage,COALESCE(r.skills,''),a.step,COALESCE(a.outcome,''),COALESCE(NULLIF(a.summary,''),CASE WHEN json_valid(r.result) THEN json_extract(r.result,'$.final_message') END,'')
 FROM runs r LEFT JOIN workers w ON w.instance_id=r.worker_instance LEFT JOIN workflow_attempts a ON a.run_id=r.id WHERE r.id=?`, runID).
-		Scan(&run.ID, &run.Command, &run.Executor, &run.Model, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &started, &completed, &run.DurationMillis, &run.TokenUsage, &skillsRaw, &run.Step, &run.Outcome, &run.Summary)
+		Scan(&run.ID, &run.Command, &run.Executor, &run.Model, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &run.ErrorClass, &run.PeakMemoryBytes, &started, &completed, &run.DurationMillis, &run.TokenUsage, &skillsRaw, &run.Step, &run.Outcome, &run.Summary)
 	if err != nil {
 		return Run{}, err
 	}

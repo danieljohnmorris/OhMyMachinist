@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -29,9 +30,21 @@ type Worker struct {
 	stderr         io.Writer
 	heartbeatTicks <-chan time.Time
 	executeRun     func(context.Context, protocol.RunSpec) protocol.Completion
+	// memory is the per-job memory cap applied to every run (MACH-62).
+	memory runner.MemoryLimit
 	// pausedUntil stops this lane claiming more runs after a checkout it could
 	// not clean, so one broken lane cannot drain the whole queue (MACH-59).
 	pausedUntil time.Time
+	// laneFailures records recent infrastructure failures so a lane that keeps
+	// failing the same way trips the circuit breaker (MACH-62).
+	laneFailures []laneFailure
+}
+
+// laneFailure is one infrastructure failure on this lane, used by the circuit
+// breaker.
+type laneFailure struct {
+	at    time.Time
+	class string
 }
 
 const heartbeatInterval = 10 * time.Second
@@ -40,6 +53,15 @@ const heartbeatInterval = 10 * time.Second
 // save and clean a dirty checkout, giving an operator time to fix the lane
 // instead of failing every queued job behind it.
 const lanePauseCooldown = 5 * time.Minute
+
+// breakerFailureWindow and breakerFailureThreshold trip the circuit breaker:
+// this many infrastructure failures of the same class within the window pause
+// the lane and raise one alert instead of draining the queue (MACH-62).
+const (
+	breakerFailureWindow    = time.Minute
+	breakerFailureThreshold = 3
+	breakerPauseCooldown    = 15 * time.Minute
+)
 
 func New(workerConfig config.Worker, stdout, stderr io.Writer) (*Worker, error) {
 	if strings.TrimSpace(workerConfig.Name) == "" {
@@ -56,16 +78,29 @@ func New(workerConfig config.Worker, stdout, stderr io.Writer) (*Worker, error) 
 	if err != nil {
 		return nil, err
 	}
+	resolvedMemory, err := workerConfig.ResolveMemory()
+	if err != nil {
+		return nil, err
+	}
 	return &Worker{
 		config:     workerConfig,
 		instanceID: instanceID,
 		client:     client,
 		stdout:     stdout,
 		stderr:     stderr,
+		memory: runner.MemoryLimit{
+			High:    resolvedMemory.High,
+			Max:     resolvedMemory.Max,
+			SwapMax: resolvedMemory.SwapMax,
+		},
 	}, nil
 }
 
 func (w *Worker) Run(ctx context.Context) error {
+	// MACH-62: before clearing anything, check whether this process restarted
+	// after an out-of-memory kill so the run it was executing is failed with
+	// the OOM class instead of being re-leased into another lane.
+	w.reportOOMDeath(ctx)
 	// Drop any stale marker left by a previous process so the lane starts idle.
 	w.clearLaneBusy()
 	for {
@@ -93,12 +128,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		// a restart-when-idle never restarts it mid-final-step (MACH-59).
 		w.markLaneBusy(run.ID)
 		completion := w.executeWithHeartbeats(ctx, *run)
-		if laneCheckoutUnrecoverable(completion) {
-			// MACH-59: pause this lane instead of claiming the next queued job
-			// and failing it the same way.
-			w.pausedUntil = time.Now().Add(lanePauseCooldown)
-			fmt.Fprintf(w.stderr, "machinist: lane %s paused for %s after an unsavable dirty checkout\n", w.config.Name, lanePauseCooldown)
-		}
+		w.handleLaneFailure(*run, completion)
 		err = w.deliverWithHeartbeats(ctx, *run, completion)
 		w.clearLaneBusy()
 		if err != nil {
@@ -112,6 +142,33 @@ func (w *Worker) Run(ctx context.Context) error {
 			}
 			return err
 		}
+	}
+}
+
+// reportOOMDeath tells the control plane that this worker restarted after an
+// out-of-memory kill, so the run it was executing is failed with the OOM class
+// and never re-leased into another lane (MACH-62). It is a no-op off Linux and
+// when no OOM death is detected; a detection failure is reported on stderr so
+// it is never mistaken for a clean restart.
+func (w *Worker) reportOOMDeath(ctx context.Context) {
+	runID, peakBytes, died, err := workerOOMDeath(w.config.DataDirectory)
+	if err != nil {
+		// Never let a failed check read as a clean restart: the run that
+		// OOM-killed the worker would then be re-leased when its lease
+		// expires, which is what MACH-62 forbids.
+		fmt.Fprintf(w.stderr, "machinist: could not determine whether the worker restarted after an OOM kill: %v\n", err)
+	}
+	if !died {
+		return
+	}
+	fmt.Fprintf(w.stderr, "machinist: worker restarted after an OOM kill (peak %d bytes); run %q will not be re-leased\n", peakBytes, runID)
+	if runID == "" {
+		return
+	}
+	report := protocol.OOMReport{InstanceID: w.instanceID, Name: w.config.Name, PeakMemoryBytes: peakBytes,
+		Detail: "worker was OOM-killed while running this job"}
+	if err := w.client.Post(ctx, "/api/v1/runs/"+url.PathEscape(runID)+"/oom", report, nil); err != nil {
+		fmt.Fprintf(w.stderr, "machinist: report OOM death for run %s: %v\n", runID, err)
 	}
 }
 
@@ -211,12 +268,125 @@ func stopLiveEvents(err error) bool {
 	return false
 }
 
+// infrastructureFailure classifies a run failure as lane-level infrastructure
+// trouble (MACH-62). pause is true when the lane itself must stop claiming
+// jobs (a dirty checkout or a refused executor preflight); an out-of-memory
+// kill fails only the run, so its lane stays usable. The OOM class matches
+// both the recorded error_class and the "out of memory" message.
+func infrastructureFailure(completion protocol.Completion) (class string, pause bool, ok bool) {
+	if completion.State != "failed" {
+		return "", false, false
+	}
+	if completion.ErrorClass == "oom" || strings.Contains(completion.Error, "out of memory in ") {
+		return "oom", false, true
+	}
+	text := completion.Error + "\n" + completion.Events
+	if completion.ExitCode == 4 || strings.Contains(text, "refusing to start") || strings.Contains(completion.Error, "lane checkout is dirty") {
+		return "lane-dirty", true, true
+	}
+	return "", false, false
+}
+
 // laneCheckoutUnrecoverable reports whether a run failed because the lane
-// checkout was dirty and could not be saved and cleaned (MACH-59). The runner
-// reports this as text in the completion, so the worker pauses that lane
-// rather than claiming the next queued job and failing it the same way.
+// checkout was dirty, either because it could not be saved and cleaned
+// (MACH-59) or because the executor preflight refused it (exit 4, MACH-62).
 func laneCheckoutUnrecoverable(completion protocol.Completion) bool {
-	return strings.Contains(completion.Error, "lane checkout is dirty")
+	class, pause, ok := infrastructureFailure(completion)
+	return ok && pause && class == "lane-dirty"
+}
+
+// handleLaneFailure pauses a lane that failed for lane-level infrastructure
+// reasons and trips the circuit breaker when the same failure repeats within a
+// minute (MACH-62), instead of draining the queue.
+func (w *Worker) handleLaneFailure(spec protocol.RunSpec, completion protocol.Completion) {
+	class, pause, ok := infrastructureFailure(completion)
+	if !ok {
+		return
+	}
+	if w.recordLaneFailure(class) {
+		w.pauseLane(breakerPauseCooldown, "circuit breaker: "+class+" failures within a minute")
+		w.raiseBreakerAlert(spec, class)
+		return
+	}
+	if pause {
+		w.pauseLane(lanePauseCooldown, "after a refused dirty checkout")
+	}
+}
+
+// pauseLane stops this lane claiming runs for cooldown, never shortening an
+// existing pause.
+func (w *Worker) pauseLane(cooldown time.Duration, reason string) {
+	until := time.Now().Add(cooldown)
+	if until.After(w.pausedUntil) {
+		w.pausedUntil = until
+	}
+	fmt.Fprintf(w.stderr, "machinist: lane %s paused for %s %s\n", w.config.Name, cooldown, reason)
+}
+
+// recordLaneFailure records one infrastructure failure and reports whether the
+// circuit breaker should trip. It returns true once per burst: the matching
+// class is cleared so three failures pause the lane and raise exactly one
+// alert.
+func (w *Worker) recordLaneFailure(class string) bool {
+	now := time.Now()
+	cutoff := now.Add(-breakerFailureWindow)
+	recent := w.laneFailures[:0]
+	for _, failure := range w.laneFailures {
+		if failure.at.After(cutoff) {
+			recent = append(recent, failure)
+		}
+	}
+	w.laneFailures = append(recent, laneFailure{at: now, class: class})
+	count := 0
+	for _, failure := range w.laneFailures {
+		if failure.class == class {
+			count++
+		}
+	}
+	if count < breakerFailureThreshold {
+		return false
+	}
+	remaining := w.laneFailures[:0]
+	for _, failure := range w.laneFailures {
+		if failure.class != class {
+			remaining = append(remaining, failure)
+		}
+	}
+	w.laneFailures = remaining
+	return true
+}
+
+// raiseBreakerAlert spools one alert for a tripped circuit breaker into the
+// worker's alert directory so an operator sees why the lane stopped.
+func (w *Worker) raiseBreakerAlert(spec protocol.RunSpec, class string) {
+	fmt.Fprintf(w.stderr, "machinist: lane %s circuit breaker tripped (%s); alerting\n", w.config.Name, class)
+	if strings.TrimSpace(w.config.DataDirectory) == "" {
+		return
+	}
+	directory := filepath.Join(w.config.DataDirectory, "alerts")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		fmt.Fprintf(w.stderr, "machinist: create alert directory: %v\n", err)
+		return
+	}
+	alert := struct {
+		Type       string `json:"type"`
+		Lane       string `json:"lane"`
+		Class      string `json:"error_class"`
+		RunID      string `json:"run_id"`
+		JobID      string `json:"job_id"`
+		DetectedAt string `json:"detected_at"`
+	}{
+		Type: "machinist.lane.circuit_breaker", Lane: w.config.Name, Class: class,
+		RunID: spec.ID, JobID: spec.JobID, DetectedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	body, err := json.MarshalIndent(alert, "", "  ")
+	if err != nil {
+		return
+	}
+	path := filepath.Join(directory, "circuit-breaker-"+w.config.Name+"-"+time.Now().UTC().Format("20060102-150405")+".json")
+	if err := os.WriteFile(path, append(body, '\n'), 0o600); err != nil {
+		fmt.Fprintf(w.stderr, "machinist: write circuit breaker alert: %v\n", err)
+	}
 }
 
 // completionReportTimeout bounds how long a finished run keeps trying to report
@@ -443,6 +613,7 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 		ArtifactKey:   spec.LeaseToken,
 		Command:       command,
 		Repository:    repository,
+		MemoryLimit:   w.memory,
 		ExtraEnv:      extraEnv,
 		DataDirectory: w.config.DataDirectory,
 		Stdout:        w.stdout,
@@ -451,6 +622,8 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 	if result.ID != "" {
 		completion.State = string(result.State)
 		completion.ExitCode = result.ExitCode
+		completion.ErrorClass = result.ErrorClass
+		completion.PeakMemoryBytes = result.PeakMemoryBytes
 		completion.Result, _ = os.ReadFile(filepath.Join(filepath.Dir(result.EventsPath), "result.json"))
 		if events, readErr := os.ReadFile(result.EventsPath); readErr == nil {
 			completion.Events = string(events)

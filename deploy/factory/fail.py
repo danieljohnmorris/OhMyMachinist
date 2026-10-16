@@ -9,7 +9,11 @@
       Run by machinist-fail-notify.service (triggered by machinist-fail-notify.path on inbox/).
       Has PLANE_API_KEY via root-only EnvironmentFile. For each inbox alert: POST a comment
       on the linked Plane work item, optionally requeue (transient only, flag off by default),
-      then move it to ~/.machinist/alerts/pending/ for Factory Alerts.
+      then move it to ~/.machinist/alerts/pending/ for Factory Alerts. It drains whatever is
+      in the inbox when it starts, so an alert the path unit missed is still delivered; any
+      file left behind for longer than FAIL_INBOX_WARN_S is logged as stale (MACH-62).
+      An 'oom' alert (MACH-62 kernel OOM kill) is never requeued and its comment names the
+      command and the job's peak memory.
   fail.py dry-run --run-id RUN
       Build the alert for an existing failed run from machinist.db and print it. No writes.
   fail.py sweep [--backfill-run RUN --to-pending]
@@ -34,6 +38,7 @@ STATE = f"{ALERTS}/.state.json"
 SWEEP_STATE = f"{ALERTS}/.sweep-state.json"
 SWEEP_STATES = ("timed_out", "failed")  # cancelled = deliberate stop, never alerted
 SWEEP_GRACE_S = int(E("FAIL_SWEEP_GRACE_S", "60"))  # let the wrapper hook win for ordinary fails
+FAIL_INBOX_WARN_S = int(E("FAIL_INBOX_WARN_S", "300"))  # warn about inbox files older than this
 PLANE_URL = E("PLANE_URL", "").rstrip("/")
 WORKSPACE = E("PLANE_WORKSPACE", "")
 COMMENT = E("FAIL_PLANE_COMMENT", "1") == "1"
@@ -47,6 +52,10 @@ PATTERNS = [  # first match wins; auth/allowlist are NEVER auto-requeued
                         r"resource not accessible|gh auth login|publickey", re.I)),
     ("dirty-repo", re.compile(r"uncommitted changes", re.I)),
     ("timeout", re.compile(r"^machinist: (state=timed_out|command exceeded timeout)", re.I | re.M)),
+    # MACH-62: a kernel OOM kill (cgroup memory.events oom_kill, the runner's own
+    # "out of memory in <command>, peak N GB" text, or the kernel's report) is a
+    # capacity problem, never a transient one, so it must not match below.
+    ("oom", re.compile(r"out of memory|oom[_-]?kill|memory\.events|killed process", re.I)),
     ("transient", re.compile(r"timed? ?out|timeout|connection (reset|refused)|temporar|"
                              r"\b50[234]\b|rate limit|ECONNRESET|EOF occurred|killed by signal", re.I)),
 ]
@@ -64,6 +73,12 @@ def db_run(run_id):
         r = con.execute("select * from runs where id=?", (run_id,)).fetchone(); con.close(); return r
     except Exception as e:
         log("db read failed:", e); return None
+
+def row_opt(r, key):
+    """r[key] when the runs column exists, else None (older DBs predate MACH-62's
+    error_class/peak_memory_bytes, and sqlite3.Row raises on a missing column)."""
+    try: return r[key]
+    except Exception: return None
 
 def plane_meta(job_id, key=None):
     best = None
@@ -91,6 +106,11 @@ def build_alert(run_id, rc, stage, tail, brief_text=""):
         "run_id": run_id, "job_id": job_id, "repository": E("MACHINIST_REPOSITORY") or (r and r["repository"]),
         "stage": stage, "exit_code": rc, "classification": cls,
         "auto_requeue_allowed": cls == "transient",
+        # MACH-62: the runner records the OOM class and the job's peak in the run
+        # row; None on older DBs that lack the columns.
+        "command": row_opt(r, "command"),
+        "error_class": row_opt(r, "error_class"),
+        "peak_memory_bytes": row_opt(r, "peak_memory_bytes"),
         "stderr_tail": tail, "plane": plane,
         "inspect": f"sqlite3 -readonly {DB} \"select state,exit_code,error,result from runs where id='{run_id}'\"",
     }
@@ -111,14 +131,33 @@ def cmd_hook(a):
     write_json(alert, f"{INBOX}/{alert['job_id'] or run_id}.json")
     log(f"fail-hook: {alert['classification']} stage={a.stage} rc={a.rc} -> {INBOX}")
 
+def oom_summary(alert):
+    """'out of memory in <command>, peak N GB' -- the MACH-62 OOM wording, same as the
+    runner's own failure text (runner/memory.go oomFailureMessage)."""
+    cmd = (alert.get("plane") or {}).get("command") or alert.get("command") or "the job"
+    text = f"out of memory in {cmd}"
+    peak = alert.get("peak_memory_bytes")
+    if peak:
+        try: text += f", peak {int(peak) / (1024 ** 3):.1f} GB"
+        except (TypeError, ValueError): pass
+    return text
+
 def plane_comment(alert):
     key = E("PLANE_API_KEY"); p = alert.get("plane")
     if not (COMMENT and key and PLANE_URL and WORKSPACE and p and p.get("issue_id")):
         return "skipped"
     last = "<br>".join(x.replace("&", "&amp;").replace("<", "&lt;") for x in alert["stderr_tail"][-8:])
-    retry = ("Transient: one automatic retry queued." if alert.get("requeue") else
-             "Not auto-requeued; needs a ticket/access fix, then re-label or re-submit.")
-    html = (f"<p><b>Machinist run failed</b>: <b>{alert['classification']}</b> at stage "
+    if alert["classification"] == "oom":
+        # MACH-62: name the command and the peak so the ticket points at the job's
+        # memory use; an OOM kill is a capacity problem, not a retryable one.
+        what = oom_summary(alert)
+        retry = ("Not auto-requeued: the job hit its memory cap; lower its memory use or raise the "
+                 "worker [memory] limits (memory.high/max).")
+    else:
+        what = alert["classification"]
+        retry = ("Transient: one automatic retry queued." if alert.get("requeue") else
+                 "Not auto-requeued; needs a ticket/access fix, then re-label or re-submit.")
+    html = (f"<p><b>Machinist run failed</b>: <b>{what}</b> at stage "
             f"<code>{alert['stage']}</code>, exit {alert['exit_code']}, job <code>{alert['job_id']}</code>.</p>"
             f"<pre>{last}</pre><p>{retry} Factory Alerts notified.</p>")
     url = f"{PLANE_URL}/api/v1/workspaces/{WORKSPACE}/projects/{p['project_id']}/issues/{p['issue_id']}/comments/"
@@ -138,9 +177,27 @@ def requeue(alert, st):
     st["requeued_issues"].append(p.get("issue_id"))
     return f"rc={r.returncode} {(r.stdout + r.stderr).strip()[-300:]}"
 
+def inbox_stale(mtime, now, max_age):
+    """Pure age check: an inbox file older than max_age seconds is stale (MACH-62)."""
+    return mtime < now - max_age
+
+def warn_stale_inbox():
+    """Warn about alerts still sitting in the inbox: the path unit may not have fired
+    (or a notify run died), and a stale alert means a ticket nobody commented on."""
+    now = time.time()
+    for f in sorted(glob.glob(f"{INBOX}/*.json")):
+        try: mtime = os.path.getmtime(f)
+        except OSError: continue
+        if inbox_stale(mtime, now, FAIL_INBOX_WARN_S):
+            log(f"notify: stale inbox alert {f} (older than {FAIL_INBOX_WARN_S}s); "
+                f"machinist-fail-notify.path may not have run")
+
 def cmd_notify(a):
     try: st = json.load(open(STATE))
     except Exception: st = {}
+    # The glob below is the whole inbox, so the notifier drains whatever is queued when it
+    # starts: a path unit that failed earlier (or a notify run that died mid-drain) loses
+    # nothing, the next start picks the file up.
     for f in sorted(glob.glob(f"{INBOX}/*.json")):
         try: alert = json.load(open(f))
         except Exception as e: log("bad alert", f, e); continue
@@ -150,6 +207,7 @@ def cmd_notify(a):
         log(f"notify: {os.path.basename(f)} class={alert['classification']} "
             f"plane={alert['plane_comment']} requeue={alert['requeue']}")
     write_json(st, STATE)
+    warn_stale_inbox()
 
 def run_stderr_tail(r):
     tail = []
@@ -175,6 +233,11 @@ def run_alert(r, stage=None):
                   "started_at": r["started_at"], "completed_at": r["completed_at"],
                   "duration_millis": r["duration_millis"], "worker_name": r["worker_name"],
                   "executor": r["executor"]})
+    # MACH-62: re-read the OOM fields from the row the sweep just fetched (build_alert
+    # already looked, this keeps the sweep's own row authoritative; None when absent).
+    alert["error_class"] = row_opt(r, "error_class") or alert.get("error_class")
+    alert["peak_memory_bytes"] = row_opt(r, "peak_memory_bytes") or alert.get("peak_memory_bytes")
+    if not alert.get("command"): alert["command"] = row_opt(r, "command")
     if alert["plane"]: alert["plane_key"] = alert["plane"].get("key")
     return alert
 
@@ -232,9 +295,14 @@ def cmd_dry(a):
           f"{'yes' if alert['plane'] else 'no ticket'}; requeue="
           f"{'eligible (flag ' + ('on' if REQUEUE_TRANSIENT else 'off') + ')' if alert['auto_requeue_allowed'] else 'never'}")
 
-ap = argparse.ArgumentParser(); sp = ap.add_subparsers(dest="cmd", required=True)
-h = sp.add_parser("hook"); h.add_argument("--rc", type=int, required=True); h.add_argument("--stage", required=True)
-h.add_argument("--stderr-file", required=True); h.add_argument("--brief")
-sp.add_parser("notify"); d = sp.add_parser("dry-run"); d.add_argument("--run-id", required=True)
-w = sp.add_parser("sweep"); w.add_argument("--backfill-run"); w.add_argument("--to-pending", action="store_true")
-a = ap.parse_args(); {"hook": cmd_hook, "notify": cmd_notify, "dry-run": cmd_dry, "sweep": cmd_sweep}[a.cmd](a)
+def main():
+    ap = argparse.ArgumentParser(); sp = ap.add_subparsers(dest="cmd", required=True)
+    h = sp.add_parser("hook"); h.add_argument("--rc", type=int, required=True); h.add_argument("--stage", required=True)
+    h.add_argument("--stderr-file", required=True); h.add_argument("--brief")
+    sp.add_parser("notify"); d = sp.add_parser("dry-run"); d.add_argument("--run-id", required=True)
+    w = sp.add_parser("sweep"); w.add_argument("--backfill-run"); w.add_argument("--to-pending", action="store_true")
+    a = ap.parse_args(); {"hook": cmd_hook, "notify": cmd_notify, "dry-run": cmd_dry, "sweep": cmd_sweep}[a.cmd](a)
+
+# Guarded so the module can be imported (tests) without running the CLI.
+if __name__ == "__main__":
+    main()

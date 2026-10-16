@@ -17,6 +17,18 @@ data_directory = "~/.machinist/worker"
 url = "http://127.0.0.1:7331"
 token_file = "~/.machinist/server/worker.token"
 
+# Per-job memory caps (MACH-62). Each job runs in its own cgroup scope, so a
+# runaway job is OOM-killed instead of the worker. Values use systemd size
+# syntax (K/M/G/T, binary: 1G = 1024^3) or plain bytes; "max", "none", "0"
+# disable a limit. Empty keys fall back to the defaults shown and high must not
+# exceed max. These caps are per job; the worker-level backstop lives in
+# deploy/systemd/machinist-worker.service.d/memory.conf (OOMPolicy=continue,
+# MemoryMax=12G, Delegate=yes).
+[memory]
+high = "8G"
+max = "10G"
+swap_max = "2G"
+
 # Executors read a prompt on stdin. Point command at your coding agent; keep
 # {{machinist.model}} as a complete --flag={{machinist.model}} argument to
 # expose model aliases.

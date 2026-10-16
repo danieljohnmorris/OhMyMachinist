@@ -67,14 +67,29 @@ type LiveEvents struct {
 }
 
 type Completion struct {
-	Artifacts        []string        `json:"artifacts,omitempty"`
-	PublicationError string          `json:"publication_error,omitempty"`
-	Skills           *RunSkills      `json:"skills,omitempty"`
-	InstanceID       string          `json:"instance_id"`
-	LeaseToken       string          `json:"lease_token"`
-	State            string          `json:"state"`
-	ExitCode         int             `json:"exit_code"`
-	Error            string          `json:"error,omitempty"`
-	Result           json.RawMessage `json:"result,omitempty"`
-	Events           string          `json:"events,omitempty"`
+	Artifacts        []string   `json:"artifacts,omitempty"`
+	PublicationError string     `json:"publication_error,omitempty"`
+	Skills           *RunSkills `json:"skills,omitempty"`
+	InstanceID       string     `json:"instance_id"`
+	LeaseToken       string     `json:"lease_token"`
+	State            string     `json:"state"`
+	ExitCode         int        `json:"exit_code"`
+	Error            string     `json:"error,omitempty"`
+	// ErrorClass classifies an infrastructure failure ("oom" for an
+	// out-of-memory kill) and PeakMemoryBytes is the job's peak memory when it
+	// was killed (MACH-62).
+	ErrorClass      string          `json:"error_class,omitempty"`
+	PeakMemoryBytes int64           `json:"peak_memory_bytes,omitempty"`
+	Result          json.RawMessage `json:"result,omitempty"`
+	Events          string          `json:"events,omitempty"`
+}
+
+// OOMReport tells the control plane that a worker died from an out-of-memory
+// kill while running a run, so the run is failed with the OOM class and never
+// re-leased into another lane (MACH-62).
+type OOMReport struct {
+	InstanceID      string `json:"instance_id"`
+	Name            string `json:"name,omitempty"`
+	PeakMemoryBytes int64  `json:"peak_memory_bytes,omitempty"`
+	Detail          string `json:"detail,omitempty"`
 }
