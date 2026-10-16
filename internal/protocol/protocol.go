@@ -66,6 +66,15 @@ type LiveEvents struct {
 	Events     string `json:"events"`
 }
 
+// LeaseRevoked acknowledges a revoked run lease (MACH-65). After the worker
+// kills the agent process group it reports where the lane's uncommitted work
+// was saved, so the location is recorded on the cancelled attempt.
+type LeaseRevoked struct {
+	InstanceID string `json:"instance_id"`
+	LeaseToken string `json:"lease_token"`
+	WIP        string `json:"wip,omitempty"`
+}
+
 type Completion struct {
 	Artifacts        []string        `json:"artifacts,omitempty"`
 	PublicationError string          `json:"publication_error,omitempty"`

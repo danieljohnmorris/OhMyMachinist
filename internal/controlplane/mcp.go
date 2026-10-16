@@ -61,7 +61,7 @@ type mcpTool struct {
 // mcpWriteTools names the tools that mutate state and therefore need a
 // write-scope token. Everything else is read scope.
 var mcpWriteTools = map[string]bool{
-	"queue_job": true, "cancel_job": true, "requeue_job": true, "set_setting": true,
+	"queue_job": true, "cancel_job": true, "requeue_job": true, "move_to_queue": true, "set_setting": true,
 	"install_skill": true, "update_skill": true, "pin_skill": true, "uninstall_skill": true,
 	"start_factory": true, "stop_factory": true, "set_job_cap": true, "set_lane_enabled": true,
 }
@@ -100,6 +100,7 @@ var mcpToolList = []mcpTool{
 	{Name: "requeue_job", Description: "Requeue (retry) a failed, blocked, interrupted or cancelled job. Set previous_process_stopped=true to confirm the prior process is stopped.", InputSchema: mcpSchema(map[string]any{
 		"job_id": map[string]any{"type": "string"}, "previous_process_stopped": map[string]any{"type": "boolean"},
 	}, "job_id")},
+	{Name: "move_to_queue", Description: "Stop a running or stalled job's current attempt, save the lane's uncommitted work, and requeue it as the next attempt on the same card. Returns the new attempt id; a repeated call returns the same id.", InputSchema: mcpSchema(map[string]any{"job_id": map[string]any{"type": "string"}}, "job_id")},
 	{Name: "get_setting", Description: "Read one stored setting by key.", InputSchema: mcpSchema(map[string]any{"key": map[string]any{"type": "string"}}, "key")},
 	{Name: "set_setting", Description: "Write one settings key/value pair.", InputSchema: mcpSchema(map[string]any{
 		"key": map[string]any{"type": "string"}, "value": map[string]any{"type": "string"},
@@ -423,6 +424,24 @@ func (s *Server) invokeMCPTool(ctx context.Context, identity TokenIdentity, name
 			log.Printf("audit %s: %v", action, err)
 		}
 		return map[string]string{"status": "accepted", "job_id": input.JobID, "run_id": runID}, nil
+	case "move_to_queue":
+		var input struct {
+			JobID string `json:"job_id"`
+		}
+		if err := args(&input); err != nil {
+			return nil, err
+		}
+		newJobID, err := s.store.MoveToQueue(ctx, input.JobID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, errors.New("job not found")
+		}
+		if err != nil {
+			return nil, err
+		}
+		if err := s.store.RecordAudit(ctx, identity, "jobs.move_to_queue", input.JobID+" -> "+newJobID); err != nil {
+			log.Printf("audit move_to_queue: %v", err)
+		}
+		return map[string]string{"job_id": newJobID}, nil
 	case "list_skills":
 		views, err := s.listSkills(ctx)
 		if err != nil {

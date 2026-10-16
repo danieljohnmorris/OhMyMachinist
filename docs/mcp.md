@@ -50,6 +50,7 @@ scope.
 | `queue_job` | write | `repository` (required), `command?`, `workflow?`, `title?`, `spec?`, `source_url?`, `prompt?`, `model?`, `project?` | Queue a job; returns the job id. |
 | `cancel_job` | write | `job_id` | Cancel the job and its latest run, or a queued job that has no runs yet. |
 | `requeue_job` | write | `job_id`, `previous_process_stopped?` | Retry a failed/blocked/interrupted/cancelled job. |
+| `move_to_queue` | write | `job_id` | Stop a running or stalled job's current attempt, save the lane's uncommitted work, and requeue it as the next attempt on the same card. Returns the new attempt id; a repeated call returns the same id. |
 | `set_setting` | write | `key`, `value` | Write one settings key/value pair. |
 | `list_skills` | read | — | Installed skills with versions and `used_by` references. |
 | `get_skill` | read | `name` | One installed skill with every version. |

@@ -89,6 +89,7 @@ type Run struct {
 	Model          string              `json:"model,omitempty"`
 	State          string              `json:"state"`
 	WorkerName     string              `json:"worker_name,omitempty"`
+	WIP            string              `json:"wip,omitempty"`
 	ExitCode       *int                `json:"exit_code,omitempty"`
 	Error          string              `json:"error,omitempty"`
 	StartedAt      time.Time           `json:"started_at,omitempty"`
@@ -217,7 +218,7 @@ func OpenStore(path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) initialize(ctx context.Context) error {
-	const schemaVersion = 10
+	const schemaVersion = 11
 	var version int
 	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		return fmt.Errorf("read database schema version: %w", err)
@@ -254,7 +255,7 @@ CREATE TABLE IF NOT EXISTS runs (
  id TEXT PRIMARY KEY, job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id), command TEXT NOT NULL, command_hash TEXT NOT NULL,
  executor TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', repository TEXT NOT NULL, rendered_prompt TEXT NOT NULL,
  timeout_ms INTEGER NOT NULL, state TEXT NOT NULL, worker_instance TEXT, worker_name TEXT NOT NULL DEFAULT '',
- lease_token TEXT, lease_expires_at INTEGER, exit_code INTEGER, error TEXT, result TEXT, events TEXT,
+ lease_token TEXT, lease_expires_at INTEGER, exit_code INTEGER, error TEXT, result TEXT, events TEXT, wip TEXT NOT NULL DEFAULT '',
  started_at TEXT, completed_at TEXT, duration_millis INTEGER, token_usage INTEGER);
 CREATE INDEX IF NOT EXISTS runs_dispatch ON runs(state, job_id);
 CREATE TABLE IF NOT EXISTS workers (instance_id TEXT PRIMARY KEY, name TEXT NOT NULL, last_seen_at TEXT NOT NULL);
@@ -345,7 +346,26 @@ END;`
 			return fmt.Errorf("upgrade database schema to version 10: %w", err)
 		}
 	}
-	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+jobMetadataSchema+planeSchema+"PRAGMA user_version=10;")
+	if version < 11 {
+		if err := s.addRunWIP(ctx); err != nil {
+			return fmt.Errorf("upgrade database schema to version 11: %w", err)
+		}
+	}
+	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+jobMetadataSchema+planeSchema+"PRAGMA user_version=11;")
+	return err
+}
+
+// addRunWIP records where a cancelled attempt's uncommitted lane work was
+// saved (MACH-65). Existing rows keep an empty value.
+func (s *Store) addRunWIP(ctx context.Context) error {
+	var columns int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name='wip'`).Scan(&columns); err != nil {
+		return err
+	}
+	if columns > 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `ALTER TABLE runs ADD COLUMN wip TEXT NOT NULL DEFAULT ''`)
 	return err
 }
 
@@ -1540,7 +1560,7 @@ func (s *Store) RunOutput(ctx context.Context, runID string) (RunOutput, error) 
 // jobID restricts the result to that job.
 func (s *Store) listJobs(ctx context.Context, jobID string) ([]Job, error) {
 	query := `SELECT j.id,j.title,j.prompt,j.repository,j.github_issue_title,j.command,j.trigger_identity,j.occurrence_key,j.trigger_subject,j.state,j.previous_job_id,j.attempt,COALESCE(j.superseded_by,''),j.issue_key,j.resolution_kind,j.resolution_detail,COALESCE(j.resolved_at,''),j.created_at,j.updated_at,
-COALESCE(r.id,''),COALESCE(r.command,''),COALESCE(r.executor,''),COALESCE(r.model,''),COALESCE(r.state,''),COALESCE(NULLIF(r.worker_name,''),w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,''),r.duration_millis,r.token_usage,COALESCE(r.skills,''),a.step,COALESCE(a.outcome,''),COALESCE(NULLIF(a.summary,''),CASE WHEN json_valid(r.result) THEN json_extract(r.result,'$.final_message') END,'')
+COALESCE(r.id,''),COALESCE(r.command,''),COALESCE(r.executor,''),COALESCE(r.model,''),COALESCE(r.state,''),COALESCE(NULLIF(r.worker_name,''),w.name,''),COALESCE(r.wip,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,''),r.duration_millis,r.token_usage,COALESCE(r.skills,''),a.step,COALESCE(a.outcome,''),COALESCE(NULLIF(a.summary,''),CASE WHEN json_valid(r.result) THEN json_extract(r.result,'$.final_message') END,'')
 FROM jobs j LEFT JOIN runs r ON r.job_id=j.id LEFT JOIN workers w ON w.instance_id=r.worker_instance LEFT JOIN workflow_attempts a ON a.run_id=r.id`
 	args := []any{}
 	if jobID != "" {
@@ -1560,7 +1580,7 @@ FROM jobs j LEFT JOIN runs r ON r.job_id=j.id LEFT JOIN workers w ON w.instance_
 		var created, updated, started, completed string
 		var resolutionKind, resolutionDetail, resolvedAt, skillsRaw string
 		if err := rows.Scan(&job.ID, &job.Title, &job.Prompt, &job.Repository, &job.GitHubIssueTitle, &job.Command, &job.TriggerID, &job.OccurrenceKey, &job.TriggerSubject, &job.State, &job.PreviousJobID, &job.Attempt, &job.SupersededBy, &job.IssueKey, &resolutionKind, &resolutionDetail, &resolvedAt, &created, &updated,
-			&run.ID, &run.Command, &run.Executor, &run.Model, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &started, &completed, &run.DurationMillis, &run.TokenUsage, &skillsRaw, &run.Step, &run.Outcome, &run.Summary); err != nil {
+			&run.ID, &run.Command, &run.Executor, &run.Model, &run.State, &run.WorkerName, &run.WIP, &run.ExitCode, &run.Error, &started, &completed, &run.DurationMillis, &run.TokenUsage, &skillsRaw, &run.Step, &run.Outcome, &run.Summary); err != nil {
 			return nil, err
 		}
 		run.Skills = decodeRunSkills(skillsRaw)
@@ -1629,9 +1649,9 @@ func (s *Store) GetJob(ctx context.Context, jobID string) (Job, error) {
 func (s *Store) GetRun(ctx context.Context, runID string) (Run, error) {
 	var run Run
 	var started, completed, skillsRaw string
-	err := s.db.QueryRowContext(ctx, `SELECT r.id,r.command,r.executor,r.model,r.state,COALESCE(NULLIF(r.worker_name,''),w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,''),r.duration_millis,r.token_usage,COALESCE(r.skills,''),a.step,COALESCE(a.outcome,''),COALESCE(NULLIF(a.summary,''),CASE WHEN json_valid(r.result) THEN json_extract(r.result,'$.final_message') END,'')
+	err := s.db.QueryRowContext(ctx, `SELECT r.id,r.command,r.executor,r.model,r.state,COALESCE(NULLIF(r.worker_name,''),w.name,''),COALESCE(r.wip,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,''),r.duration_millis,r.token_usage,COALESCE(r.skills,''),a.step,COALESCE(a.outcome,''),COALESCE(NULLIF(a.summary,''),CASE WHEN json_valid(r.result) THEN json_extract(r.result,'$.final_message') END,'')
 FROM runs r LEFT JOIN workers w ON w.instance_id=r.worker_instance LEFT JOIN workflow_attempts a ON a.run_id=r.id WHERE r.id=?`, runID).
-		Scan(&run.ID, &run.Command, &run.Executor, &run.Model, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &started, &completed, &run.DurationMillis, &run.TokenUsage, &skillsRaw, &run.Step, &run.Outcome, &run.Summary)
+		Scan(&run.ID, &run.Command, &run.Executor, &run.Model, &run.State, &run.WorkerName, &run.WIP, &run.ExitCode, &run.Error, &started, &completed, &run.DurationMillis, &run.TokenUsage, &skillsRaw, &run.Step, &run.Outcome, &run.Summary)
 	if err != nil {
 		return Run{}, err
 	}

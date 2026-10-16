@@ -32,6 +32,10 @@ type Worker struct {
 	// pausedUntil stops this lane claiming more runs after a checkout it could
 	// not clean, so one broken lane cannot drain the whole queue (MACH-59).
 	pausedUntil time.Time
+	// leaseRevoked records that a heartbeat of the current run was refused
+	// because the lease moved on (MACH-65): the attempt was cancelled by a
+	// move to queue and the agent process tree has been killed.
+	leaseRevoked bool
 }
 
 const heartbeatInterval = 10 * time.Second
@@ -143,6 +147,7 @@ func (w *Worker) clearLaneBusy() {
 }
 
 func (w *Worker) executeWithHeartbeats(ctx context.Context, spec protocol.RunSpec) protocol.Completion {
+	w.leaseRevoked = false
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go w.streamLiveEvents(ctx, spec)
@@ -150,7 +155,36 @@ func (w *Worker) executeWithHeartbeats(ctx context.Context, spec protocol.RunSpe
 	if execute == nil {
 		execute = w.execute
 	}
-	return withHeartbeats(ctx, w, spec, "", func() protocol.Completion { return execute(ctx, spec) }, cancel)
+	completion := withHeartbeats(ctx, w, spec, "", func() protocol.Completion { return execute(ctx, spec) }, cancel)
+	if w.leaseRevoked {
+		// MACH-65: the lease was revoked (a move to queue). The agent process
+		// tree is already killed; save the lane's uncommitted work and report
+		// where it was saved so it is recorded on the cancelled attempt.
+		w.acknowledgeRevocation(spec)
+	}
+	return completion
+}
+
+// acknowledgeRevocation saves the lane checkout's uncommitted work (tracked
+// and untracked) outside the published run artifacts and reports the location
+// to the control plane. Both steps are best effort: the attempt is already
+// cancelled server-side, so a failure here can only lose the record, never
+// block the requeue.
+func (w *Worker) acknowledgeRevocation(spec protocol.RunSpec) {
+	wip, err := saveLaneWIP(w.config, spec.Repository)
+	if err != nil {
+		fmt.Fprintf(w.stderr, "machinist: run %s: save lane work in progress: %v\n", spec.ID, err)
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), completionReportTimeout)
+	defer cancel()
+	err = w.client.Post(ctx, "/api/v1/runs/"+url.PathEscape(spec.ID)+"/revoked", protocol.LeaseRevoked{
+		InstanceID: w.instanceID,
+		LeaseToken: spec.LeaseToken,
+		WIP:        wip,
+	}, nil)
+	if err != nil {
+		fmt.Fprintf(w.stderr, "machinist: run %s: report revoked lease: %v\n", spec.ID, err)
+	}
 }
 
 // liveEventsInterval controls how often the worker pushes new event log lines
@@ -269,7 +303,14 @@ func withHeartbeats[T any](ctx context.Context, w *Worker, spec protocol.RunSpec
 			if err := w.heartbeat(ctx, spec); err != nil {
 				fmt.Fprintf(w.stderr, "machinist: heartbeat run %s%s: %v\n", spec.ID, phase, err)
 				var responseErr *ResponseError
-				if spec.Workflow && len(stop) > 0 && errors.As(err, &responseErr) && (responseErr.Status == 409 || responseErr.Status == 404) {
+				// A 409 or 404 means the lease is gone (MACH-65): the control
+				// plane released it — a move to queue — or the run moved on.
+				// Kill the agent process tree via the cancelled context and
+				// stop heartbeating; the completion report is a no-op then.
+				if len(stop) > 0 && errors.As(err, &responseErr) && (responseErr.Status == 409 || responseErr.Status == 404) {
+					if phase == "" {
+						w.leaseRevoked = true
+					}
 					stop[0]()
 				}
 			}

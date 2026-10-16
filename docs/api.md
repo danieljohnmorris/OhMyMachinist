@@ -83,6 +83,7 @@ every attempt, including failed, timed-out and cancelled runs.
 | --- | --- | --- |
 | POST | `/api/v1/jobs` | Queue a job. Body: `repository` plus either `command` or `workflow`; optional `title`, `spec`, `source_url`, `prompt`, `model`, `project`. Returns `{"id": "job_…"}`. |
 | POST | `/api/v1/jobs/{id}/{action}` | Workflow actions: `cancel`, `retry` (requeue), `approve`, `request_changes`. Body may carry `run_id`, `feedback`, `previous_process_stopped`. |
+| POST | `/api/v1/jobs/{id}/move-to-queue` | Stop a running or stalled job's current attempt and requeue it as the next attempt on the same card. Returns `{"job_id": "job_…"}` (the new attempt id); a repeated call returns the same id. The attempt is cancelled with the reason `moved to queue`, the lane's uncommitted work (tracked and untracked) is saved by the worker that held the lease and recorded on the cancelled attempt, and the new attempt carries the prior transcript and waits at the back of the queue. |
 | DELETE | `/api/v1/jobs/{id}` | Delete a terminal job. |
 | PUT | `/api/v1/settings/{key}` | Write one setting. Body: `{"value": "…"}`. The reserved `factory.*` keys are refused; use the factory endpoints below. |
 | POST | `/api/v1/factory/stop` | Stop dispatching new jobs. Body: `{"mode": "drain"|"cancel", "reason": "…"}`. `drain` lets the running job finish; `cancel` stops it now. Workers stay connected. |
@@ -130,9 +131,12 @@ changed.
 ### Worker endpoints (worker token)
 
 `POST /api/v1/workers/poll`, `POST /api/v1/runs/{id}/heartbeat`,
-`POST /api/v1/runs/{id}/complete`, `POST /api/v1/runs/{id}/events`,
-`PUT /api/v1/runs/{id}/artifacts`. These are the internal worker protocol and
-are not part of the documented bot API.
+`POST /api/v1/runs/{id}/revoked`, `POST /api/v1/runs/{id}/complete`,
+`POST /api/v1/runs/{id}/events`, `PUT /api/v1/runs/{id}/artifacts`. These are
+the internal worker protocol and are not part of the documented bot API.
+`POST /api/v1/runs/{id}/revoked` is how a worker reports where it saved the
+lane's uncommitted work after its lease was revoked by a move to queue
+(MACH-65); the location is recorded on the cancelled attempt.
 
 ## Example
 
