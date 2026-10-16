@@ -122,7 +122,7 @@ func enqueueStep(ctx context.Context, tx *sql.Tx, job, repository string, index 
 		state = "awaiting_approval"
 	}
 	c := step.Command
-	if _, err = tx.ExecContext(ctx, `INSERT INTO runs(id,job_id,command,command_hash,executor,model,repository,rendered_prompt,timeout_ms,state) VALUES(?,?,?,?,?,?,?,?,?,?)`, id, job, c.Name, c.Hash, c.Executor, c.Model, repository, c.Prompt, c.Timeout.Milliseconds(), state); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO runs(id,job_id,command,command_hash,executor,model,agent,provider,provider_url,provider_key_env,repository,rendered_prompt,timeout_ms,state) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, job, c.Name, c.Hash, c.Executor, c.Model, c.Agent, c.Provider, c.ProviderURL, c.KeyEnv, repository, c.Prompt, c.Timeout.Milliseconds(), state); err != nil {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO workflow_attempts(run_id,step) VALUES(?,?)`, id, index); err != nil {

@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Example Machinist executor wrapper for the omp coding agent.
+#
+# Machinist resolves the agent, model and provider for every run and passes
+# them in the environment, so this wrapper hardcodes no model. Configure
+# [providers.*], [models.*] and [defaults] in config.toml instead.
+#
+# Environment provided by Machinist:
+#   MACHINIST_AGENT             resolved agent name
+#   MACHINIST_MODEL             resolved provider model id
+#   MACHINIST_PROVIDER          resolved provider name
+#   MACHINIST_PROVIDER_URL      resolved provider base URL
+#   MACHINIST_PROVIDER_KEY_ENV  name of the env var holding the API key
+set -euo pipefail
+
+if [[ -z "${MACHINIST_MODEL:-}" ]]; then
+  echo "omp-agent: MACHINIST_MODEL is not set; configure a model in config.toml" >&2
+  exit 2
+fi
+if [[ -z "${MACHINIST_PROVIDER_URL:-}" ]]; then
+  echo "omp-agent: MACHINIST_PROVIDER_URL is not set; configure a provider in config.toml" >&2
+  exit 2
+fi
+
+# The API key is read from the env var name Machinist resolved. The value is
+# never baked into a script.
+if [[ -n "${MACHINIST_PROVIDER_KEY_ENV:-}" && -z "${!MACHINIST_PROVIDER_KEY_ENV:-}" ]]; then
+  echo "omp-agent: ${MACHINIST_PROVIDER_KEY_ENV} is not set" >&2
+  exit 2
+fi
+
+# --sandbox keeps the agent inside the worker lane checkout. The prompt arrives
+# on stdin, as for the other Machinist executors.
+exec omp \
+  --model "$MACHINIST_MODEL" \
+  --base-url "$MACHINIST_PROVIDER_URL" \
+  --sandbox danger-full-access \
+  -

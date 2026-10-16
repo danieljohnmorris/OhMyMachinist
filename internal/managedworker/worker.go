@@ -415,14 +415,20 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 		completion.Error = err.Error()
 		return completion
 	}
-	command, err := w.config.ResolveCommandModel(config.ResolvedCommand{
+	command, err := w.config.ApplyExecutorSelection(config.ResolvedCommand{
 		Name:       spec.Command,
 		Executor:   spec.Executor,
 		Prompt:     spec.RenderedPrompt,
 		Timeout:    time.Duration(spec.TimeoutMillis) * time.Millisecond,
 		Definition: "control-plane",
 		Hash:       spec.CommandHash,
-	}, spec.Model)
+	}, config.ExecutorSelection{
+		Agent:       spec.Agent,
+		Model:       spec.Model,
+		Provider:    spec.Provider,
+		ProviderURL: spec.ProviderURL,
+		KeyEnv:      spec.ProviderKeyEnv,
+	})
 	if err != nil {
 		completion.Error = err.Error()
 		return completion

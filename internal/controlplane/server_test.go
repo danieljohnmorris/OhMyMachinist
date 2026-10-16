@@ -996,3 +996,129 @@ func TestServerCancelsPlainQueuedJobOverHTTP(t *testing.T) {
 		t.Fatalf("second cancel status = %d", recorder.Code)
 	}
 }
+
+func TestSubmitResolvesConfiguredModelForProject(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "plan.md"), []byte("Plan this request:\n{{machinist.prompt}}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	definitionPath := filepath.Join(directory, "config.toml")
+	definition := `[commands.plan]
+executor = "test"
+prompt_file = "plan.md"
+timeout = "1m"
+
+[providers.sparks]
+kind = "openai-compatible"
+base_url = "http://gpu.example:8000/v1"
+api_key_env = "SPARKS_API_KEY"
+
+[providers.cloud]
+kind = "anthropic"
+base_url = "https://api.example.test"
+api_key_env = "CLOUD_API_KEY"
+
+[models.local-default]
+provider = "sparks"
+id = "deepseek-v4.1-flash"
+
+[models.cloud-large]
+provider = "cloud"
+id = "claude-large"
+
+[defaults]
+agent = "omp"
+model = "local-default"
+
+[projects.MACH]
+model = "cloud-large"
+`
+	if err := os.WriteFile(definitionPath, []byte(definition), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := openTestStore(t, filepath.Join(directory, "machinist.db"))
+	server, err := NewServer(store, definitionPath, "secret", 0, config.AuthTokens)
+	if err != nil {
+		t.Fatal(err)
+	}
+	webServer := httptest.NewServer(server.Handler())
+	defer webServer.Close()
+
+	poll := postJSON(t, webServer.URL+"/api/v1/workers/poll", map[string]any{"instance_id": "worker-a", "name": "test-worker", "executors": []string{"test"}, "repositories": []string{"machinist"}}, map[string]string{"Authorization": "Bearer secret"})
+	poll.Body.Close()
+
+	status := getStatus(t, webServer.URL)
+	headers := map[string]string{"Origin": webServer.URL, "X-Machinist-CSRF": status.CSRFToken, "Sec-Fetch-Site": "same-origin"}
+	created := postJSON(t, webServer.URL+"/api/v1/jobs", map[string]string{"prompt": "Work locally", "repository": "machinist", "command": "plan", "project": "MACH"}, headers)
+	if created.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(created.Body)
+		t.Fatalf("create status = %d: %s", created.StatusCode, body)
+	}
+	created.Body.Close()
+
+	status = getStatus(t, webServer.URL)
+	if len(status.Jobs) != 1 || len(status.Jobs[0].Runs) != 1 {
+		t.Fatalf("jobs = %#v", status.Jobs)
+	}
+	run := status.Jobs[0].Runs[0]
+	if run.Agent != "omp" || run.Provider != "cloud" || run.Model != "claude-large" {
+		t.Fatalf("run selection = %#v", run)
+	}
+}
+
+func TestSubmitWithLabelOverridesConfiguredModel(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "plan.md"), []byte("Plan this request:\n{{machinist.prompt}}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	definitionPath := filepath.Join(directory, "config.toml")
+	definition := `[commands.plan]
+executor = "test"
+prompt_file = "plan.md"
+timeout = "1m"
+
+[providers.sparks]
+kind = "openai-compatible"
+base_url = "http://gpu.example:8000/v1"
+api_key_env = "SPARKS_API_KEY"
+
+[models.local-default]
+provider = "sparks"
+id = "deepseek-v4.1-flash"
+
+[models.fast]
+provider = "sparks"
+id = "fast-v1"
+
+[defaults]
+agent = "omp"
+model = "local-default"
+`
+	if err := os.WriteFile(definitionPath, []byte(definition), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := openTestStore(t, filepath.Join(directory, "machinist.db"))
+	server, err := NewServer(store, definitionPath, "secret", 0, config.AuthTokens)
+	if err != nil {
+		t.Fatal(err)
+	}
+	webServer := httptest.NewServer(server.Handler())
+	defer webServer.Close()
+
+	poll := postJSON(t, webServer.URL+"/api/v1/workers/poll", map[string]any{"instance_id": "worker-a", "name": "test-worker", "executors": []string{"test"}, "repositories": []string{"machinist"}}, map[string]string{"Authorization": "Bearer secret"})
+	poll.Body.Close()
+
+	status := getStatus(t, webServer.URL)
+	headers := map[string]string{"Origin": webServer.URL, "X-Machinist-CSRF": status.CSRFToken, "Sec-Fetch-Site": "same-origin"}
+	created := postJSON(t, webServer.URL+"/api/v1/jobs", map[string]any{"prompt": "Work locally", "repository": "machinist", "command": "plan", "labels": []string{"model:fast"}}, headers)
+	if created.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(created.Body)
+		t.Fatalf("create status = %d: %s", created.StatusCode, body)
+	}
+	created.Body.Close()
+
+	status = getStatus(t, webServer.URL)
+	if len(status.Jobs) != 1 || len(status.Jobs[0].Runs) != 1 || status.Jobs[0].Runs[0].Model != "fast-v1" {
+		t.Fatalf("jobs = %#v", status.Jobs)
+	}
+}

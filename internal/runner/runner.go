@@ -205,6 +205,15 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	command := exec.Command(executorCommand[0], executorCommand[1:]...)
 	command.Dir = repository
 	command.Env = append(sanitizedEnvironment(os.Environ()), "MACHINIST_RUN_ID="+runID, "MACHINIST_REPOSITORY="+repository, tokenUsageEnvironment+"="+tokenUsagePath)
+	// Every executor receives the resolved agent, model and provider so wrapper
+	// scripts never hardcode them.
+	command.Env = append(command.Env,
+		"MACHINIST_AGENT="+options.Command.Agent,
+		"MACHINIST_MODEL="+options.Command.Model,
+		"MACHINIST_PROVIDER="+options.Command.Provider,
+		"MACHINIST_PROVIDER_URL="+options.Command.ProviderURL,
+		"MACHINIST_PROVIDER_KEY_ENV="+options.Command.KeyEnv,
+	)
 	if options.Command.Timeout > 0 {
 		// MACH-61: trusted post-agent steps (the built-in PR review) budget
 		// their own time against the remaining job timeout.
@@ -830,7 +839,7 @@ func sanitizedEnvironment(environ []string) []string {
 	clean := make([]string, 0, len(environ))
 	for _, entry := range environ {
 		name, _, _ := strings.Cut(entry, "=")
-		if isRepositoryGitEnvironment(name) || name == "MACHINIST_STEP_RESULT_PATH" || name == "MACHINIST_JOB_ID" || name == "MACHINIST_OUTPUT_DIR" || name == "MACHINIST_INPUT_DIR" || name == "MACHINIST_SCRATCH_DIR" || name == "MACHINIST_REVISION_PATH" || name == "MACHINIST_JOB_TIMEOUT_SECONDS" || name == "MACHINIST_JOB_STARTED_EPOCH" {
+		if isRepositoryGitEnvironment(name) || name == "MACHINIST_STEP_RESULT_PATH" || name == "MACHINIST_JOB_ID" || name == "MACHINIST_OUTPUT_DIR" || name == "MACHINIST_INPUT_DIR" || name == "MACHINIST_SCRATCH_DIR" || name == "MACHINIST_REVISION_PATH" || name == "MACHINIST_JOB_TIMEOUT_SECONDS" || name == "MACHINIST_JOB_STARTED_EPOCH" || name == "MACHINIST_AGENT" || name == "MACHINIST_MODEL" || name == "MACHINIST_PROVIDER" || name == "MACHINIST_PROVIDER_URL" || name == "MACHINIST_PROVIDER_KEY_ENV" {
 			continue
 		}
 		clean = append(clean, entry)

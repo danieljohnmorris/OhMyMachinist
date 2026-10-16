@@ -84,6 +84,9 @@ type submitRequest struct {
 	Command    string `json:"command"`
 	Model      string `json:"model"`
 	Project    string `json:"project"`
+	// Labels carries intake labels (e.g. "model:local-default") that may
+	// override the configured agent and model.
+	Labels []string `json:"labels"`
 }
 
 type commandDefinitionResponse struct {
@@ -543,6 +546,18 @@ func (s *Server) queueJob(ctx context.Context, input submitRequest, identity Tok
 		if err != nil {
 			return bad(err)
 		}
+		for index := range steps {
+			steps[index].Command, err = definition.ResolveCommandSelection(steps[index].Command, config.SelectionInput{
+				JobType:   steps[index].Command.Name,
+				Project:   project,
+				Executor:  steps[index].Command.Executor,
+				Requested: input.Model,
+				Labels:    input.Labels,
+			})
+			if err != nil {
+				return bad(err)
+			}
+		}
 		id, err := s.store.CreateTaskJob(ctx, task, input.Repository, input.Workflow, project, steps)
 		if err != nil {
 			return "", err
@@ -566,7 +581,20 @@ func (s *Server) queueJob(ctx context.Context, input submitRequest, identity Tok
 	if err != nil {
 		return bad(err)
 	}
-	command.Model = input.Model
+	definition, err := config.LoadDefinitions(s.definitionPath)
+	if err != nil {
+		return bad(err)
+	}
+	command, err = definition.ResolveCommandSelection(command, config.SelectionInput{
+		JobType:   input.Command,
+		Project:   project,
+		Executor:  command.Executor,
+		Requested: input.Model,
+		Labels:    input.Labels,
+	})
+	if err != nil {
+		return bad(err)
+	}
 	jobID, err := s.store.CreateJobWithOptions(ctx, input.Prompt, input.Repository, input.Command, command, CreateJobOptions{Title: input.Title, Project: project})
 	if err != nil {
 		return "", err

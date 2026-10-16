@@ -301,16 +301,18 @@ func TestResolveCommandModelUsesAliasAndLeavesDefaultOptional(t *testing.T) {
 }
 
 func TestResolveCommandModelRejectsUnsupportedSelection(t *testing.T) {
-	for name, executor := range map[string]Executor{
-		"missing placeholder": {Command: []string{"agent", "run"}},
-		"unknown alias":       {Command: []string{"agent", "--model=" + modelParameter}, Models: map[string]string{"fast": "fast-v1"}},
-	} {
-		t.Run(name, func(t *testing.T) {
-			_, err := (Worker{Executors: map[string]Executor{"test": executor}}).ResolveCommandModel(ResolvedCommand{Executor: "test"}, "other")
-			if err == nil {
-				t.Fatal("expected model selection error")
-			}
-		})
+	// A model is always deliverable through MACHINIST_MODEL, so an executor
+	// without the {{machinist.model}} placeholder still accepts it; only an
+	// alias that is not in a non-empty executor model map is rejected.
+	if _, err := (Worker{Executors: map[string]Executor{"test": {Command: []string{"agent", "run"}}}}).ResolveCommandModel(ResolvedCommand{Executor: "test"}, "other"); err != nil {
+		t.Fatalf("env-only model selection error = %v", err)
+	}
+	_, err := (Worker{Executors: map[string]Executor{"test": {
+		Command: []string{"agent", "--model=" + modelParameter},
+		Models:  map[string]string{"fast": "fast-v1"},
+	}}}).ResolveCommandModel(ResolvedCommand{Executor: "test"}, "other")
+	if err == nil {
+		t.Fatal("expected unknown alias error")
 	}
 }
 
@@ -496,5 +498,113 @@ func TestLoadConfigRejectsRemovedShepherdSchedules(t *testing.T) {
 	_, err := LoadDefinitions(path)
 	if err == nil || !strings.Contains(err.Error(), "shepherd schedules were removed") {
 		t.Fatalf("error = %v, want removed shepherd schedule guidance", err)
+	}
+}
+
+func TestResolveSelectionAppliesOverridesByPriority(t *testing.T) {
+	definition := Config{
+		Providers: map[string]Provider{
+			"sparks": {Kind: ProviderOpenAICompatible, BaseURL: "http://gpu.example:8000/v1", APIKeyEnv: "SPARKS_API_KEY"},
+			"cloud":  {Kind: ProviderAnthropic, BaseURL: "https://api.example.test", APIKeyEnv: "CLOUD_API_KEY"},
+		},
+		Models: map[string]Model{
+			"local-default": {Provider: "sparks", ID: "deepseek-v4.1-flash"},
+			"cloud-large":   {Provider: "cloud", ID: "claude-large"},
+			"fast":          {Provider: "sparks", ID: "fast-v1"},
+		},
+		Defaults: Selection{Agent: "omp", Model: "local-default"},
+		Projects: map[string]Selection{
+			"MACH":    {Model: "cloud-large"},
+			"ARCHIVE": {Agent: "codex"},
+		},
+		JobTypes: map[string]Selection{"build-pr": {Model: "fast"}},
+	}
+	stage := Selection{Model: "cloud-large"}
+	cases := []struct {
+		name  string
+		input SelectionInput
+		want  ExecutorSelection
+	}{
+		{
+			name:  "global default",
+			input: SelectionInput{JobType: "plan", Project: "OTHER"},
+			want:  ExecutorSelection{Agent: "omp", Model: "deepseek-v4.1-flash", Provider: "sparks", ProviderURL: "http://gpu.example:8000/v1", KeyEnv: "SPARKS_API_KEY"},
+		},
+		{
+			name:  "project overrides global",
+			input: SelectionInput{JobType: "plan", Project: "MACH"},
+			want:  ExecutorSelection{Agent: "omp", Model: "claude-large", Provider: "cloud", ProviderURL: "https://api.example.test", KeyEnv: "CLOUD_API_KEY"},
+		},
+		{
+			name:  "project agent override keeps global model",
+			input: SelectionInput{JobType: "plan", Project: "ARCHIVE"},
+			want:  ExecutorSelection{Agent: "codex", Model: "deepseek-v4.1-flash", Provider: "sparks", ProviderURL: "http://gpu.example:8000/v1", KeyEnv: "SPARKS_API_KEY"},
+		},
+		{
+			name:  "job type overrides project",
+			input: SelectionInput{JobType: "build-pr", Project: "MACH"},
+			want:  ExecutorSelection{Agent: "omp", Model: "fast-v1", Provider: "sparks", ProviderURL: "http://gpu.example:8000/v1", KeyEnv: "SPARKS_API_KEY"},
+		},
+		{
+			name:  "stage overrides job type",
+			input: SelectionInput{JobType: "build-pr", Project: "MACH", Stage: &stage},
+			want:  ExecutorSelection{Agent: "omp", Model: "claude-large", Provider: "cloud", ProviderURL: "https://api.example.test", KeyEnv: "CLOUD_API_KEY"},
+		},
+		{
+			name:  "label overrides stage",
+			input: SelectionInput{JobType: "build-pr", Project: "MACH", Stage: &stage, Labels: []string{"model:local-default"}},
+			want:  ExecutorSelection{Agent: "omp", Model: "deepseek-v4.1-flash", Provider: "sparks", ProviderURL: "http://gpu.example:8000/v1", KeyEnv: "SPARKS_API_KEY"},
+		},
+		{
+			name:  "agent label overrides",
+			input: SelectionInput{JobType: "plan", Project: "OTHER", Labels: []string{"agent:codex"}},
+			want:  ExecutorSelection{Agent: "codex", Model: "deepseek-v4.1-flash", Provider: "sparks", ProviderURL: "http://gpu.example:8000/v1", KeyEnv: "SPARKS_API_KEY"},
+		},
+		{
+			name:  "explicit request overrides label",
+			input: SelectionInput{JobType: "plan", Project: "OTHER", Labels: []string{"model:local-default"}, Requested: "cloud-large"},
+			want:  ExecutorSelection{Agent: "omp", Model: "claude-large", Provider: "cloud", ProviderURL: "https://api.example.test", KeyEnv: "CLOUD_API_KEY"},
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			got, err := definition.ResolveSelection(testCase.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != testCase.want {
+				t.Fatalf("selection = %#v, want %#v", got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestResolveSelectionPassesThroughWithoutModelRegistry(t *testing.T) {
+	selection, err := (Config{}).ResolveSelection(SelectionInput{Requested: "raw-model", Executor: "omp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selection.Model != "raw-model" || selection.Provider != "" || selection.Agent != "omp" {
+		t.Fatalf("selection = %#v", selection)
+	}
+	if _, err := (Config{}).ResolveSelection(SelectionInput{Requested: "raw\nmodel"}); err == nil {
+		t.Fatal("expected invalid model error")
+	}
+}
+
+func TestLoadConfigValidatesProvidersAndModels(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "config.toml")
+	writeTestFile(t, path, "[providers.sparks]\nkind = \"mystery\"\nbase_url = \"http://gpu.example:8000/v1\"\n")
+	if _, err := LoadDefinitions(path); err == nil || !strings.Contains(err.Error(), "kind must be") {
+		t.Fatalf("provider kind error = %v", err)
+	}
+	writeTestFile(t, path, "[providers.sparks]\nkind = \"openai-compatible\"\nbase_url = \"http://gpu.example:8000/v1\"\n\n[models.local]\nprovider = \"missing\"\nid = \"m\"\n")
+	if _, err := LoadDefinitions(path); err == nil || !strings.Contains(err.Error(), "undefined provider") {
+		t.Fatalf("model provider error = %v", err)
+	}
+	writeTestFile(t, path, "[providers.sparks]\nkind = \"openai-compatible\"\nbase_url = \"http://gpu.example:8000/v1\"\n\n[models.local]\nprovider = \"sparks\"\nid = \"m\"\n\n[defaults]\nmodel = \"nope\"\n")
+	if _, err := LoadDefinitions(path); err == nil || !strings.Contains(err.Error(), "undefined model") {
+		t.Fatalf("default model error = %v", err)
 	}
 }

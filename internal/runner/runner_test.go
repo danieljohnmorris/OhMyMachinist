@@ -181,6 +181,30 @@ func TestExecuteInjectsMachinistEnvironment(t *testing.T) {
 	}
 }
 
+func TestExecuteInjectsSelectionEnvironment(t *testing.T) {
+	repository := newGitRepository(t)
+	command := helperAgent("selection", time.Second)
+	command.Agent = "omp"
+	command.Model = "deepseek-v4.1-flash"
+	command.Provider = "sparks"
+	command.ProviderURL = "http://gpu.example:8000/v1"
+	command.KeyEnv = "SPARKS_API_KEY"
+	var stdout bytes.Buffer
+	if _, err := Execute(t.Context(), Options{
+		Command:       command,
+		Repository:    repository,
+		DataDirectory: t.TempDir(),
+		Stdout:        &stdout,
+		Stderr:        io.Discard,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := "omp\ndeepseek-v4.1-flash\nsparks\nhttp://gpu.example:8000/v1\nSPARKS_API_KEY\n"
+	if stdout.String() != want {
+		t.Fatalf("selection environment = %q, want %q", stdout.String(), want)
+	}
+}
+
 func TestExecuteExposesJobTimeoutEnvironment(t *testing.T) {
 	repository := newGitRepository(t)
 	var stdout bytes.Buffer
@@ -819,6 +843,8 @@ func helperAgent(mode string, timeout time.Duration) config.ResolvedCommand {
 		script = `cat >/dev/null; printf '%s\n%s\n%s\n' "$MACHINIST_RUN_ID" "$MACHINIST_REPOSITORY" "$MACHINIST_TOKEN_USAGE_PATH"`
 	case "jobenv":
 		script = `cat >/dev/null; printf '%s\n%s\n' "$MACHINIST_JOB_TIMEOUT_SECONDS" "$MACHINIST_JOB_STARTED_EPOCH"`
+	case "selection":
+		script = `cat >/dev/null; printf '%s\n%s\n%s\n%s\n%s\n' "$MACHINIST_AGENT" "$MACHINIST_MODEL" "$MACHINIST_PROVIDER" "$MACHINIST_PROVIDER_URL" "$MACHINIST_PROVIDER_KEY_ENV"`
 	case "tokens":
 		script = `cat >/dev/null; printf 4321 > "$MACHINIST_TOKEN_USAGE_PATH"`
 	case "zero-tokens":

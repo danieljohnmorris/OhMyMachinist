@@ -33,6 +33,42 @@ executor = "codex"
 prompt_file = "prompts/audit.md"
 timeout = "60m"
 
+# Models and providers. Machinist resolves the agent and model for every run
+# and passes them to the executor, so wrappers hardcode no model. Resolution
+# order, highest first: explicit request or Plane-style label override
+# (model:<alias>, agent:<name>) > stage (MACH-43) > job type > project >
+# defaults. Only the env var name of an API key belongs here, never its value.
+
+# [providers.sparks]            # local openai-compatible server (sglang, vLLM)
+# kind = "openai-compatible"
+# base_url = "http://gpu-host.example:8000/v1"
+# api_key_env = "SPARKS_API_KEY"
+#
+# [providers.cloud]             # hosted provider
+# kind = "anthropic"
+# base_url = "https://api.your-provider.example"
+# api_key_env = "CLOUD_API_KEY"
+#
+# [models.local-default]
+# provider = "sparks"
+# id = "deepseek-v4.1-flash"
+#
+# [models.cloud-large]
+# provider = "cloud"
+# id = "your-cloud-model"
+#
+# [defaults]
+# agent = "omp"
+# model = "local-default"
+#
+# Per-project and per-job-type overrides select a different model without
+# editing any script. Changing the model for one project is a one-line edit:
+# [projects.MYPROJECT]
+# model = "cloud-large"
+#
+# [job_types.build-pr]
+# model = "cloud-large"
+
 # Queue task-to-pr when an issue is labelled machinist:requested, and audit weekly.
 # Each repository name must also exist in worker.toml.
 # [github.repositories]

@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Example Machinist executor wrapper for the omp coding agent with PR delivery.
+#
+# Same provider/model rules as ./omp-agent: the model and provider come only
+# from the Machinist environment, never from the script. After the agent runs,
+# delivery hands the branch to the configured PR delivery command.
+set -euo pipefail
+
+if [[ -z "${MACHINIST_MODEL:-}" ]]; then
+  echo "omp-agent-pr: MACHINIST_MODEL is not set; configure a model in config.toml" >&2
+  exit 2
+fi
+if [[ -z "${MACHINIST_PROVIDER_URL:-}" ]]; then
+  echo "omp-agent-pr: MACHINIST_PROVIDER_URL is not set; configure a provider in config.toml" >&2
+  exit 2
+fi
+
+if [[ -n "${MACHINIST_PROVIDER_KEY_ENV:-}" && -z "${!MACHINIST_PROVIDER_KEY_ENV:-}" ]]; then
+  echo "omp-agent-pr: ${MACHINIST_PROVIDER_KEY_ENV} is not set" >&2
+  exit 2
+fi
+
+omp \
+  --model "$MACHINIST_MODEL" \
+  --base-url "$MACHINIST_PROVIDER_URL" \
+  --sandbox danger-full-access \
+  -
+
+# Delivery is a deployment concern. Point MACHINIST_DELIVER_PR at your delivery
+# command, for example a deliver-pr script that pushes the branch and opens the
+# pull request; when unset, delivery is skipped.
+if [[ -n "${MACHINIST_DELIVER_PR:-}" ]]; then
+  exec "$MACHINIST_DELIVER_PR"
+fi

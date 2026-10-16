@@ -87,6 +87,8 @@ type Run struct {
 	Command        string              `json:"command"`
 	Executor       string              `json:"executor"`
 	Model          string              `json:"model,omitempty"`
+	Agent          string              `json:"agent,omitempty"`
+	Provider       string              `json:"provider,omitempty"`
 	State          string              `json:"state"`
 	WorkerName     string              `json:"worker_name,omitempty"`
 	ExitCode       *int                `json:"exit_code,omitempty"`
@@ -217,7 +219,7 @@ func OpenStore(path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) initialize(ctx context.Context) error {
-	const schemaVersion = 9
+	const schemaVersion = 10
 	var version int
 	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		return fmt.Errorf("read database schema version: %w", err)
@@ -340,7 +342,12 @@ END;`
 			return fmt.Errorf("upgrade database schema to version 9: %w", err)
 		}
 	}
-	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+jobMetadataSchema+"PRAGMA user_version=9;")
+	if version < 10 {
+		if err := s.addRunSelection(ctx); err != nil {
+			return fmt.Errorf("upgrade database schema to version 10: %w", err)
+		}
+	}
+	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+jobMetadataSchema+"PRAGMA user_version=10;")
 	return err
 }
 
@@ -379,6 +386,24 @@ func (s *Store) addRunSkills(ctx context.Context) error {
 	}
 	_, err := s.db.ExecContext(ctx, `ALTER TABLE runs ADD COLUMN skills TEXT NOT NULL DEFAULT ''`)
 	return err
+}
+
+// addRunSelection records the resolved agent, model and provider on the run so
+// the Run Details panel and executor environment do not depend on worker state.
+func (s *Store) addRunSelection(ctx context.Context) error {
+	for _, column := range []string{"agent", "provider", "provider_url", "provider_key_env"} {
+		var present int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name=?`, column).Scan(&present); err != nil {
+			return err
+		}
+		if present > 0 {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE runs ADD COLUMN `+column+` TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) addJobTitle(ctx context.Context) error {
@@ -499,7 +524,7 @@ func (s *Store) CreateJobWithOptions(ctx context.Context, prompt, repository, na
 	if err != nil {
 		return "", err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO runs(id,job_id,command,command_hash,executor,model,repository,rendered_prompt,timeout_ms,state) VALUES(?,?,?,?,?,?,?,?,?,'queued')`, runID, jobID, command.Name, command.Hash, command.Executor, command.Model, repository, command.Prompt, command.Timeout.Milliseconds()); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO runs(id,job_id,command,command_hash,executor,model,agent,provider,provider_url,provider_key_env,repository,rendered_prompt,timeout_ms,state) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'queued')`, runID, jobID, command.Name, command.Hash, command.Executor, command.Model, command.Agent, command.Provider, command.ProviderURL, command.KeyEnv, repository, command.Prompt, command.Timeout.Milliseconds()); err != nil {
 		return "", fmt.Errorf("insert run: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -780,7 +805,7 @@ WHERE github_trigger_requests.state='pending'`, admission.Identity, admission.Oc
 	if err != nil {
 		return "", false, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO runs(id,job_id,command,command_hash,executor,model,repository,rendered_prompt,timeout_ms,state) VALUES(?,?,?,?,?,?,?,?,?,'queued')`, runID, jobID, command.Name, command.Hash, command.Executor, command.Model, admission.Repository, command.Prompt, command.Timeout.Milliseconds()); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO runs(id,job_id,command,command_hash,executor,model,agent,provider,provider_url,provider_key_env,repository,rendered_prompt,timeout_ms,state) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'queued')`, runID, jobID, command.Name, command.Hash, command.Executor, command.Model, command.Agent, command.Provider, command.ProviderURL, command.KeyEnv, admission.Repository, command.Prompt, command.Timeout.Milliseconds()); err != nil {
 		return "", false, fmt.Errorf("insert triggered run: %w", err)
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE trigger_state SET next_due_at=COALESCE(?,next_due_at),pending_occurrence_at=NULL,last_attempt_at=?,health='active',latest_error='',admission_count=admission_count+1,updated_at=? WHERE identity=?`, nullableTimeText(admission.NextDueAt), now, now, admission.Identity)
@@ -859,8 +884,8 @@ func (s *Store) UpdateQueuedTriggerJob(ctx context.Context, jobID string, admiss
 	} else if _, err := tx.ExecContext(ctx, `DELETE FROM task_inputs WHERE job_id=?`, jobID); err != nil {
 		return fmt.Errorf("clear queued task: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE runs SET command=?,command_hash=?,executor=?,model=?,rendered_prompt=? WHERE job_id=? AND state='queued'`,
-		admission.Command.Name, admission.Command.Hash, admission.Command.Executor, admission.Command.Model, admission.Command.Prompt, jobID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE runs SET command=?,command_hash=?,executor=?,model=?,agent=?,provider=?,provider_url=?,provider_key_env=?,rendered_prompt=? WHERE job_id=? AND state='queued'`,
+		admission.Command.Name, admission.Command.Hash, admission.Command.Executor, admission.Command.Model, admission.Command.Agent, admission.Command.Provider, admission.Command.ProviderURL, admission.Command.KeyEnv, admission.Command.Prompt, jobID); err != nil {
 		return fmt.Errorf("update queued run spec: %w", err)
 	}
 	return tx.Commit()
@@ -1084,7 +1109,7 @@ func (s *Store) poll(ctx context.Context, request protocol.PollRequest, maxConcu
 			return nil, fmt.Errorf("store worker repository: %w", err)
 		}
 	}
-	active, err := scanRunSpec(tx.QueryRowContext(ctx, `SELECT id,job_id,command,command_hash,executor,model,repository,rendered_prompt,timeout_ms,lease_token FROM runs WHERE worker_instance=? AND state='running' LIMIT 1`, request.InstanceID))
+	active, err := scanRunSpec(tx.QueryRowContext(ctx, `SELECT id,job_id,command,command_hash,executor,model,agent,provider,provider_url,provider_key_env,repository,rendered_prompt,timeout_ms,lease_token FROM runs WHERE worker_instance=? AND state='running' LIMIT 1`, request.InstanceID))
 	if err == nil {
 		var activeWorkflow bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM workflow_jobs WHERE job_id=?)`, active.JobID).Scan(&activeWorkflow); err != nil {
@@ -1144,7 +1169,7 @@ func (s *Store) poll(ctx context.Context, request protocol.PollRequest, maxConcu
 	}
 
 	executors := stringSet(request.Executors)
-	rows, err := tx.QueryContext(ctx, `SELECT r.id,r.job_id,r.command,r.command_hash,r.executor,r.model,r.repository,r.rendered_prompt,r.timeout_ms,j.state,COALESCE((SELECT plan FROM workflow_jobs WHERE job_id=j.id),'') FROM runs r JOIN jobs j ON j.id=r.job_id WHERE r.state='queued' AND (NOT EXISTS(SELECT 1 FROM workflow_jobs w WHERE w.job_id=j.id) OR (? AND EXISTS(SELECT 1 FROM workflow_jobs w WHERE w.job_id=j.id AND (w.worker_name='' OR w.worker_name=?)))) AND (? OR NOT EXISTS(SELECT 1 FROM task_inputs t WHERE t.job_id=j.id)) AND (? OR NOT EXISTS(SELECT 1 FROM execution_reviews er WHERE er.run_id=r.id)) ORDER BY r.rowid`, request.Workflows, request.Name, request.Artifacts, request.Reviews)
+	rows, err := tx.QueryContext(ctx, `SELECT r.id,r.job_id,r.command,r.command_hash,r.executor,r.model,r.agent,r.provider,r.provider_url,r.provider_key_env,r.repository,r.rendered_prompt,r.timeout_ms,j.state,COALESCE((SELECT plan FROM workflow_jobs WHERE job_id=j.id),'') FROM runs r JOIN jobs j ON j.id=r.job_id WHERE r.state='queued' AND (NOT EXISTS(SELECT 1 FROM workflow_jobs w WHERE w.job_id=j.id) OR (? AND EXISTS(SELECT 1 FROM workflow_jobs w WHERE w.job_id=j.id AND (w.worker_name='' OR w.worker_name=?)))) AND (? OR NOT EXISTS(SELECT 1 FROM task_inputs t WHERE t.job_id=j.id)) AND (? OR NOT EXISTS(SELECT 1 FROM execution_reviews er WHERE er.run_id=r.id)) ORDER BY r.rowid`, request.Workflows, request.Name, request.Artifacts, request.Reviews)
 	if err != nil {
 		return nil, err
 	}
@@ -1152,7 +1177,7 @@ func (s *Store) poll(ctx context.Context, request protocol.PollRequest, maxConcu
 	for rows.Next() {
 		var candidate protocol.RunSpec
 		var jobState, workflowPlan string
-		if err := rows.Scan(&candidate.ID, &candidate.JobID, &candidate.Command, &candidate.CommandHash, &candidate.Executor, &candidate.Model, &candidate.Repository, &candidate.RenderedPrompt, &candidate.TimeoutMillis, &jobState, &workflowPlan); err != nil {
+		if err := rows.Scan(&candidate.ID, &candidate.JobID, &candidate.Command, &candidate.CommandHash, &candidate.Executor, &candidate.Model, &candidate.Agent, &candidate.Provider, &candidate.ProviderURL, &candidate.ProviderKeyEnv, &candidate.Repository, &candidate.RenderedPrompt, &candidate.TimeoutMillis, &jobState, &workflowPlan); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -1509,7 +1534,7 @@ func (s *Store) RunOutput(ctx context.Context, runID string) (RunOutput, error) 
 // jobID restricts the result to that job.
 func (s *Store) listJobs(ctx context.Context, jobID string) ([]Job, error) {
 	query := `SELECT j.id,j.title,j.prompt,j.repository,j.github_issue_title,j.command,j.trigger_identity,j.occurrence_key,j.trigger_subject,j.state,j.previous_job_id,j.attempt,COALESCE(j.superseded_by,''),j.issue_key,j.resolution_kind,j.resolution_detail,COALESCE(j.resolved_at,''),j.created_at,j.updated_at,
-COALESCE(r.id,''),COALESCE(r.command,''),COALESCE(r.executor,''),COALESCE(r.model,''),COALESCE(r.state,''),COALESCE(NULLIF(r.worker_name,''),w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,''),r.duration_millis,r.token_usage,COALESCE(r.skills,''),a.step,COALESCE(a.outcome,''),COALESCE(NULLIF(a.summary,''),CASE WHEN json_valid(r.result) THEN json_extract(r.result,'$.final_message') END,'')
+COALESCE(r.id,''),COALESCE(r.command,''),COALESCE(r.executor,''),COALESCE(r.model,''),COALESCE(r.agent,''),COALESCE(r.provider,''),COALESCE(r.state,''),COALESCE(NULLIF(r.worker_name,''),w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,''),r.duration_millis,r.token_usage,COALESCE(r.skills,''),a.step,COALESCE(a.outcome,''),COALESCE(NULLIF(a.summary,''),CASE WHEN json_valid(r.result) THEN json_extract(r.result,'$.final_message') END,'')
 FROM jobs j LEFT JOIN runs r ON r.job_id=j.id LEFT JOIN workers w ON w.instance_id=r.worker_instance LEFT JOIN workflow_attempts a ON a.run_id=r.id`
 	args := []any{}
 	if jobID != "" {
@@ -1529,7 +1554,7 @@ FROM jobs j LEFT JOIN runs r ON r.job_id=j.id LEFT JOIN workers w ON w.instance_
 		var created, updated, started, completed string
 		var resolutionKind, resolutionDetail, resolvedAt, skillsRaw string
 		if err := rows.Scan(&job.ID, &job.Title, &job.Prompt, &job.Repository, &job.GitHubIssueTitle, &job.Command, &job.TriggerID, &job.OccurrenceKey, &job.TriggerSubject, &job.State, &job.PreviousJobID, &job.Attempt, &job.SupersededBy, &job.IssueKey, &resolutionKind, &resolutionDetail, &resolvedAt, &created, &updated,
-			&run.ID, &run.Command, &run.Executor, &run.Model, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &started, &completed, &run.DurationMillis, &run.TokenUsage, &skillsRaw, &run.Step, &run.Outcome, &run.Summary); err != nil {
+			&run.ID, &run.Command, &run.Executor, &run.Model, &run.Agent, &run.Provider, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &started, &completed, &run.DurationMillis, &run.TokenUsage, &skillsRaw, &run.Step, &run.Outcome, &run.Summary); err != nil {
 			return nil, err
 		}
 		run.Skills = decodeRunSkills(skillsRaw)
@@ -1598,9 +1623,9 @@ func (s *Store) GetJob(ctx context.Context, jobID string) (Job, error) {
 func (s *Store) GetRun(ctx context.Context, runID string) (Run, error) {
 	var run Run
 	var started, completed, skillsRaw string
-	err := s.db.QueryRowContext(ctx, `SELECT r.id,r.command,r.executor,r.model,r.state,COALESCE(NULLIF(r.worker_name,''),w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,''),r.duration_millis,r.token_usage,COALESCE(r.skills,''),a.step,COALESCE(a.outcome,''),COALESCE(NULLIF(a.summary,''),CASE WHEN json_valid(r.result) THEN json_extract(r.result,'$.final_message') END,'')
+	err := s.db.QueryRowContext(ctx, `SELECT r.id,r.command,r.executor,r.model,r.agent,r.provider,r.state,COALESCE(NULLIF(r.worker_name,''),w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,''),r.duration_millis,r.token_usage,COALESCE(r.skills,''),a.step,COALESCE(a.outcome,''),COALESCE(NULLIF(a.summary,''),CASE WHEN json_valid(r.result) THEN json_extract(r.result,'$.final_message') END,'')
 FROM runs r LEFT JOIN workers w ON w.instance_id=r.worker_instance LEFT JOIN workflow_attempts a ON a.run_id=r.id WHERE r.id=?`, runID).
-		Scan(&run.ID, &run.Command, &run.Executor, &run.Model, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &started, &completed, &run.DurationMillis, &run.TokenUsage, &skillsRaw, &run.Step, &run.Outcome, &run.Summary)
+		Scan(&run.ID, &run.Command, &run.Executor, &run.Model, &run.Agent, &run.Provider, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &started, &completed, &run.DurationMillis, &run.TokenUsage, &skillsRaw, &run.Step, &run.Outcome, &run.Summary)
 	if err != nil {
 		return Run{}, err
 	}
@@ -1758,7 +1783,7 @@ func (s *Store) listWorkers(ctx context.Context) ([]Worker, error) {
 
 func scanRunSpec(row *sql.Row) (protocol.RunSpec, error) {
 	var run protocol.RunSpec
-	err := row.Scan(&run.ID, &run.JobID, &run.Command, &run.CommandHash, &run.Executor, &run.Model, &run.Repository, &run.RenderedPrompt, &run.TimeoutMillis, &run.LeaseToken)
+	err := row.Scan(&run.ID, &run.JobID, &run.Command, &run.CommandHash, &run.Executor, &run.Model, &run.Agent, &run.Provider, &run.ProviderURL, &run.ProviderKeyEnv, &run.Repository, &run.RenderedPrompt, &run.TimeoutMillis, &run.LeaseToken)
 	return run, err
 }
 
@@ -1775,10 +1800,9 @@ func supportsModel(capabilities map[string][]string, executor, model string) boo
 		return true
 	}
 	models, ok := capabilities[executor]
-	if !ok {
-		return false
-	}
-	if len(models) == 0 {
+	if !ok || len(models) == 0 {
+		// The executor advertises no model list, so it accepts any resolved
+		// model (delivered through MACHINIST_MODEL and the argv parameter).
 		return true
 	}
 	return stringSet(models)[model]

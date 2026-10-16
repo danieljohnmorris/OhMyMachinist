@@ -25,8 +25,78 @@ command = ["./scripts/custom-workflow.sh"]
 path = "/absolute/path/to/my-project"
 ```
 
-Managed triggers select one command with `command = "audit"`. Model selection remains
-available when the executor command includes `{{machinist.model}}`.
+Managed triggers select one command with `command = "audit"`.
+
+## Models and providers
+
+Machinist config is the one place to change the model. Providers and models are
+declared here; wrapper scripts read the resolved values from the environment and
+hardcode nothing.
+
+```toml
+[providers.sparks]            # local openai-compatible server (sglang, vLLM)
+kind = "openai-compatible"
+base_url = "http://gpu-host.example:8000/v1"
+api_key_env = "SPARKS_API_KEY"
+
+[providers.cloud]             # hosted provider
+kind = "anthropic"            # or "openai"
+base_url = "https://api.your-provider.example"
+api_key_env = "CLOUD_API_KEY"
+
+[models.local-default]
+provider = "sparks"
+id = "deepseek-v4.1-flash"
+
+[models.cloud-large]
+provider = "cloud"
+id = "your-cloud-model"
+
+[defaults]
+agent = "omp"
+model = "local-default"
+```
+
+`kind` is `openai-compatible`, `openai`, or `anthropic`. `api_key_env` is the
+**name** of the environment variable that holds the key, never the key itself.
+Never commit a key, hostname, or IP; keep them in the deployment environment.
+
+`label` override, when present, is a Plane-style issue label: `model:<alias>` or
+`agent:<name>`.
+
+### Resolution order
+
+Highest priority first:
+
+1. explicit request (submit `--model`, API/MCP `model`) or a label override
+2. stage (MACH-43; a hook in this release)
+3. job type (the command name)
+4. project
+5. `[defaults]`
+
+Each level overrides only the fields it sets. Changing the model for one project
+is a config-only edit:
+
+```toml
+[projects.MYPROJECT]
+model = "cloud-large"
+
+[job_types.build-pr]
+model = "cloud-large"
+```
+
+### What executors receive
+
+Every executor gets the resolved selection as environment variables:
+`MACHINIST_AGENT`, `MACHINIST_MODEL` (the provider model id), `MACHINIST_PROVIDER`,
+`MACHINIST_PROVIDER_URL`, and `MACHINIST_PROVIDER_KEY_ENV`. Executor commands may
+also embed the template parameters `{{machinist.agent}}` and
+`{{machinist.model}}` (plus `{{machinist.provider}}` and
+`{{machinist.provider_url}}`) as complete optional `--flag=` arguments. See
+`examples/wrappers/omp-agent` for a wrapper that reads only these variables and
+fails with a clear error when they are missing. Without a `[models]` registry the
+requested value is passed through unchanged, so workers that map model aliases on
+the executor keep working.
 
 ## Task workflows
 

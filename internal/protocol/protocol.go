@@ -31,6 +31,10 @@ type RunSpec struct {
 	CommandHash     string              `json:"command_hash"`
 	Executor        string              `json:"executor"`
 	Model           string              `json:"model,omitempty"`
+	Agent           string              `json:"agent,omitempty"`
+	Provider        string              `json:"provider,omitempty"`
+	ProviderURL     string              `json:"provider_url,omitempty"`
+	ProviderKeyEnv  string              `json:"provider_key_env,omitempty"`
 	Repository      string              `json:"repository"`
 	Project         string              `json:"project,omitempty"`
 	RenderedPrompt  string              `json:"rendered_prompt"`

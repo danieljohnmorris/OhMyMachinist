@@ -30,9 +30,28 @@ const (
 	defaultServerDirName     = ".machinist/server"
 	promptParameter          = "{{machinist.prompt}}"
 	modelParameter           = "{{machinist.model}}"
+	agentParameter           = "{{machinist.agent}}"
+	providerParameter        = "{{machinist.provider}}"
+	providerURLParameter     = "{{machinist.provider_url}}"
 	machinistParameterPrefix = "{{machinist"
 	legacyFactoryPrefix      = "{{factory."
 )
+
+// executorParameters are the resolved selection values an executor command may
+// reference as template parameters. The prompt parameter is prompt-only.
+var executorParameters = []string{agentParameter, modelParameter, providerParameter, providerURLParameter}
+
+// Provider kinds supported by the Machinist LLM adapter.
+const (
+	ProviderOpenAICompatible = "openai-compatible"
+	ProviderOpenAI           = "openai"
+	ProviderAnthropic        = "anthropic"
+)
+
+var providerKinds = []string{ProviderOpenAICompatible, ProviderOpenAI, ProviderAnthropic}
+
+// maxSelectionBytes bounds a resolved agent, model, provider, or URL value.
+const maxSelectionBytes = 512
 
 type Worker struct {
 	Name          string                `toml:"name"`
@@ -80,16 +99,65 @@ const (
 )
 
 type Config struct {
-	Storage      Storage             `toml:"storage"`
-	Workflows    map[string]Workflow `toml:"workflows"`
-	Server       Server              `toml:"server"`
-	Commands     map[string]Command  `toml:"commands"`
-	GitHub       GitHub              `toml:"github"`
-	IssueSources issues.Config       `toml:"issue_sources"`
-	Triggers     TriggerDefinitions  `toml:"triggers"`
-	Alerts       Alerts              `toml:"alerts"`
-	Review       Review              `toml:"review"`
+	Storage      Storage              `toml:"storage"`
+	Workflows    map[string]Workflow  `toml:"workflows"`
+	Server       Server               `toml:"server"`
+	Commands     map[string]Command   `toml:"commands"`
+	Providers    map[string]Provider  `toml:"providers"`
+	Models       map[string]Model     `toml:"models"`
+	Defaults     Selection            `toml:"defaults"`
+	Projects     map[string]Selection `toml:"projects"`
+	JobTypes     map[string]Selection `toml:"job_types"`
+	GitHub       GitHub               `toml:"github"`
+	IssueSources issues.Config        `toml:"issue_sources"`
+	Triggers     TriggerDefinitions   `toml:"triggers"`
+	Alerts       Alerts               `toml:"alerts"`
+	Review       Review               `toml:"review"`
 	path         string
+}
+
+// Provider is one LLM endpoint Machinist may run executors against. BaseURL and
+// APIKeyEnv are deployment values: API key env var names only, never the value.
+type Provider struct {
+	Kind      string `toml:"kind"`
+	BaseURL   string `toml:"base_url"`
+	APIKeyEnv string `toml:"api_key_env"`
+}
+
+// Model maps a stable alias to a provider and the provider's model id. Aliases
+// are what defaults, project and job type overrides name.
+type Model struct {
+	Provider string `toml:"provider"`
+	ID       string `toml:"id"`
+}
+
+// Selection names an agent and a model alias. Empty fields inherit from the
+// next level down the resolution order.
+type Selection struct {
+	Agent string `toml:"agent"`
+	Model string `toml:"model"`
+}
+
+// SelectionInput carries the per-run hints that feed agent and model
+// resolution. Requested and Labels override the configured levels.
+type SelectionInput struct {
+	JobType   string
+	Project   string
+	Executor  string
+	Requested string
+	Labels    []string
+	// Stage is the MACH-43 hook: a stage-named selection applied above job type.
+	Stage *Selection
+}
+
+// ExecutorSelection is the fully resolved agent and model handed to an
+// executor. Model is the provider model id, not the configured alias.
+type ExecutorSelection struct {
+	Agent       string
+	Model       string
+	Provider    string
+	ProviderURL string
+	KeyEnv      string
 }
 
 // Review configures the built-in PR review. DefaultProfile names the library
@@ -189,14 +257,18 @@ type Command struct {
 }
 
 type ResolvedCommand struct {
-	Name       string
-	Executor   string
-	Command    []string
-	Model      string
-	Prompt     string
-	Timeout    time.Duration
-	Definition string
-	Hash       string
+	Name        string
+	Executor    string
+	Command     []string
+	Model       string
+	Agent       string
+	Provider    string
+	ProviderURL string
+	KeyEnv      string
+	Prompt      string
+	Timeout     time.Duration
+	Definition  string
+	Hash        string
 }
 
 func LoadWorker(path string) (Worker, error) {
@@ -288,6 +360,9 @@ func loadConfigFile(path string) (Config, error) {
 			return Config{}, err
 		}
 	}
+	if err := machinistConfig.validateSelectionConfig(); err != nil {
+		return Config{}, fmt.Errorf("parse Machinist config %q: %w", absPath, err)
+	}
 	return machinistConfig, nil
 }
 
@@ -315,15 +390,66 @@ func (w Worker) ResolveCommandModel(command ResolvedCommand, requestedModel stri
 	if err != nil {
 		return ResolvedCommand{}, err
 	}
+	command.Model = model
+	return w.substituteExecutor(command, executor), nil
+}
+
+// ApplyExecutorSelection fills the resolved agent, provider and model on a
+// command and substitutes the Machinist template parameters in its argv.
+// Deployment-provided defaults never overwrite a value already resolved by the
+// control plane, and an empty agent falls back to the executor name.
+func (w Worker) ApplyExecutorSelection(command ResolvedCommand, selection ExecutorSelection) (ResolvedCommand, error) {
+	executor, ok := w.Executors[command.Executor]
+	if !ok {
+		return ResolvedCommand{}, fmt.Errorf("executor %q is not configured on this worker", command.Executor)
+	}
+	if err := validateCommand(command.Executor, executor.Command); err != nil {
+		return ResolvedCommand{}, err
+	}
+	command.Agent = strings.TrimSpace(selection.Agent)
+	if command.Agent == "" {
+		command.Agent = command.Executor
+	}
+	command.Model = strings.TrimSpace(selection.Model)
+	// Keep worker-side model aliases working for deployments that configure
+	// models on the executor rather than in the Machinist config.
+	if resolved, ok := executor.Models[command.Model]; ok {
+		command.Model = strings.TrimSpace(resolved)
+	}
+	command.Provider = strings.TrimSpace(selection.Provider)
+	command.ProviderURL = strings.TrimSpace(selection.ProviderURL)
+	command.KeyEnv = strings.TrimSpace(selection.KeyEnv)
+	return w.substituteExecutor(command, executor), nil
+}
+
+// substituteExecutor replaces each Machinist executor parameter with its
+// resolved value, dropping any argument whose parameter has no value.
+func (w Worker) substituteExecutor(command ResolvedCommand, executor Executor) ResolvedCommand {
+	values := map[string]string{
+		agentParameter:       command.Agent,
+		modelParameter:       command.Model,
+		providerParameter:    command.Provider,
+		providerURLParameter: command.ProviderURL,
+	}
 	command.Command = make([]string, 0, len(executor.Command))
 	for _, argument := range executor.Command {
-		if model == "" && strings.Contains(argument, modelParameter) {
+		drop := false
+		for parameter, value := range values {
+			if value == "" && strings.Contains(argument, parameter) {
+				drop = true
+				break
+			}
+		}
+		if drop {
 			continue
 		}
-		command.Command = append(command.Command, strings.ReplaceAll(argument, modelParameter, model))
+		substituted := argument
+		for parameter, value := range values {
+			substituted = strings.ReplaceAll(substituted, parameter, value)
+		}
+		command.Command = append(command.Command, substituted)
 	}
-	command.Model = model
-	return command, nil
+	return command
 }
 
 func resolveModel(name string, executor Executor, requested string) (string, error) {
@@ -331,9 +457,8 @@ func resolveModel(name string, executor Executor, requested string) (string, err
 	if model == "" {
 		return "", nil
 	}
-	if !executor.supportsModel() {
-		return "", fmt.Errorf("executor %q does not support model selection; add %s to its command", name, modelParameter)
-	}
+	// Model selection is always deliverable: executors that do not embed
+	// {{machinist.model}} still receive the value through MACHINIST_MODEL.
 	if resolved, ok := executor.Models[model]; ok {
 		model = strings.TrimSpace(resolved)
 	} else if len(executor.Models) > 0 {
@@ -343,6 +468,165 @@ func resolveModel(name string, executor Executor, requested string) (string, err
 		return "", fmt.Errorf("executor %q model is invalid", name)
 	}
 	return model, nil
+}
+
+// ResolveSelection applies the agent and model resolution order, highest
+// priority first: explicit request, Plane label override, stage hook, job type,
+// project, then the global default. It resolves the chosen model alias to its
+// provider model id.
+func (c Config) ResolveSelection(input SelectionInput) (ExecutorSelection, error) {
+	candidate := c.Defaults
+	apply := func(selection Selection) {
+		if strings.TrimSpace(selection.Agent) != "" {
+			candidate.Agent = selection.Agent
+		}
+		if strings.TrimSpace(selection.Model) != "" {
+			candidate.Model = selection.Model
+		}
+	}
+	if selection, ok := c.Projects[input.Project]; ok && strings.TrimSpace(input.Project) != "" {
+		apply(selection)
+	}
+	if selection, ok := c.JobTypes[input.JobType]; ok && strings.TrimSpace(input.JobType) != "" {
+		apply(selection)
+	}
+	if input.Stage != nil {
+		apply(*input.Stage)
+	}
+	apply(labelSelection(input.Labels))
+	if strings.TrimSpace(input.Requested) != "" {
+		candidate.Model = input.Requested
+	}
+
+	selection := ExecutorSelection{Agent: strings.TrimSpace(candidate.Agent)}
+	if selection.Agent == "" {
+		selection.Agent = strings.TrimSpace(input.Executor)
+	}
+	alias := strings.TrimSpace(candidate.Model)
+	if alias == "" {
+		return selection, nil
+	}
+	if len(c.Models) == 0 {
+		// No model registry: pass the selection through as a raw model id so
+		// deployments that configure models on the worker keep working.
+		selection.Model = alias
+		return selection, validateSelectionValue("model", selection.Model)
+	}
+	model, ok := c.Models[alias]
+	if !ok {
+		return ExecutorSelection{}, fmt.Errorf("model %q is not defined in the Machinist config", alias)
+	}
+	provider, ok := c.Providers[model.Provider]
+	if !ok {
+		return ExecutorSelection{}, fmt.Errorf("model %q names undefined provider %q", alias, model.Provider)
+	}
+	selection.Model = model.ID
+	selection.Provider = model.Provider
+	selection.ProviderURL = provider.BaseURL
+	selection.KeyEnv = provider.APIKeyEnv
+	for field, value := range map[string]string{"model": selection.Model, "provider": selection.Provider, "provider_url": selection.ProviderURL, "provider_key_env": selection.KeyEnv} {
+		if err := validateSelectionValue(field, value); err != nil {
+			return ExecutorSelection{}, err
+		}
+	}
+	return selection, nil
+}
+
+// ResolveCommandSelection resolves the run selection and records it on the
+// command. The worker substitutes the template parameters when it builds argv.
+func (c Config) ResolveCommandSelection(command ResolvedCommand, input SelectionInput) (ResolvedCommand, error) {
+	selection, err := c.ResolveSelection(input)
+	if err != nil {
+		return ResolvedCommand{}, err
+	}
+	command.Agent = selection.Agent
+	command.Model = selection.Model
+	command.Provider = selection.Provider
+	command.ProviderURL = selection.ProviderURL
+	command.KeyEnv = selection.KeyEnv
+	return command, nil
+}
+
+// labelSelection reads model and agent overrides from Plane-style labels
+// (`model:<alias>`, `agent:<name>`). Later labels win.
+func labelSelection(labels []string) Selection {
+	selection := Selection{}
+	for _, label := range labels {
+		name, value, ok := strings.Cut(strings.TrimSpace(label), ":")
+		if !ok || strings.TrimSpace(value) == "" {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(name)) {
+		case "model":
+			selection.Model = value
+		case "agent":
+			selection.Agent = value
+		}
+	}
+	return selection
+}
+
+func validateSelectionValue(field, value string) error {
+	if len(value) > maxSelectionBytes || strings.ContainsAny(value, "\x00\r\n") {
+		return fmt.Errorf("%s selection is invalid", field)
+	}
+	return nil
+}
+
+func (c Config) validateSelectionConfig() error {
+	for name, provider := range c.Providers {
+		if strings.TrimSpace(name) == "" {
+			return errors.New("provider names must be non-empty")
+		}
+		if !slices.Contains(providerKinds, provider.Kind) {
+			return fmt.Errorf("provider %q kind must be one of %s", name, strings.Join(providerKinds, ", "))
+		}
+		if err := validateSelectionValue("provider "+name+" base_url", provider.BaseURL); err != nil {
+			return err
+		}
+		if provider.Kind == ProviderOpenAICompatible && strings.TrimSpace(provider.BaseURL) == "" {
+			return fmt.Errorf("provider %q of kind %q requires base_url", name, provider.Kind)
+		}
+		if err := validateSelectionValue("provider "+name+" api_key_env", provider.APIKeyEnv); err != nil {
+			return err
+		}
+	}
+	for alias, model := range c.Models {
+		if strings.TrimSpace(alias) == "" || strings.TrimSpace(model.ID) == "" {
+			return errors.New("model aliases and ids must be non-empty")
+		}
+		if _, ok := c.Providers[model.Provider]; !ok {
+			return fmt.Errorf("model %q names undefined provider %q", alias, model.Provider)
+		}
+	}
+	if err := c.validateSelectionModels("defaults", c.Defaults); err != nil {
+		return err
+	}
+	for name, selection := range c.Projects {
+		if err := c.validateSelectionModels("project "+name, selection); err != nil {
+			return err
+		}
+	}
+	for name, selection := range c.JobTypes {
+		if err := c.validateSelectionModels("job type "+name, selection); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c Config) validateSelectionModels(name string, selection Selection) error {
+	if err := validateSelectionValue(name+" agent", selection.Agent); err != nil {
+		return err
+	}
+	model := strings.TrimSpace(selection.Model)
+	if model == "" || len(c.Models) == 0 {
+		return nil
+	}
+	if _, ok := c.Models[model]; !ok {
+		return fmt.Errorf("%s names undefined model %q", name, model)
+	}
+	return nil
 }
 
 func (w Worker) ResolveRepository(name string) (string, error) {
@@ -621,11 +905,16 @@ func validateCommand(name string, command []string) error {
 		if strings.Contains(argument, legacyFactoryPrefix) {
 			return fmt.Errorf("executor %q command uses the unsupported legacy Factory parameter namespace", name)
 		}
-		if index == 0 && strings.Contains(argument, modelParameter) {
-			return fmt.Errorf("executor %q command executable cannot contain %s", name, modelParameter)
-		}
-		if strings.Contains(argument, modelParameter) && (!strings.HasPrefix(argument, "--") || !strings.HasSuffix(argument, "="+modelParameter) || strings.Count(argument, modelParameter) != 1) {
-			return fmt.Errorf("executor %q must use %s as a complete optional --flag=%s argument", name, modelParameter, modelParameter)
+		for _, parameter := range executorParameters {
+			if !strings.Contains(argument, parameter) {
+				continue
+			}
+			if index == 0 {
+				return fmt.Errorf("executor %q command executable cannot contain %s", name, parameter)
+			}
+			if !strings.HasPrefix(argument, "--") || !strings.HasSuffix(argument, "="+parameter) || strings.Count(argument, parameter) != 1 {
+				return fmt.Errorf("executor %q must use %s as a complete optional --flag=%s argument", name, parameter, parameter)
+			}
 		}
 	}
 	return nil

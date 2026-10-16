@@ -86,6 +86,28 @@ func (s *Server) processIssueTrigger(ctx context.Context, trigger config.Resolve
 	return errors.Join(triggerErr, recordErr, nextErr)
 }
 
+// resolveTriggerSelection applies the agent and model resolution order to a
+// trigger's command, using the trigger's project and any intake labels.
+func (s *Server) resolveTriggerSelection(command config.ResolvedCommand, trigger config.ResolvedTrigger, labels []string) (config.ResolvedCommand, error) {
+	if strings.TrimSpace(s.definitionPath) == "" {
+		// Tests and embedders without a definition file keep the pre-resolved
+		// trigger model.
+		command.Model = trigger.Model
+		return command, nil
+	}
+	definition, err := config.LoadDefinitions(s.definitionPath)
+	if err != nil {
+		return config.ResolvedCommand{}, err
+	}
+	return definition.ResolveCommandSelection(command, config.SelectionInput{
+		JobType:   command.Name,
+		Project:   trigger.SourceProject,
+		Executor:  command.Executor,
+		Requested: trigger.Model,
+		Labels:    labels,
+	})
+}
+
 // admitIssue dedupes per ticket before creating work: an edit to a ticket with a
 // queued job updates that job's spec and posts one comment, an edit while a job
 // is running is ignored, and only a ticket without active work admits a new job.
@@ -103,7 +125,10 @@ func (s *Server) admitIssue(ctx context.Context, trigger config.ResolvedTrigger,
 	if renderErr != nil {
 		return 0, renderErr
 	}
-	command.Model = trigger.Model
+	command, renderErr = s.resolveTriggerSelection(command, trigger, issue.Labels)
+	if renderErr != nil {
+		return 0, renderErr
+	}
 	subject := issue.URL
 	if subject == "" {
 		subject = issue.Key
@@ -161,6 +186,11 @@ func (s *Server) processFixedTrigger(ctx context.Context, trigger config.Resolve
 		OccurrenceKey: occurrence.UTC().Format(time.RFC3339Nano), ScheduledAt: occurrence, NextDueAt: nextDue,
 		Prompt: trigger.Prompt, Repository: trigger.Repository,
 		SelectionName: trigger.SelectionName, Command: trigger.Command,
+	}
+	admission.Command, err = s.resolveTriggerSelection(admission.Command, trigger, nil)
+	if err != nil {
+		_ = s.store.RecordTriggerAttempt(ctx, trigger.Identity, generation, 0, err)
+		return err
 	}
 	_, _, admissionErr := s.store.CreateTriggeredJob(ctx, admission)
 	if errors.Is(admissionErr, ErrTriggerPreviousGenerationActive) {
@@ -289,7 +319,10 @@ func (s *Server) processGitHubDetails(ctx context.Context, trigger config.Resolv
 	if renderErr != nil {
 		return renderErr
 	}
-	command.Model = trigger.Model
+	command, renderErr = s.resolveTriggerSelection(command, trigger, details.Labels)
+	if renderErr != nil {
+		return renderErr
+	}
 	occurrenceKey := details.RequestedEvent.OccurrenceKey
 	_, created, err := s.store.CreateTriggeredJob(ctx, TriggerAdmission{
 		Identity: trigger.Identity, Family: trigger.Family, ConfigSignature: trigger.Signature, ConfigGeneration: generation, OccurrenceKey: occurrenceKey,

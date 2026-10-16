@@ -332,20 +332,38 @@ func runSelection(ctx context.Context, options *commandOptions) error {
 	if err != nil {
 		return err
 	}
-	command, err := config.LoadCommand(definitionPath, options.commandName)
+	definition, err := config.LoadDefinitions(definitionPath)
 	if err != nil {
 		return err
 	}
-	return runConfiguredCommand(ctx, options, worker, command)
+	command, err := definition.ResolveCommand(options.commandName)
+	if err != nil {
+		return err
+	}
+	return runConfiguredCommand(ctx, options, worker, definition, command)
 }
 
-func runConfiguredCommand(ctx context.Context, options *commandOptions, worker config.Worker, configured config.ResolvedCommand) error {
+func runConfiguredCommand(ctx context.Context, options *commandOptions, worker config.Worker, definition config.Config, configured config.ResolvedCommand) error {
 	var err error
 	configured, err = config.RenderPrompt(configured, options.prompt)
 	if err != nil {
 		return err
 	}
-	configured, err = worker.ResolveCommandModel(configured, options.model)
+	configured, err = definition.ResolveCommandSelection(configured, config.SelectionInput{
+		JobType:   configured.Name,
+		Executor:  configured.Executor,
+		Requested: options.model,
+	})
+	if err != nil {
+		return err
+	}
+	configured, err = worker.ApplyExecutorSelection(configured, config.ExecutorSelection{
+		Agent:       configured.Agent,
+		Model:       configured.Model,
+		Provider:    configured.Provider,
+		ProviderURL: configured.ProviderURL,
+		KeyEnv:      configured.KeyEnv,
+	})
 	if err != nil {
 		return err
 	}

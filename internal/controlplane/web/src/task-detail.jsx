@@ -562,6 +562,8 @@ function ExecutionDetails({ run }) {
         />
         <RunMetric label="Run ID" value={run.id} mono />
         <RunMetric label="Executor" value={run.executor} />
+        <RunMetric label="Agent" value={run.agent || run.executor} />
+        <RunMetric label="Provider" value={run.provider || "Unavailable"} />
         <RunMetric label="Worker" value={run.worker_name || "Unassigned"} />
         <RunMetric
           label="Duration"
