@@ -152,7 +152,7 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	if err := log.append("run.started", "", fmt.Sprintf("command=%s repository=%s", options.Command.Name, repository)); err != nil {
 		return result, &RuntimeError{Cause: err}
 	}
-	if err := prepareLaneCheckout(log, repository); err != nil {
+	if err := prepareLaneCheckout(log, repository, runDirectory, options.Stderr); err != nil {
 		return completeFailure(&result, log, runDirectory, err)
 	}
 	executorCommand := structuredCommand(options.Command.Executor, options.Command.Command)
@@ -205,6 +205,14 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	command := exec.Command(executorCommand[0], executorCommand[1:]...)
 	command.Dir = repository
 	command.Env = append(sanitizedEnvironment(os.Environ()), "MACHINIST_RUN_ID="+runID, "MACHINIST_REPOSITORY="+repository, tokenUsageEnvironment+"="+tokenUsagePath)
+	if options.Command.Timeout > 0 {
+		// MACH-61: trusted post-agent steps (the built-in PR review) budget
+		// their own time against the remaining job timeout.
+		command.Env = append(command.Env,
+			"MACHINIST_JOB_TIMEOUT_SECONDS="+strconv.FormatInt(int64(options.Command.Timeout.Seconds()), 10),
+			"MACHINIST_JOB_STARTED_EPOCH="+strconv.FormatInt(time.Now().Unix(), 10),
+		)
+	}
 	command.Env = append(command.Env, options.ExtraEnv...)
 	if options.Revision != nil {
 		revisionPath := filepath.Join(runDirectory, "revision.json")
@@ -512,16 +520,23 @@ func ResolveRepository(value string) (string, error) {
 }
 
 // prepareLaneCheckout refreshes a worker lane checkout so runs build on the
-// latest base branch instead of a stale local state. Git failures are recorded
-// as events and tolerated, except a dirty checkout, which returns an error so
-// the run is refused before any work happens.
-func prepareLaneCheckout(log *eventLog, repository string) error {
+// latest base branch instead of a stale local state. A dirty checkout (tracked
+// modifications left by an earlier job, e.g. the review docs pass) is
+// auto-saved to a labelled stash plus a patch before fetching, so one dirty
+// lane cannot fail this job and every queued job behind it (MACH-59). Other Git
+// failures are recorded as events and tolerated.
+func prepareLaneCheckout(log *eventLog, repository, runDirectory string, alert io.Writer) error {
 	// Untracked leftovers are normal after agent runs; only modifications to
 	// tracked files make the checkout dirty.
 	status := exec.Command("git", "-C", repository, "status", "--porcelain", "-uno")
 	status.Env = sanitizedEnvironment(os.Environ())
 	if output, err := status.Output(); err == nil && len(strings.TrimSpace(string(output))) > 0 {
-		return fmt.Errorf("lane checkout is dirty; refusing to fetch: %s", strings.TrimSpace(string(output)))
+		if err := saveLaneWIP(log, repository, runDirectory, strings.TrimSpace(string(output))); err != nil {
+			return err
+		}
+		if alert != nil {
+			fmt.Fprintf(alert, "machinist: lane %s had uncommitted changes; saved them to a stash before running\n", repository)
+		}
 	}
 	fetch := exec.Command("git", "-C", repository, "fetch", "origin")
 	fetch.Env = sanitizedEnvironment(os.Environ())
@@ -551,6 +566,30 @@ func prepareLaneCheckout(log *eventLog, repository string) error {
 		return log.append("lane.fetch.skipped", "", laneGitFailure(fmt.Sprintf("git merge --ff-only origin/%s", base), output, err))
 	}
 	return log.append("lane.fetch", "", fmt.Sprintf("fast-forwarded %s to origin/%s", base, base))
+}
+
+// saveLaneWIP stashes the tracked modifications reported by the dirty-lane
+// check and writes the stash patch next to the run artifacts, so the lane is
+// left clean and the change is recoverable. Returns an error only when the
+// stash itself fails, which is the one case the caller must still refuse.
+func saveLaneWIP(log *eventLog, repository, runDirectory, dirty string) error {
+	label := "machinist-lane-wip-" + time.Now().UTC().Format("20060102-150405")
+	stash := exec.Command("git", "-C", repository, "stash", "push", "--include-untracked", "-m", label)
+	stash.Env = sanitizedEnvironment(os.Environ())
+	if output, err := stash.CombinedOutput(); err != nil {
+		return fmt.Errorf("lane checkout is dirty and could not be saved: %s", laneGitFailure("git stash push", output, err))
+	}
+	message := fmt.Sprintf("saved dirty lane changes to stash %q: %s", label, dirty)
+	if runDirectory != "" {
+		show := exec.Command("git", "-C", repository, "stash", "show", "--patch", "--include-untracked", "stash@{0}")
+		show.Env = sanitizedEnvironment(os.Environ())
+		if patch, err := show.Output(); err == nil && len(patch) > 0 {
+			if writeErr := os.WriteFile(filepath.Join(runDirectory, label+".patch"), patch, 0o600); writeErr != nil {
+				message += fmt.Sprintf(" (could not write patch: %v)", writeErr)
+			}
+		}
+	}
+	return log.append("lane.wip.saved", "", message)
 }
 
 // laneBaseBranch returns the branch origin advertises as its default, first
@@ -791,7 +830,7 @@ func sanitizedEnvironment(environ []string) []string {
 	clean := make([]string, 0, len(environ))
 	for _, entry := range environ {
 		name, _, _ := strings.Cut(entry, "=")
-		if isRepositoryGitEnvironment(name) || name == "MACHINIST_STEP_RESULT_PATH" || name == "MACHINIST_JOB_ID" || name == "MACHINIST_OUTPUT_DIR" || name == "MACHINIST_INPUT_DIR" || name == "MACHINIST_SCRATCH_DIR" || name == "MACHINIST_REVISION_PATH" {
+		if isRepositoryGitEnvironment(name) || name == "MACHINIST_STEP_RESULT_PATH" || name == "MACHINIST_JOB_ID" || name == "MACHINIST_OUTPUT_DIR" || name == "MACHINIST_INPUT_DIR" || name == "MACHINIST_SCRATCH_DIR" || name == "MACHINIST_REVISION_PATH" || name == "MACHINIST_JOB_TIMEOUT_SECONDS" || name == "MACHINIST_JOB_STARTED_EPOCH" {
 			continue
 		}
 		clean = append(clean, entry)

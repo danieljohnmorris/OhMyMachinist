@@ -77,23 +77,24 @@ type StateTransition struct {
 }
 
 type Run struct {
-	Revision       *protocol.Revision `json:"revision,omitempty"`
-	ReviewedRunID  string             `json:"reviewed_run_id,omitempty"`
-	Step           *int               `json:"step,omitempty"`
-	Outcome        string             `json:"outcome,omitempty"`
-	Summary        string             `json:"summary,omitempty"`
-	ID             string             `json:"id"`
-	Command        string             `json:"command"`
-	Executor       string             `json:"executor"`
-	Model          string             `json:"model,omitempty"`
-	State          string             `json:"state"`
-	WorkerName     string             `json:"worker_name,omitempty"`
-	ExitCode       *int               `json:"exit_code,omitempty"`
-	Error          string             `json:"error,omitempty"`
-	StartedAt      time.Time          `json:"started_at,omitempty"`
-	CompletedAt    time.Time          `json:"completed_at,omitempty"`
-	DurationMillis *int64             `json:"duration_millis,omitempty"`
-	TokenUsage     *int64             `json:"token_usage,omitempty,string"`
+	Revision       *protocol.Revision  `json:"revision,omitempty"`
+	ReviewedRunID  string              `json:"reviewed_run_id,omitempty"`
+	Skills         *protocol.RunSkills `json:"skills,omitempty"`
+	Step           *int                `json:"step,omitempty"`
+	Outcome        string              `json:"outcome,omitempty"`
+	Summary        string              `json:"summary,omitempty"`
+	ID             string              `json:"id"`
+	Command        string              `json:"command"`
+	Executor       string              `json:"executor"`
+	Model          string              `json:"model,omitempty"`
+	State          string              `json:"state"`
+	WorkerName     string              `json:"worker_name,omitempty"`
+	ExitCode       *int                `json:"exit_code,omitempty"`
+	Error          string              `json:"error,omitempty"`
+	StartedAt      time.Time           `json:"started_at,omitempty"`
+	CompletedAt    time.Time           `json:"completed_at,omitempty"`
+	DurationMillis *int64              `json:"duration_millis,omitempty"`
+	TokenUsage     *int64              `json:"token_usage,omitempty,string"`
 }
 
 type Worker struct {
@@ -216,7 +217,7 @@ func OpenStore(path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) initialize(ctx context.Context) error {
-	const schemaVersion = 8
+	const schemaVersion = 10
 	var version int
 	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		return fmt.Errorf("read database schema version: %w", err)
@@ -334,7 +335,17 @@ END;`
 			return fmt.Errorf("upgrade database schema to version 8: %w", err)
 		}
 	}
-	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+jobMetadataSchema+"PRAGMA user_version=8;")
+	if version < 9 {
+		if err := s.addRunSkills(ctx); err != nil {
+			return fmt.Errorf("upgrade database schema to version 9: %w", err)
+		}
+	}
+	if version < 10 {
+		if _, err := s.db.ExecContext(ctx, planeSchema); err != nil {
+			return fmt.Errorf("upgrade database schema to version 10: %w", err)
+		}
+	}
+	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+jobMetadataSchema+planeSchema+"PRAGMA user_version=10;")
 	return err
 }
 
@@ -360,6 +371,19 @@ func (s *Store) addJobResolution(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// addRunSkills records the skills a run loaded as JSON on the run row.
+func (s *Store) addRunSkills(ctx context.Context) error {
+	var columns int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name='skills'`).Scan(&columns); err != nil {
+		return err
+	}
+	if columns > 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `ALTER TABLE runs ADD COLUMN skills TEXT NOT NULL DEFAULT ''`)
+	return err
 }
 
 func (s *Store) addJobTitle(ctx context.Context) error {
@@ -1080,6 +1104,9 @@ func (s *Store) poll(ctx context.Context, request protocol.PollRequest, maxConcu
 		if err := s.enrichRun(ctx, tx, &active); err != nil {
 			return nil, err
 		}
+		if err := s.enrichProject(ctx, tx, &active); err != nil {
+			return nil, err
+		}
 		if err := enrichReview(ctx, tx, &active); err != nil {
 			return nil, err
 		}
@@ -1221,6 +1248,9 @@ func (s *Store) poll(ctx context.Context, request protocol.PollRequest, maxConcu
 	if err := s.enrichRun(ctx, tx, &selected); err != nil {
 		return nil, err
 	}
+	if err := s.enrichProject(ctx, tx, &selected); err != nil {
+		return nil, err
+	}
 	if err := enrichReview(ctx, tx, &selected); err != nil {
 		return nil, err
 	}
@@ -1228,6 +1258,21 @@ func (s *Store) poll(ctx context.Context, request protocol.PollRequest, maxConcu
 		return nil, err
 	}
 	return &selected, nil
+}
+
+// enrichProject attaches the job's project key so the worker can read the
+// skills.project.<project> setting. A job with no metadata keeps it empty.
+func (s *Store) enrichProject(ctx context.Context, tx *sql.Tx, run *protocol.RunSpec) error {
+	var project string
+	err := tx.QueryRowContext(ctx, `SELECT COALESCE(json_extract(metadata,'$.project'),'') FROM job_metadata WHERE job_id=?`, run.JobID).Scan(&project)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	run.Project = strings.TrimSpace(project)
+	return nil
 }
 
 func (s *Store) Complete(ctx context.Context, runID string, completion protocol.Completion) error {
@@ -1265,7 +1310,15 @@ func (s *Store) Complete(ctx context.Context, runID string, completion protocol.
 	if durationMillis == nil {
 		durationMillis = elapsedMillis(startedAt, now)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE runs SET state=?,exit_code=?,error=?,result=?,events=?,lease_expires_at=NULL,completed_at=?,duration_millis=?,token_usage=? WHERE id=?`, completion.State, completion.ExitCode, completion.Error, string(completion.Result), completion.Events, now, durationMillis, tokenUsage, runID); err != nil {
+	skillsJSON := ""
+	if completion.Skills != nil {
+		encoded, err := json.Marshal(completion.Skills)
+		if err != nil {
+			return err
+		}
+		skillsJSON = string(encoded)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE runs SET state=?,exit_code=?,error=?,result=?,events=?,skills=?,lease_expires_at=NULL,completed_at=?,duration_millis=?,token_usage=? WHERE id=?`, completion.State, completion.ExitCode, completion.Error, string(completion.Result), completion.Events, skillsJSON, now, durationMillis, tokenUsage, runID); err != nil {
 		return err
 	}
 	if handled, err := completeWorkflow(ctx, tx, jobID, runID, completion, now); handled || err != nil {
@@ -1487,7 +1540,7 @@ func (s *Store) RunOutput(ctx context.Context, runID string) (RunOutput, error) 
 // jobID restricts the result to that job.
 func (s *Store) listJobs(ctx context.Context, jobID string) ([]Job, error) {
 	query := `SELECT j.id,j.title,j.prompt,j.repository,j.github_issue_title,j.command,j.trigger_identity,j.occurrence_key,j.trigger_subject,j.state,j.previous_job_id,j.attempt,COALESCE(j.superseded_by,''),j.issue_key,j.resolution_kind,j.resolution_detail,COALESCE(j.resolved_at,''),j.created_at,j.updated_at,
-COALESCE(r.id,''),COALESCE(r.command,''),COALESCE(r.executor,''),COALESCE(r.model,''),COALESCE(r.state,''),COALESCE(NULLIF(r.worker_name,''),w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,''),r.duration_millis,r.token_usage,a.step,COALESCE(a.outcome,''),COALESCE(NULLIF(a.summary,''),CASE WHEN json_valid(r.result) THEN json_extract(r.result,'$.final_message') END,'')
+COALESCE(r.id,''),COALESCE(r.command,''),COALESCE(r.executor,''),COALESCE(r.model,''),COALESCE(r.state,''),COALESCE(NULLIF(r.worker_name,''),w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,''),r.duration_millis,r.token_usage,COALESCE(r.skills,''),a.step,COALESCE(a.outcome,''),COALESCE(NULLIF(a.summary,''),CASE WHEN json_valid(r.result) THEN json_extract(r.result,'$.final_message') END,'')
 FROM jobs j LEFT JOIN runs r ON r.job_id=j.id LEFT JOIN workers w ON w.instance_id=r.worker_instance LEFT JOIN workflow_attempts a ON a.run_id=r.id`
 	args := []any{}
 	if jobID != "" {
@@ -1505,11 +1558,12 @@ FROM jobs j LEFT JOIN runs r ON r.job_id=j.id LEFT JOIN workers w ON w.instance_
 		job := Job{Runs: []Run{}}
 		var run Run
 		var created, updated, started, completed string
-		var resolutionKind, resolutionDetail, resolvedAt string
+		var resolutionKind, resolutionDetail, resolvedAt, skillsRaw string
 		if err := rows.Scan(&job.ID, &job.Title, &job.Prompt, &job.Repository, &job.GitHubIssueTitle, &job.Command, &job.TriggerID, &job.OccurrenceKey, &job.TriggerSubject, &job.State, &job.PreviousJobID, &job.Attempt, &job.SupersededBy, &job.IssueKey, &resolutionKind, &resolutionDetail, &resolvedAt, &created, &updated,
-			&run.ID, &run.Command, &run.Executor, &run.Model, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &started, &completed, &run.DurationMillis, &run.TokenUsage, &run.Step, &run.Outcome, &run.Summary); err != nil {
+			&run.ID, &run.Command, &run.Executor, &run.Model, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &started, &completed, &run.DurationMillis, &run.TokenUsage, &skillsRaw, &run.Step, &run.Outcome, &run.Summary); err != nil {
 			return nil, err
 		}
+		run.Skills = decodeRunSkills(skillsRaw)
 		job.ResolutionKind = resolutionKind
 		job.ResolutionDetail = resolutionDetail
 		if resolvedAt != "" {
@@ -1574,16 +1628,30 @@ func (s *Store) GetJob(ctx context.Context, jobID string) (Job, error) {
 // logs stay out of job listings.
 func (s *Store) GetRun(ctx context.Context, runID string) (Run, error) {
 	var run Run
-	var started, completed string
-	err := s.db.QueryRowContext(ctx, `SELECT r.id,r.command,r.executor,r.model,r.state,COALESCE(NULLIF(r.worker_name,''),w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,''),r.duration_millis,r.token_usage,a.step,COALESCE(a.outcome,''),COALESCE(NULLIF(a.summary,''),CASE WHEN json_valid(r.result) THEN json_extract(r.result,'$.final_message') END,'')
+	var started, completed, skillsRaw string
+	err := s.db.QueryRowContext(ctx, `SELECT r.id,r.command,r.executor,r.model,r.state,COALESCE(NULLIF(r.worker_name,''),w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,''),r.duration_millis,r.token_usage,COALESCE(r.skills,''),a.step,COALESCE(a.outcome,''),COALESCE(NULLIF(a.summary,''),CASE WHEN json_valid(r.result) THEN json_extract(r.result,'$.final_message') END,'')
 FROM runs r LEFT JOIN workers w ON w.instance_id=r.worker_instance LEFT JOIN workflow_attempts a ON a.run_id=r.id WHERE r.id=?`, runID).
-		Scan(&run.ID, &run.Command, &run.Executor, &run.Model, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &started, &completed, &run.DurationMillis, &run.TokenUsage, &run.Step, &run.Outcome, &run.Summary)
+		Scan(&run.ID, &run.Command, &run.Executor, &run.Model, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &started, &completed, &run.DurationMillis, &run.TokenUsage, &skillsRaw, &run.Step, &run.Outcome, &run.Summary)
 	if err != nil {
 		return Run{}, err
 	}
+	run.Skills = decodeRunSkills(skillsRaw)
 	run.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
 	run.CompletedAt, _ = time.Parse(time.RFC3339Nano, completed)
 	return run, nil
+}
+
+// decodeRunSkills parses the recorded skill list; an absent or invalid value
+// yields no skills rather than failing the read.
+func decodeRunSkills(raw string) *protocol.RunSkills {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var skills protocol.RunSkills
+	if err := json.Unmarshal([]byte(raw), &skills); err != nil {
+		return nil
+	}
+	return &skills
 }
 
 // LatestRunID returns the most recent run of a job, or sql.ErrNoRows when

@@ -3,6 +3,7 @@
 /.machinist/
 # Local config overlay and all env files stay out of git; templates use
 # *.example placeholders instead.
+*.local.toml
 *.env
 .env.*
 !*.env.example

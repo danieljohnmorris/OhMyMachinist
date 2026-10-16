@@ -3,7 +3,9 @@ import { ArrowLeft, ArrowRight, Check } from "lucide-react";
 import { Tabs } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { shortVersion } from "./skills.js";
 import { Artifacts, useTaskArtifacts } from "./artifacts.jsx";
 import { Transcript } from "./transcript.jsx";
 import { taskPresentation } from "./task-presentation.js";
@@ -135,6 +137,9 @@ export function TaskDetail({
                 ["Preview", job.metadata?.preview_url],
                 ["Review verdict", job.metadata?.review_verdict],
                 ["Review summary", job.metadata?.review_summary],
+                ["Intake", job.metadata?.intake_source],
+                ["Plane delivery", job.metadata?.intake_delivery_id],
+                ["Spec hash", job.metadata?.intake_spec_hash],
                 ["Status", stateLabel(job.state)],
                 ["Created", formatTimestamp(job.created_at)],
                 ["Updated", formatTimestamp(job.updated_at)],
@@ -401,6 +406,7 @@ export function TaskDetail({
             )}
             {canCancelJob(job) && <CancelJobButton job={job} onCancel={onCancelJob} />}
           </Card>
+          <RunSkills run={latest} />
           <div
             className="space-y-6 rounded-sm border border-border bg-surface p-5 text-sm sm:p-6"
             aria-label="Task details"
@@ -498,6 +504,43 @@ function RunActivity({ job }) {
           </li>
         ))}
       </ol>
+    </Card>
+  );
+}
+
+// RunSkills shows the skills a run loaded (name, version, scope and injection
+// method) and any load warnings, recorded by the worker and returned with the
+// run. It renders nothing when the run loaded no skills and reported none.
+function RunSkills({ run }) {
+  const skills = run?.skills?.skills || [];
+  const warnings = run?.skills?.warnings || [];
+  if (!skills.length && !warnings.length) return null;
+  return (
+    <Card className="space-y-3 p-5 sm:p-6" aria-label="Loaded skills">
+      <h2 className="text-lg font-semibold">Skills</h2>
+      {skills.length > 0 ? (
+        <ul className="space-y-2 text-sm">
+          {skills.map((skill) => (
+            <li key={`${skill.name}:${skill.version}`} className="flex flex-wrap items-center gap-2">
+              <span className="font-medium">{skill.name}</span>
+              {skill.version && (
+                <span className="font-mono text-xs text-muted-foreground" title={skill.version}>
+                  {shortVersion(skill.version)}
+                </span>
+              )}
+              {skill.scope && <Badge variant="outline" className="border-border bg-muted font-normal capitalize text-muted-foreground">{skill.scope}</Badge>}
+              {skill.method && <Badge variant="outline" className="border-border bg-muted font-normal text-muted-foreground">{skill.method}</Badge>}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-sm text-muted-foreground">No skills loaded.</p>
+      )}
+      {warnings.length > 0 && (
+        <ul className="space-y-1 rounded-md border border-warning/35 bg-warning/10 px-3 py-2 text-sm text-warning" aria-label="Skill warnings">
+          {warnings.map((warning) => <li key={warning}>{warning}</li>)}
+        </ul>
+      )}
     </Card>
   );
 }

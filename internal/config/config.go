@@ -32,6 +32,17 @@ const (
 	modelParameter           = "{{machinist.model}}"
 	machinistParameterPrefix = "{{machinist"
 	legacyFactoryPrefix      = "{{factory."
+
+	// Config overlays carry instance-specific values (hosts, paths, tokens,
+	// projects) that must not live in git. The overlay is merged on top of the
+	// tracked config: base first, overlay second, overlay wins. The overlay
+	// path is MACHINIST_CONFIG_OVERLAY (MACHINIST_WORKER_CONFIG_OVERLAY for
+	// worker.toml) when set, else the sibling config.local.toml
+	// (worker.local.toml) next to the base file when it exists.
+	configOverlayEnv       = "MACHINIST_CONFIG_OVERLAY"
+	workerConfigOverlayEnv = "MACHINIST_WORKER_CONFIG_OVERLAY"
+	configOverlayName      = "config.local.toml"
+	workerOverlayName      = "worker.local.toml"
 )
 
 type Worker struct {
@@ -89,6 +100,7 @@ type Config struct {
 	Triggers     TriggerDefinitions  `toml:"triggers"`
 	Alerts       Alerts              `toml:"alerts"`
 	Review       Review              `toml:"review"`
+	Plane        Plane               `toml:"plane"`
 	path         string
 }
 
@@ -223,6 +235,10 @@ func LoadWorker(path string) (Worker, error) {
 	if err != nil {
 		return Worker{}, fmt.Errorf("read worker config %q: %w", absPath, err)
 	}
+	body, err = mergeConfigOverlay(absPath, body, workerConfigOverlayEnv, workerOverlayName)
+	if err != nil {
+		return Worker{}, err
+	}
 	decoder := toml.NewDecoder(strings.NewReader(string(body)))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&worker); err != nil {
@@ -260,6 +276,10 @@ func loadConfigFile(path string) (Config, error) {
 	body, err := readBoundedFile(absPath, maxConfigBytes)
 	if err != nil {
 		return Config{}, fmt.Errorf("read Machinist config %q: %w", absPath, err)
+	}
+	body, err = mergeConfigOverlay(absPath, body, configOverlayEnv, configOverlayName)
+	if err != nil {
+		return Config{}, err
 	}
 	var raw map[string]any
 	if err := toml.Unmarshal(body, &raw); err != nil {
@@ -708,6 +728,69 @@ func expandHome(path string) (string, error) {
 		return filepath.Join(home, filepath.FromSlash(strings.TrimPrefix(path, "~/"))), nil
 	}
 	return path, nil
+}
+
+// mergeConfigOverlay returns the base config body with the instance overlay
+// merged on top (base first, overlay second, overlay wins for scalars and
+// arrays; tables merge key by key). The overlay is MACHINIST_*_OVERLAY when
+// set, else the sibling <name> next to the base file when it exists. With no
+// overlay the base body is returned untouched.
+func mergeConfigOverlay(absPath string, body []byte, envKey, name string) ([]byte, error) {
+	overlayPath := strings.TrimSpace(os.Getenv(envKey))
+	explicit := overlayPath != ""
+	if !explicit {
+		overlayPath = filepath.Join(filepath.Dir(absPath), name)
+	}
+	overlayBody, err := readOptionalFile(overlayPath)
+	if err != nil {
+		return nil, fmt.Errorf("read config overlay %q: %w", overlayPath, err)
+	}
+	if overlayBody == nil {
+		if explicit {
+			return nil, fmt.Errorf("config overlay %q does not exist", overlayPath)
+		}
+		return body, nil
+	}
+	var base, overlay map[string]any
+	if err := toml.Unmarshal(body, &base); err != nil {
+		return nil, fmt.Errorf("parse config %q: %w", absPath, err)
+	}
+	if err := toml.Unmarshal(overlayBody, &overlay); err != nil {
+		return nil, fmt.Errorf("parse config overlay %q: %w", overlayPath, err)
+	}
+	merged, err := toml.Marshal(mergeTOML(base, overlay))
+	if err != nil {
+		return nil, fmt.Errorf("merge config overlay %q: %w", overlayPath, err)
+	}
+	return merged, nil
+}
+
+// mergeTOML deep-merges overlay into base and returns base. Nested tables
+// merge; every other value (including arrays) is replaced by the overlay.
+func mergeTOML(base, overlay map[string]any) map[string]any {
+	for key, value := range overlay {
+		if overlayTable, ok := value.(map[string]any); ok {
+			if baseTable, ok := base[key].(map[string]any); ok {
+				base[key] = mergeTOML(baseTable, overlayTable)
+				continue
+			}
+		}
+		base[key] = value
+	}
+	return base
+}
+
+// readOptionalFile reads path as a bounded config file. A missing file is not
+// an error and returns nil so an absent sibling overlay is a no-op.
+func readOptionalFile(path string) ([]byte, error) {
+	body, err := readBoundedFile(path, maxConfigBytes)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return body, nil
 }
 
 func readBoundedFile(path string, limit int64) ([]byte, error) {

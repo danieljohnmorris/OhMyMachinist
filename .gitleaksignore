@@ -1,4 +1,19 @@
 # Gitleaks allowlist: pre-existing test fixtures with obviously fake values.
-# Fingerprint format: <file>:<rule>:<line>.
-deploy/factory/tests/test_deliver_pr.py:generic-api-key:70
-internal/runner/runner_test.go:generic-api-key:201
+# Fingerprint format: <file>:<rule>:<line>, relative to the scan source. CI runs
+# a working-tree scan from the repo root and a deploy-only scan (whose paths are
+# relative to deploy/), so both forms of the same fixture are listed.
+deploy/factory/tests/test_deliver_pr.py:generic-api-key:74
+factory/tests/test_deliver_pr.py:generic-api-key:74
+internal/runner/runner_test.go:generic-api-key:224
+# Full-history scan (git mode) fingerprints: <commit>:<file>:<rule>:<line>.
+# All are pre-existing fake fixtures or example idempotency keys already on main.
+c425b0b4ba62ed99f9a5f6609a8d7b16bdb1fc53:deploy/factory/tests/test_deliver_pr.py:generic-api-key:70
+91e772935e8831eaaf0a257ddf8df4dfc4c75f01:internal/runner/runner_test.go:generic-api-key:130
+ee5a13c894f917a6493f9444070a1f7ad0d8fc84:web/e2e/control-plane.spec.ts:generic-api-key:1237
+cb1e95559e6e9b6109455b80f1537a4fcf7112af:docs/workflows/design.md:generic-api-key:524
+646e553948ba52b2dcf7f18029e07d00d60d465e:docs/phases/design.md:generic-api-key:799
+646e553948ba52b2dcf7f18029e07d00d60d465e:docs/phases/design.md:generic-api-key:841
+646e553948ba52b2dcf7f18029e07d00d60d465e:docs/phases/design.md:generic-api-key:955
+3f154171ddd15f384b80c7f82c95de4768caf5eb:docs/v2-workflows/design.md:generic-api-key:221
+3f154171ddd15f384b80c7f82c95de4768caf5eb:docs/v2-workflows/design.md:generic-api-key:264
+24b92480d6a7d4aa75a73c85ba7bc3557674ebd2:docs/v2-architecture/design.md:generic-api-key:391

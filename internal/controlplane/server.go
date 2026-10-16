@@ -56,6 +56,9 @@ type Server struct {
 	authMode             string
 	reviewDefaultProfile string
 	failAlerts           *failAlertWriter
+	planeIntake          *PlaneIntake
+	planePollEvery       time.Duration
+	planeSyncEvery       time.Duration
 	csrfToken            string
 	handler              http.Handler
 }
@@ -186,6 +189,21 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 	if err != nil {
 		return nil, err
 	}
+	planeIntake, err := NewPlaneIntake(store, definitionPath, "")
+	if err != nil {
+		return nil, err
+	}
+	planeIntake.SetCommandResolver(func(name string) (config.ResolvedCommand, error) {
+		return config.LoadCommand(definitionPath, name)
+	})
+	if err := planeIntake.ImportState(context.Background()); err != nil {
+		return nil, fmt.Errorf("import plane intake state: %w", err)
+	}
+	server.planeIntake = planeIntake
+	if resolved, err := planeIntake.config(context.Background()); err == nil {
+		server.planePollEvery = resolved.PollEvery
+		server.planeSyncEvery = resolved.SyncEvery
+	}
 	return server, nil
 }
 
@@ -295,6 +313,10 @@ func (s *Server) runScheduler(ctx context.Context) error {
 	loop(s.schedulerEvery, true, s.maintainState)
 	loop(s.schedulerEvery, true, s.store.CleanupArtifacts)
 	loop(s.resolutionEvery, false, s.reconcileTicketOutcomes)
+	if s.planeIntake != nil {
+		loop(s.planePollEvery, true, s.planePoll)
+		loop(s.planeSyncEvery, true, s.planeSync)
+	}
 	<-ctx.Done()
 	schedulers.Wait()
 	return nil
@@ -316,6 +338,18 @@ func (s *Server) maintainState(ctx context.Context) error {
 	_, reclaimErr := s.store.ReclaimExpiredLeases(ctx)
 	_, pruneErr := s.store.PruneSupersededWorkers(ctx, s.store.now().UTC().Add(-workerAvailabilityWindow))
 	return errors.Join(reclaimErr, pruneErr)
+}
+
+// planePoll runs the intake poll fallback; it stands down while webhooks are
+// arriving.
+func (s *Server) planePoll(ctx context.Context) error {
+	_, err := s.planeIntake.Poll(ctx, false)
+	return err
+}
+
+// planeSync pushes Machinist run outcomes back to the linked Plane tickets.
+func (s *Server) planeSync(ctx context.Context) error {
+	return s.planeIntake.Sync(ctx)
 }
 
 func (s *Server) reportSchedulerError(err error) {
@@ -367,6 +401,7 @@ func (s *Server) routes() (http.Handler, error) {
 	mux.HandleFunc("POST /api/v1/tokens", s.authorizeWrite(s.createTokenHandler))
 	mux.HandleFunc("DELETE /api/v1/tokens/{id}", s.authorizeWrite(s.revokeTokenHandler))
 	mux.HandleFunc("GET /api/v1/audit-log", s.authorizeRead(s.auditLogHandler))
+	mux.HandleFunc("GET /api/v1/plane/intake", s.authorizeRead(s.planeIntakeReportHandler))
 	mux.HandleFunc("GET /api/v1/skills", s.authorizeRead(s.listSkillsHandler))
 	mux.HandleFunc("GET /api/v1/skills/{name}", s.authorizeRead(s.getSkillHandler))
 	mux.HandleFunc("POST /api/v1/skills", s.authorizeWrite(s.installSkillHandler))

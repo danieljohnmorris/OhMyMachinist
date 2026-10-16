@@ -1,0 +1,42 @@
+# Machinist control-plane configuration template.
+#
+# The installer copies this file to /etc/machinist/config.toml only when that
+# file does not exist; it never overwrites an existing config, the local
+# overlay or the env files. Put instance values (hosts, ports, paths, project
+# names, repository mappings) in /etc/machinist/config.local.toml, which is
+# merged on top of this file at load time (base first, overlay second, the
+# overlay wins; tables merge key by key, every other value is replaced).
+# Secrets never belong in either file: they come from the systemd
+# EnvironmentFile files under /etc/machinist/ (see ../systemd/).
+
+[server]
+listen = "127.0.0.1:7331"
+database = "~/.machinist/server/machinist.db"
+worker_token_file = "~/.machinist/server/worker.token"
+max_concurrent_jobs = 1
+# API authentication. "tokens" (default) requires scoped bearer tokens for
+# machine clients; "none" opts out and is only allowed on a loopback or
+# trusted Tailscale interface.
+# auth = "tokens"
+
+# Library profile used when a repository has no .machinist/review.yaml and no
+# per-project choice in Settings. Falls back to the shipped `default` profile.
+# [review]
+# default_profile = "default"
+
+# Pending failure-alert spool. An external notifier (deploy/factory/fail.py)
+# watches this directory and hands alerts to Factory Alerts.
+[alerts]
+directory = "~/.machinist/alerts/pending"
+
+# Take a task or issue to a reviewed pull request. With no prompt_file the
+# submitted prompt is passed through; point it at a prompt template (resolved
+# relative to this file) to wrap the task instead.
+[commands.task-to-pr]
+executor = "omp"
+timeout = "120m"
+# prompt_file = "prompts/task-to-pr.md"
+
+# Map Machinist repository names to GitHub owner/name for PR links and intake.
+# [github.repositories]
+# my-project = "owner/my-project"

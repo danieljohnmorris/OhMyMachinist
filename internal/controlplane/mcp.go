@@ -424,7 +424,7 @@ func (s *Server) invokeMCPTool(ctx context.Context, identity TokenIdentity, name
 		}
 		return map[string]string{"status": "accepted", "job_id": input.JobID, "run_id": runID}, nil
 	case "list_skills":
-		views, err := s.listSkills()
+		views, err := s.listSkills(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -439,7 +439,7 @@ func (s *Server) invokeMCPTool(ctx context.Context, identity TokenIdentity, name
 		if _, err := skills.Key(input.Name); err != nil {
 			return nil, errors.New("skill name is not usable")
 		}
-		view, err := s.getSkill(input.Name)
+		view, err := s.getSkill(ctx, input.Name)
 		if err != nil {
 			return nil, err
 		}
@@ -495,7 +495,7 @@ func (s *Server) invokeMCPTool(ctx context.Context, identity TokenIdentity, name
 			return nil, err
 		}
 		s.recordSkillAudit(ctx, identity, "skills.pin", input.Name+" "+input.Version)
-		view, err := s.getSkill(input.Name)
+		view, err := s.getSkill(ctx, input.Name)
 		if err != nil {
 			return nil, err
 		}

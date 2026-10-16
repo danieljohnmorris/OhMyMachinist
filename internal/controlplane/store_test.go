@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -125,7 +126,7 @@ func TestOpenStoreReplacesLegacySchema(t *testing.T) {
 	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if count != 0 || version != 8 {
+	if count != 0 || version != 10 {
 		t.Fatalf("migrated database count=%d version=%d", count, version)
 	}
 }
@@ -136,7 +137,7 @@ func TestOpenStoreRejectsNewerSchemaWithoutDeletingIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`CREATE TABLE future_data(value TEXT); INSERT INTO future_data VALUES('preserved'); PRAGMA user_version=9;`); err != nil {
+	if _, err := db.Exec(`CREATE TABLE future_data(value TEXT); INSERT INTO future_data VALUES('preserved'); PRAGMA user_version=11;`); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -1332,8 +1333,8 @@ func testVersionOneUpgrade(t *testing.T, partial string) {
 	}
 	defer store.Close()
 	var version int
-	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 8 {
-		t.Fatalf("schema version = %d, %v, want 8", version, err)
+	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 10 {
+		t.Fatalf("schema version = %d, %v, want 10", version, err)
 	}
 	var columns int
 	if err := store.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name IN ('has_shepherd','schedule_name','title')`).Scan(&columns); err != nil || columns != 1 {
@@ -1471,5 +1472,49 @@ func TestCancelPlainJobRejectsRunningAndMissing(t *testing.T) {
 	}
 	if err := store.WorkflowAction(t.Context(), "job_missing", "", "cancel", false); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("cancel missing job = %v", err)
+	}
+}
+
+func TestRunSkillsRecordedAndReturnedInJobAndRun(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "machinist.db"))
+	jobID, err := store.CreateJobWithOptions(t.Context(), "request", "machinist", "plan", testAgent("plan", "Plan request"), CreateJobOptions{Title: "MACH-50 skills", Project: "MACH"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"machinist"}))
+	if err != nil || run == nil {
+		t.Fatalf("poll = %#v, %v", run, err)
+	}
+	if run.Project != "MACH" {
+		t.Fatalf("run project = %q, want MACH", run.Project)
+	}
+	skills := &protocol.RunSkills{
+		Skills:   []protocol.LoadedSkill{{Name: "rust-review", Version: "abc123", Scope: "repo", Method: "native"}},
+		Warnings: []string{`skill "ghost" is not installed; skipping`},
+	}
+	if err := store.Complete(t.Context(), run.ID, protocol.Completion{InstanceID: "worker-a", LeaseToken: run.LeaseToken, State: "succeeded", ExitCode: 0, Skills: skills}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetRun(t.Context(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Skills == nil || len(got.Skills.Skills) != 1 || got.Skills.Skills[0].Name != "rust-review" || got.Skills.Skills[0].Version != "abc123" || len(got.Skills.Warnings) != 1 {
+		t.Fatalf("GetRun skills = %#v", got.Skills)
+	}
+	job, err := store.GetJob(t.Context(), jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(job.Runs) != 1 || job.Runs[0].Skills == nil || job.Runs[0].Skills.Skills[0].Method != "native" {
+		t.Fatalf("job run skills = %#v", job.Runs)
+	}
+	// The recorded list never carries skill content or tokens.
+	body, err := json.Marshal(job.Runs[0].Skills)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "SKILL.md") || strings.Contains(string(body), run.LeaseToken) {
+		t.Fatalf("skills response leaked content or a token: %s", body)
 	}
 }

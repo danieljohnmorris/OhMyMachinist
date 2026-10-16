@@ -1,0 +1,22 @@
+[Unit]
+Description=Machinist worker lane %i (config /etc/machinist/worker-%i.toml; one job at a time)
+After=machinist-control.service
+Wants=machinist-control.service
+
+[Service]
+Type=simple
+User=machinist
+Group=machinist
+WorkingDirectory=/home/machinist
+Environment=HOME=/home/machinist
+EnvironmentFile=-/etc/machinist/machinist.env
+NoNewPrivileges=yes
+PrivateTmp=yes
+ExecStart=/usr/local/bin/machinist worker start --config /etc/machinist/worker-%i.toml
+Restart=on-failure
+RestartSec=5s
+KillMode=control-group
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

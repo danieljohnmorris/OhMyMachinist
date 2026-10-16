@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the Machinist drift check periodically
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

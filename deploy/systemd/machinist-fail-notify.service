@@ -1,0 +1,17 @@
+[Unit]
+Description=Machinist failure notifier: comment on the linked Plane ticket, hand the alert to Factory Alerts
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=machinist
+Group=machinist
+WorkingDirectory=/home/machinist
+Environment=HOME=/home/machinist
+# Plane credentials and notifier flags; secrets only from this file outside git.
+EnvironmentFile=-/etc/machinist/plane.env
+Environment=FAIL_REQUEUE_TRANSIENT=0
+Environment=FAIL_PLANE_COMMENT=1
+NoNewPrivileges=yes
+PrivateTmp=yes
+ExecStart=/usr/bin/python3 /usr/local/lib/machinist-factory/fail.py notify

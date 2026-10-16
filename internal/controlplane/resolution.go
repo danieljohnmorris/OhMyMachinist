@@ -225,6 +225,10 @@ func (s *Server) reconcileTicketOutcomes(ctx context.Context) error {
 // completed state, every finished job tied to the ticket is resolved. The
 // request must carry a valid HMAC signature.
 func (s *Server) issueWebhook(response http.ResponseWriter, request *http.Request) {
+	if s.planeIntake != nil && request.Header.Get("X-Plane-Signature") != "" {
+		s.planeWebhook(response, request)
+		return
+	}
 	if s.webhookSecret == "" {
 		writeError(response, http.StatusServiceUnavailable, errors.New("issue webhook secret is not configured"))
 		return

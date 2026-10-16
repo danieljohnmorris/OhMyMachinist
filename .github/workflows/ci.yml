@@ -56,6 +56,10 @@ jobs:
       - name: Run review profile tests (Python)
         working-directory: deploy/factory
         run: python3 -m unittest review.test_profiles
+      - name: Run factory script tests (Python)
+        run: python3 -m unittest discover -s deploy/factory/tests -t .
+      - name: Run deploy installer and drift tests (Python)
+        run: python3 -m unittest discover -s deploy/tests -t .
       - name: Build Machinist
         run: |
           mkdir -p bin
@@ -93,6 +97,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
       - name: Scan the tree with gitleaks
         run: |
@@ -100,6 +105,10 @@ jobs:
           echo "9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c  /tmp/gitleaks.tar.gz" | sha256sum -c -
           tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
           /tmp/gitleaks detect --source . --no-git --redact --verbose
+      - name: Scan the full git history with gitleaks
+        run: /tmp/gitleaks detect --source . --redact --verbose
+      - name: Scan the deploy tree with gitleaks
+        run: /tmp/gitleaks detect --source deploy --no-git --redact --verbose
 
   trufflehog:
     name: Secret scan (TruffleHog)

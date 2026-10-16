@@ -1,20 +1,25 @@
 [Unit]
-Description=Machinist managed worker
-After=network-online.target machinist-control-plane.service
-Wants=network-online.target
-Requires=machinist-control-plane.service
-StartLimitIntervalSec=60s
-StartLimitBurst=5
+Description=Machinist worker (runs queued jobs)
+After=machinist-control.service
+Wants=machinist-control.service
 
 [Service]
 Type=simple
 User=machinist
 Group=machinist
-Environment=HOME=/home/machinist
 WorkingDirectory=/home/machinist
-ExecStart=/usr/local/bin/machinist worker start
-Restart=always
+Environment=HOME=/home/machinist
+# Instance/tooling values (omp paths, models, data directory) come from this
+# EnvironmentFile outside git; secrets are never in the repo.
+EnvironmentFile=-/etc/machinist/machinist.env
+NoNewPrivileges=yes
+PrivateTmp=yes
+ExecStart=/usr/local/bin/machinist worker start --config /etc/machinist/worker.toml
+Restart=on-failure
 RestartSec=5s
+# Stop kills the executor children too.
+KillMode=control-group
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target

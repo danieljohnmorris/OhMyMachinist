@@ -1,0 +1,22 @@
+[Unit]
+Description=Machinist control plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=machinist
+Group=machinist
+WorkingDirectory=/home/machinist
+Environment=HOME=/home/machinist
+# Plane workspace client for ticket resolution. Secrets only ever come from
+# this EnvironmentFile, which lives outside git (see plane.env.example).
+EnvironmentFile=-/etc/machinist/plane.env
+NoNewPrivileges=yes
+PrivateTmp=yes
+ExecStart=/usr/local/bin/machinist start --config /etc/machinist/config.toml
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import tempfile
 import textwrap
+import time
 import unittest
 import urllib.error
 from unittest import mock
@@ -44,6 +45,51 @@ class AmendBudgetTests(unittest.TestCase):
         self.assertEqual(post.profile_mod.amend_rounds_budget(_resolved(3), -1, {}), 0)
 
 
+class ReviewBudgetTests(unittest.TestCase):
+    """MACH-61: the round, minute and remaining-job-time gates."""
+
+    def test_rounds_exhausted(self) -> None:
+        budget = post.ReviewBudget(1, 30, round_seconds=5, reserve_seconds=300, clock=lambda: 0)
+        self.assertTrue(budget.can_start())
+        budget.take()
+        self.assertFalse(budget.can_start())
+        self.assertEqual(budget.exhausted_reason, "review budget exhausted (rounds)")
+
+    def test_minutes_exhausted(self) -> None:
+        now = [0.0]
+        budget = post.ReviewBudget(3, 1, round_seconds=5, reserve_seconds=0, clock=lambda: now[0])
+        self.assertTrue(budget.can_start())
+        now[0] = 61.0
+        self.assertFalse(budget.can_start())
+        self.assertEqual(budget.exhausted_reason, "review budget exhausted (minutes)")
+
+    def test_job_time_too_short(self) -> None:
+        budget = post.ReviewBudget(3, 30, round_seconds=60, reserve_seconds=300, job_seconds=200, clock=lambda: 0)
+        self.assertFalse(budget.can_start())
+        self.assertEqual(budget.exhausted_reason, "review budget exhausted (job time)")
+
+    def test_job_guard_skipped_without_a_job_deadline(self) -> None:
+        budget = post.ReviewBudget(3, 30, round_seconds=60, reserve_seconds=300, job_seconds=None, clock=lambda: 0)
+        self.assertTrue(budget.can_start())
+
+    def test_minutes_capped_to_fit_the_job_after_the_reserve(self) -> None:
+        budget = post.ReviewBudget(3, 30, round_seconds=60, reserve_seconds=300, job_seconds=1200, clock=lambda: 0)
+        self.assertEqual(budget.minutes, 15.0)
+        self.assertTrue(budget.can_start())
+
+    def test_job_seconds_left_from_env(self) -> None:
+        env = {"MACHINIST_JOB_TIMEOUT_SECONDS": "7200", "MACHINIST_JOB_STARTED_EPOCH": "1000"}
+        self.assertEqual(post.job_seconds_left(env, now=4000), 4200)
+        self.assertIsNone(post.job_seconds_left({}, now=1))
+
+    def test_summary_reports_rounds_and_minutes(self) -> None:
+        budget = post.ReviewBudget(3, 30, round_seconds=5, reserve_seconds=300, clock=lambda: 0)
+        budget.take()
+        summary = budget.summary()
+        self.assertEqual(summary["rounds"], {"used": 1, "limit": 3})
+        self.assertEqual(summary["minutes"]["limit"], 30.0)
+
+
 class AmendPromptTests(unittest.TestCase):
     def test_prompt_carries_failing_checks_and_finding_reviewers(self) -> None:
         check = profile_mod.ReviewCheck("go", "go vet", ["go", "vet", "./..."])
@@ -72,7 +118,7 @@ class ControlPlaneProfileTests(unittest.TestCase):
                 return False
 
             def read(self):
-                return json.dumps({"project": "omacom/mobile", "source": "project", "profile": "name: p\nversion: 1\n", "extra_instructions": "rules"}).encode()
+                return json.dumps({"project": "acme/widgets", "source": "project", "profile": "name: p\nversion: 1\n", "extra_instructions": "rules"}).encode()
 
         def fake_urlopen(request, timeout):
             captured["url"] = request.full_url
@@ -83,12 +129,12 @@ class ControlPlaneProfileTests(unittest.TestCase):
         env = {
             "MACHINIST_CONTROL_PLANE_URL": "http://cp:7331",
             "MACHINIST_CONTROL_PLANE_TOKEN": "worker-token",
-            "MACHINIST_PROJECT": "omacom/mobile",
+            "MACHINIST_PROJECT": "acme/widgets",
         }
         with mock.patch.object(post.profile_mod.urllib.request, "urlopen", side_effect=fake_urlopen):
             payload = post.profile_mod._control_plane_profile(env, 900)
         self.assertIsNotNone(payload)
-        self.assertEqual(captured["url"], "http://cp:7331/api/v1/review-profile?project=omacom%2Fmobile")
+        self.assertEqual(captured["url"], "http://cp:7331/api/v1/review-profile?project=acme%2Fwidgets")
         self.assertEqual(captured["auth"], "Bearer worker-token")
         self.assertLessEqual(captured["timeout"], 30)
 
@@ -218,7 +264,7 @@ class EndToEndAmendLoopTests(unittest.TestCase):
             os.chmod(bin_dir / name, 0o755)
         return bin_dir, repo
 
-    def _run(self, root: Path, bin_dir: Path, extra_args: list[str]) -> tuple[int, dict]:
+    def _run(self, root: Path, bin_dir: Path, extra_args: list[str], extra_env: dict[str, str] | None = None) -> tuple[int, dict]:
         gh_log = root / "gh.log"
         git_log = root / "git.log"
         exec_count = root / "exec.count"
@@ -232,6 +278,8 @@ class EndToEndAmendLoopTests(unittest.TestCase):
                 "EXEC_LOG": str(exec_count),
             }
         )
+        if extra_env:
+            env.update(extra_env)
         # Resolve the shipped default profile, not a control plane that may be
         # running on the host (which would serve its own embedded copy).
         env.pop("MACHINIST_CONTROL_PLANE_URL", None)
@@ -271,17 +319,84 @@ class EndToEndAmendLoopTests(unittest.TestCase):
             self.assertEqual(summary["amend_rounds"], {"used": 1, "limit": 3})
             self.assertNotIn("push", summary["git_log"])
 
-    def test_spent_budget_blocks_without_amend(self) -> None:
+    def test_exhausted_rounds_report_incomplete(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             bin_dir, _ = self._environment(root)
             summary = self._run(root, bin_dir, ["--amend-rounds", "0"])
-            self.assertEqual(summary["exit_code"], 2)
-            self.assertEqual(summary["status"], "BLOCKED")
+            # MACH-61: an exhausted budget is INCOMPLETE with the reason, never
+            # PASS and never BLOCKED (it must not fail the delivery job).
+            self.assertEqual(summary["exit_code"], 0)
+            self.assertEqual(summary["status"], "INCOMPLETE")
             self.assertTrue(summary["blocking"])
-            # 4 reviewer passes + 1 docs pass; no amend.
-            self.assertEqual(summary["executor_calls"], 5)
+            # 4 reviewer passes; the budget stops the review before docs.
+            self.assertEqual(summary["executor_calls"], 4)
             self.assertEqual(summary["amend_rounds"], {"used": 0, "limit": 0})
+            self.assertEqual(summary["budget"]["exhausted"], "review budget exhausted (rounds)")
+            self.assertTrue(any("review budget exhausted (rounds)" in note for note in summary["notes"]))
+
+
+class ReviewBudgetEndToEndTests(unittest.TestCase):
+    """MACH-61 acceptance: a review that keeps finding issues stops at the
+    configured rounds, and a slow one stops at the configured minutes, both
+    well before the job timeout; the verdict is INCOMPLETE with the reason and
+    never PASS."""
+
+    def _always_blocking(self, root: Path) -> tuple[Path, Path]:
+        bin_dir, repo = EndToEndAmendLoopTests._environment(self, root)
+        executor = bin_dir / "review-executor"
+        executor.write_text(
+            "#!/bin/sh\n"
+            'echo call >> "$EXEC_LOG"\n'
+            "printf 'CRITICAL | src/app.py:1 | blocking finding\\n'\n",
+            encoding="utf-8",
+        )
+        os.chmod(executor, 0o755)
+        return bin_dir, repo
+
+    def _run(self, root: Path, bin_dir: Path, args: list[str], extra_env: dict[str, str] | None = None) -> dict:
+        return EndToEndAmendLoopTests._run(self, root, bin_dir, args, extra_env)
+
+    def test_rounds_exhausted_reports_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bin_dir, _ = self._always_blocking(root)
+            summary = self._run(root, bin_dir, ["--amend-rounds", "1"])
+        self.assertEqual(summary["exit_code"], 0)
+        self.assertEqual(summary["status"], "INCOMPLETE")
+        self.assertNotEqual(summary["status"], "PASS")
+        self.assertEqual(summary["amend_rounds"], {"used": 1, "limit": 1})
+        self.assertEqual(summary["budget"]["exhausted"], "review budget exhausted (rounds)")
+        self.assertTrue(any("review budget exhausted (rounds)" in note for note in summary["notes"]))
+        # First wave (4) + 1 fix round + re-review (4); no further round, no docs.
+        self.assertEqual(summary["executor_calls"], 9)
+
+    def test_minutes_exhausted_reports_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bin_dir, _ = self._always_blocking(root)
+            summary = self._run(root, bin_dir, ["--max-minutes", "0"])
+        self.assertEqual(summary["exit_code"], 0)
+        self.assertEqual(summary["status"], "INCOMPLETE")
+        self.assertEqual(summary["amend_rounds"], {"used": 0, "limit": 3})
+        self.assertEqual(summary["budget"]["exhausted"], "review budget exhausted (minutes)")
+        # Only the reviewer wave ran; no fix round and no docs.
+        self.assertEqual(summary["executor_calls"], 4)
+
+    def test_job_time_too_short_does_not_start_a_round(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bin_dir, _ = self._always_blocking(root)
+            env = {
+                "MACHINIST_JOB_TIMEOUT_SECONDS": "1",
+                "MACHINIST_JOB_STARTED_EPOCH": str(int(time.time())),
+            }
+            summary = self._run(root, bin_dir, [], extra_env=env)
+        self.assertEqual(summary["status"], "INCOMPLETE")
+        self.assertEqual(summary["amend_rounds"], {"used": 0, "limit": 3})
+        self.assertEqual(summary["budget"]["exhausted"], "review budget exhausted (job time)")
+        # The reviewer wave ran once; no fix round and no docs.
+        self.assertEqual(summary["executor_calls"], 4)
 
 
 if __name__ == "__main__":

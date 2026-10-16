@@ -9,12 +9,22 @@ Fork mode (2026-10-10): if the repo has git config machinist.prBase=<remote> (e.
 origin is OUR fork (push target) and <remote> is the third-party upstream (never pushed).
   machinist.upstreamPr=manual (default): push branch to fork, open a REVIEW PR inside the fork
      (fork main synced to upstream main first); log upstream compare URL. Upstream is not touched.
-  machinist.upstreamPr=draft: also open a DRAFT PR fork:branch -> upstream (only after Daniel opts in)."""
-import argparse, fnmatch, json, os, re, subprocess, sys
+  machinist.upstreamPr=draft: also open a DRAFT PR fork:branch -> upstream (only after the fork owner opts in)."""
+import argparse, fnmatch, json, os, re, subprocess, sys, time
 
-ALLOWED_OWNERS = {"danieljohnmorris", "omacom"}          # owners we may PUSH to
-UPSTREAM_PR_OWNERS = {"MiaAI-Lab"}                     # third-party: PR target only, never pushed
-PLAIN_BRANCH_OWNERS = {"omacom"}                      # branch = plain title slug (no factory/, no KEY-)
+def _owners(var):
+    return set(filter(None, (value.strip() for value in os.environ.get(var, "").split(","))))
+
+# Owners the delivery step may PUSH to. Instance values: set MACHINIST_ALLOWED_OWNERS
+# (comma-separated) in the factory env file. Never in git.
+ALLOWED_OWNERS = _owners("MACHINIST_ALLOWED_OWNERS")
+# Third-party owners a PR may target from a fork; never pushed to.
+UPSTREAM_PR_OWNERS = _owners("MACHINIST_UPSTREAM_PR_OWNERS")
+# Owners whose branches use a plain title slug (no factory/, no KEY-).
+PLAIN_BRANCH_OWNERS = _owners("MACHINIST_PLAIN_BRANCH_OWNERS")
+# Commit identity for the factory; override per instance.
+GIT_NAME = os.environ.get("MACHINIST_GIT_NAME", "Machinist Factory")
+GIT_EMAIL = os.environ.get("MACHINIST_GIT_EMAIL", "machinist@localhost")
 MAX_FILES = 300
 SECRET_GLOBS = [".env", ".env.*", "*.env", "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa*", "id_ed25519*",
                 "id_ecdsa*", "*.keystore", "credentials*.json", ".npmrc", ".netrc", "*secret*"]
@@ -23,7 +33,7 @@ SECRET_GLOBS = [".env", ".env.*", "*.env", "*.pem", "*.key", "*.p12", "*.pfx", "
 ENV_TEMPLATE_GLOBS = [".env.example", ".env.sample", ".env.template", ".env.dist", ".env.defaults",
                       "example.env", "sample.env", "*.env.example", "*.env.sample"]
 NOHOOKS = ["-c", "core.hooksPath=/dev/null"]
-# PR title/body rules (Daniel, 2026-10-10; model PR: omacom/mobile#179):
+# PR title/body rules (delivery contract; model PR: <owner>/<repo>#179):
 #  - title: short plain description, no ticket-id prefix ("OMM-1:"), no colon chains
 #  - body: one lead sentence + What it adds / What is not implemented / What was not tested / Tested
 #  - no Machinist boilerplate, no pasted spec, no run ids
@@ -177,6 +187,60 @@ def review_status(out_dir):
     except (OSError, ValueError, AttributeError):
         return None
 
+def _commit_or_stash_review_edits(repo, branch, run_id):
+    """A review that stopped (budget exhausted, timeout, crash) may leave its
+    last fix edits uncommitted in the lane. Commit and push them; if that is
+    not possible (secret-like files, no remote), stash them under a labelled
+    stash and write a patch into the run artifacts, MACH-61."""
+    g = lambda *c, **k: run("git", *NOHOOKS, *c, cwd=repo, **k)
+    if not g("status", "--porcelain", check=False):
+        return
+    label = f"machinist-review-budget-{run_id or 'manual'}"
+    before = g("rev-parse", "HEAD", check=False).strip()
+    try:
+        run("git", *NOHOOKS, "add", "-A", cwd=repo)
+        files = [f for f in g("diff", "--cached", "--name-only").splitlines() if f]
+        bad = secret_like(files)
+        if bad:
+            raise RuntimeError(f"secret-like files {bad}")
+        run("git", *NOHOOKS, "-c", f"user.name={GIT_NAME}",
+            "-c", f"user.email={GIT_EMAIL}",
+            "commit", "--no-verify", "-q", "-m", f"Review fixes ({label})", cwd=repo)
+        run("git", *NOHOOKS, "push", "--no-verify", "origin", f"HEAD:refs/heads/{branch}", cwd=repo)
+        log(f"review lane: committed and pushed leftover review fixes ({label})")
+        return
+    except RuntimeError as error:
+        # Undo the local commit if one landed so the edits can be stashed whole.
+        if before:
+            run("git", *NOHOOKS, "reset", "--soft", before, cwd=repo, check=False)
+        else:
+            run("git", *NOHOOKS, "reset", "-q", cwd=repo, check=False)
+        log(f"review lane: could not commit+push leftover edits ({error}); stashing")
+    g("stash", "push", "-u", "-m", label, check=False)
+    out = os.environ.get("MACHINIST_OUTPUT_DIR")
+    if out:
+        patch = os.path.join(out, f"{label}.patch")
+        try:
+            text = g("stash", "show", "-p", "--include-untracked", "stash@{0}", check=False)
+            os.makedirs(out, exist_ok=True)
+            with open(patch, "w") as handle:
+                handle.write(text)
+            log(f"review lane: stashed leftover review fixes ({label}); patch at {patch}")
+        except OSError as io_error:
+            log(f"review lane: could not write patch {patch}: {io_error}")
+    else:
+        log(f"review lane: stashed leftover review fixes ({label})")
+
+def finalize_after_review(repo, branch, pr, run_id):
+    """Whatever verdict the review returned, delivery must still finish: leave
+    the lane clean (commit+push or stash any leftover edits) and the PR open
+    (reopen if it went missing), MACH-61."""
+    _commit_or_stash_review_edits(repo, branch, run_id)
+    if pr:
+        state = run("gh", "pr", "view", pr, "--json", "state", "--jq", ".state", check=False)
+        if state.strip().upper() != "OPEN":
+            run("gh", "pr", "reopen", pr, check=False)
+
 def run(*cmd, check=True, cwd=None):
     r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
     if check and r.returncode != 0:
@@ -186,6 +250,61 @@ def run(*cmd, check=True, cwd=None):
 def slug(s, n=40):
     s = re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")
     return s[:n].strip("-") or "change"
+
+def wip_scratch_dir():
+    """Where a saved lane-WIP patch goes: never the published run artifacts.
+
+    MACHINIST_OUTPUT_DIR is the run's published task folder (uploaded and shown
+    to the user), and the stash path deliberately covers untracked files a
+    commit refuses (an untracked .env, say), so a patch there would publish the
+    very secret the stash exists to keep out. Prefer the unpublishable scratch
+    dir, then the Machinist data dir.
+    """
+    scratch = os.environ.get("MACHINIST_SCRATCH_DIR", "").strip()
+    if scratch:
+        return scratch
+    data_dir = os.environ.get("MACHINIST_DATA_DIR", "").strip()
+    base = data_dir or os.path.join(os.path.expanduser("~"), ".machinist")
+    return os.path.join(base, "review-wip")
+
+def save_wip(repo):
+    """Stash a dirty lane so the final branch switch cannot fail (MACH-59).
+
+    The built-in review runs in this checkout; if it leaves edits behind the
+    switch at the end of delivery would fail and strand the job. Stash them
+    with a labelled stash plus a patch outside the published run artifacts,
+    then switch on a clean tree. Never raises: a delivery must not fail because
+    of this.
+    """
+    def git(*c):
+        return subprocess.run(["git", *NOHOOKS, *c], cwd=repo, capture_output=True, text=True)
+    try:
+        status = git("status", "--porcelain")
+        if status.returncode != 0:
+            log(f"warn: could not read lane status: {(status.stderr or status.stdout).strip()}")
+            return
+        if not status.stdout.strip():
+            return
+        label = "machinist-deliver-wip-" + time.strftime("%Y%m%d-%H%M%S")
+        stash = git("stash", "push", "--include-untracked", "-m", label)
+        if stash.returncode != 0:
+            # Do not read stash@{0}: a failed push leaves any pre-existing stash
+            # at the top, and labelling its patch with this run's id would claim
+            # we saved WIP we did not.
+            log(f"warn: could not stash lane WIP: {(stash.stderr or stash.stdout).strip()}")
+            return
+        patch = git("stash", "show", "--patch", "--include-untracked", "stash@{0}").stdout.strip()
+        out = wip_scratch_dir()
+        if patch:
+            os.makedirs(out, exist_ok=True)
+            path = os.path.join(out, label + ".patch")
+            with open(path, "w") as handle:
+                handle.write(patch + "\n")
+            log(f"saved lane WIP to stash {label} and {path}")
+        else:
+            log(f"saved lane WIP to stash {label}")
+    except OSError as e:
+        log(f"warn: could not save lane WIP: {e}")
 
 def gh_repo(url):
     m = re.search(r"github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?$", url)
@@ -229,7 +348,7 @@ def main():
     run_id = os.environ.get("MACHINIST_RUN_ID", "manual")
     pr_title = pr_file_title or clean_title(title) or "Machinist change"
     if PLAIN_BRANCH_OWNERS & {owner, (up_full or "").split("/")[0]}:
-        # omacom/* (Daniel, 2026-10-10): plain kebab-case from the PR title; no factory/, no ticket key, no run id
+        # Plain-branch owners: plain kebab-case from the PR title; no factory/, no ticket key, no run id
         base_b = slug(pr_title, 50)
         branch, n = base_b, 2
         while (run("git", "rev-parse", "--verify", "-q", f"refs/heads/{branch}", cwd=repo, check=False)
@@ -249,8 +368,8 @@ def main():
         g("reset", "-q")
         raise RuntimeError(f"refusing to commit: {'secret-like files ' + str(bad) if bad else str(len(files)) + ' files > ' + str(MAX_FILES)}; left on branch {branch}")
     msg = f"{pr_title}\n\nMachinist run {run_id}" + (f"\nRefs {key}" if key else "")
-    env_id = ["-c", "user.name=" + (run("git", "config", "user.name", cwd=repo, check=False) or "Machinist Factory"),
-              "-c", "user.email=" + (run("git", "config", "user.email", cwd=repo, check=False) or "danieljohnmorris@users.noreply.github.com")]
+    env_id = ["-c", "user.name=" + (run("git", "config", "user.name", cwd=repo, check=False) or GIT_NAME),
+              "-c", "user.email=" + (run("git", "config", "user.email", cwd=repo, check=False) or GIT_EMAIL)]
     run("git", *NOHOOKS, *env_id, "commit", "--no-verify", "-q", "-m", msg, cwd=repo)
     sha = g("rev-parse", "--short", "HEAD")
     if os.environ.get("DELIVER_PR_DRY") == "1":
@@ -282,6 +401,7 @@ def main():
             result["review_status"] = review_status(out)
             json.dump(result, open(os.path.join(out, "pr.json"), "w"))
         if a.start_branch and a.start_branch != "HEAD":
+            save_wip(repo)
             g("switch", "-q", a.start_branch)
         return rc
 
@@ -293,10 +413,11 @@ def main():
                            cwd=repo, capture_output=True, text=True)
         if r.returncode != 0: log(f"warn: could not sync fork {base} to {up_remote}/{up_base}: {r.stderr.strip()[-200:]}")
         pr = open_pr(full, base, branch,
-                     f"Review PR inside the fork. NOT sent upstream.\nAfter Daniel approves, open upstream PR: {up_compare}")
+                     f"Review PR inside the fork. NOT sent upstream.\nAfter the fork owner approves, open upstream PR: {up_compare}")
         result["pr"] = pr
         result["review_pr"] = pr
         review_rc = run_review(repo, pr)
+        finalize_after_review(repo, branch, pr, run_id)
         if review_rc not in (None, 0):
             log("review did not pass; upstream PR not opened")
             return finish(review_rc)
@@ -311,6 +432,7 @@ def main():
         pr = open_pr(full, base, branch, "Not merged. Review before merging.")
         result["pr"] = pr
         review_rc = run_review(repo, pr)
+        finalize_after_review(repo, branch, pr, run_id)
         if review_rc not in (None, 0):
             return finish(review_rc)
     log(f"PR: {pr}")

@@ -1,6 +1,31 @@
 # Factory scripts
 
-Trusted post-agent tooling that runs outside the Codex sandbox on pipsqueek.
+Trusted post-agent tooling that runs outside the coding-agent sandbox.
+
+Install or upgrade every script here (and the systemd units, config and env
+templates) with the idempotent installer from the repository root:
+
+    sudo deploy/install.sh          # add --dry-run to preview
+
+It copies these scripts to `/usr/local/lib/machinist-factory/`, refuses to
+install from a tree with gitleaks findings, and records the deployed git SHA.
+The install snippets below are only for a one-off manual copy.
+
+## Scripts
+
+- `deliver-pr.py` — branch + commit + push + `gh pr create` delivery.
+- `post_pr_review.py` — the built-in PR review (checks, reviewers, docs pass,
+  secret scan, `machinist/review` commit status).
+- `omp-glm`, `omp-glm-pr`, `codex` — coding-executor wrappers: run the agent in
+  the sandbox, then deliver the PR outside it.
+- `fail.py` — failure hook and Plane notifier (`hook`, `notify`, `sweep`,
+  `dry-run`) called by the wrapper and by the fail-notify/fail-sweep units.
+- `lane-clean.sh` — dirty-lane guard run as `ExecStartPre` on the worker units.
+- `restart-when-idle.sh` — restart a worker unit only when its lane is idle.
+- `install-review-skills.sh` — install the review skills and pinned TruffleHog.
+
+Instance values (allowed owners, git identity, omp model, Plane host) come from
+the environment / `/etc/machinist/*.env`, never from these scripts.
 
 ## deliver-pr.py
 
@@ -11,24 +36,15 @@ env files (`.env.example`, `.env.sample`, `.env.template`, `.env.dist`,
 staged added lines of those templates are still scanned for real-looking
 secrets (see `tests/test_deliver_pr.py`).
 
-Install (MACH-31: the review must be installed next to `deliver-pr.py` so it
-runs as a plain script, with the skills available to the machinist user):
-
-    sudo install -m755 deploy/factory/deliver-pr.py deploy/factory/post_pr_review.py /usr/local/lib/machinist-factory/
-    sudo cp -R deploy/factory/review /usr/local/lib/machinist-factory/review
-    sudo -u machinist deploy/factory/install-review-skills.sh
-    sudo install -m755 deploy/factory/omp-glm deploy/factory/omp-glm-pr /usr/local/lib/machinist-factory/
-
-`install-review-skills.sh` also installs the pinned, checksum-verified TruffleHog
-binary the review uses for its secret scan (`MACHINIST_TOOL_DIR` overrides the
-destination; default `/usr/local/bin` when writable, else `~/.local/bin`). If
-`trufflehog` is already on `PATH` the installer leaves it alone.
-
 ## omp executors (omp-glm, omp-glm-pr)
 
 `omp-glm` is the sandboxed omp executor (`omp-glm <low|medium>`, prompt on
 stdin) and `omp-glm-pr` wraps it with `deliver-pr.py` for coding jobs. Both are
-trusted, root-owned and installed next to `deliver-pr.py`.
+trusted, root-owned and installed next to `deliver-pr.py`. `install-review-skills.sh`
+also installs the pinned, checksum-verified TruffleHog binary the review uses for
+its secret scan (`MACHINIST_TOOL_DIR` overrides the destination; default
+`/usr/local/bin` when writable, else `~/.local/bin`). If `trufflehog` is already
+on `PATH` the installer leaves it alone.
 
 MACH-42: `omp-glm` runs omp in `--mode text` or `--mode json` from
 `MACHINIST_OMP_MODE` (default `text`). `omp-glm-pr` sets `MACHINIST_OMP_MODE=json`
@@ -50,6 +66,26 @@ Run tests:
 
     python3 -m unittest discover -s deploy/factory/tests -t .
 
+## Lane hygiene (MACH-59)
+
+The review runs in the lane checkout, so an edit it leaves behind (the docs
+pass, an amend round) would make the final `git switch` fail and then fail every
+queued job behind it. `post_pr_review.py` commits wanted edits to the PR branch
+and pushes them, or stashes them with a labelled stash (`machinist-review-wip-*`)
+plus a patch outside the published run artifacts (scratch, else the Machinist
+data dir), before it switches back.
+`deliver-pr.py` does the same before its final switch. The worker runner
+(`internal/runner`) auto-saves a dirty lane checkout to a labelled stash and a
+patch before fetching, logs `lane.wip.saved` on the run, and alerts once; if the
+stash itself fails the lane pauses instead of claiming the next queued job.
+
+`restart-when-idle.sh <systemd-unit> [data-dir]` restarts a worker only when it
+is idle. The worker writes `<data-dir>/lane.lock` for the whole run, including
+publishing outputs and reporting the completion, so the script never restarts a
+lane in the middle of a job's final steps. The data dir defaults to
+`$MACHINIST_DATA_DIR`, then `~/.machinist/worker` (the worker's default
+DataDirectory), so the script finds the lock the worker actually writes.
+
 ## post_pr_review.py (built-in PR review, MACH-26)
 
 After `deliver-pr.py` opens a pull request it runs the built-in review from the
@@ -64,9 +100,24 @@ carries `review_status`.
 Blocking findings (new check failures, critical/bug reviewer findings) send the
 change back to the executor to amend on the same branch, then the checks and
 reviewers rerun. Each amend round counts against the retry budget:
-`--amend-rounds`, default `MACHINIST_REVIEW_AMEND_ROUNDS`, default 3. A PR still
-blocking after the budget is exhausted exits `2` (BLOCKED) and `deliver-pr.py`
-propagates it, so the run is not eligible for auto-merge.
+`--amend-rounds`, default `MACHINIST_REVIEW_AMEND_ROUNDS`, default 3. A review
+that still has blocking findings and cannot amend them (review-only scope, or a
+verified credential) exits `2` (BLOCKED) and `deliver-pr.py` propagates it, so
+the run is not eligible for auto-merge.
+
+MACH-61: the review also has a wall-clock budget so it cannot consume the whole
+job timeout. `blocking.max_minutes` (env `MACHINIST_REVIEW_MAX_MINUTES`, CLI
+`--max-minutes`, default 30) caps the whole review stage, and the budget is
+capped again to the job's remaining time (`MACHINIST_JOB_TIMEOUT_SECONDS` /
+`MACHINIST_JOB_STARTED_EPOCH`, set by the worker), reserving
+`MACHINIST_REVIEW_DELIVERY_RESERVE_SECONDS` (default 300s) for delivery. The
+budget is checked before every round and every fix pass; a pass that would not
+fit is not started. When the budget runs out the verdict is INCOMPLETE with the
+reason "review budget exhausted" (rounds, minutes or job time) — never PASS and
+never a job failure — and `deliver-pr.py` still finishes delivery: it commits and
+pushes any leftover fix edits (or stashes them with a labelled stash plus a
+`.patch` in `$MACHINIST_OUTPUT_DIR`), keeps the PR open, and leaves the lane
+clean.
 
 The review also runs `trufflehog git` over the pull request range
 (`--since-commit=<base> --branch=<head>`) as a built-in secret scan. A verified
