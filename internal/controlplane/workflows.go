@@ -106,7 +106,7 @@ func (s *Store) createWorkflowJob(ctx context.Context, prompt, repository, name,
 			return "", err
 		}
 	}
-	if err = enqueueStep(ctx, tx, id, repository, 0, steps[0], false, now); err != nil {
+	if _, err = enqueueStep(ctx, tx, id, repository, 0, steps[0], false, now); err != nil {
 		return "", err
 	}
 	return id, tx.Commit()
@@ -220,7 +220,8 @@ func completeWorkflow(ctx context.Context, tx *sql.Tx, job, run string, c protoc
 					return true, err
 				}
 			}
-			return true, enqueueStep(ctx, tx, job, repository, index+1, next, false, now)
+			_, err = enqueueStep(ctx, tx, job, repository, index+1, next, false, now)
+			return true, err
 		}
 		state = "succeeded"
 	}
@@ -288,7 +289,7 @@ func (s *Store) WorkflowAction(ctx context.Context, job, run, action string, sto
 			return err
 		}
 		// Approval applies to each attempt, including retries.
-		err = enqueueStep(ctx, tx, job, repository, index, steps[index], false, now)
+		_, err = enqueueStep(ctx, tx, job, repository, index, steps[index], false, now)
 		if err == nil {
 			_, err = tx.ExecContext(ctx, `INSERT INTO execution_reviews(run_id,context) SELECT (SELECT id FROM runs WHERE job_id=? ORDER BY rowid DESC LIMIT 1),context FROM execution_reviews WHERE run_id=?`, job, run)
 		}
