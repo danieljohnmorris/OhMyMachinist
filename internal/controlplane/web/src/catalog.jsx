@@ -1,4 +1,5 @@
 import { Tabs } from "@/components/ui/tabs";
+import { createDefinitionsLoader, applyDefinitions } from "./definitions-loader.js";
 import { useEffect, useState } from "react";
 import { Server } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -66,13 +67,27 @@ function useDefinitions() {
   const [result, setResult] = useState({ loading: true, error: "", value: { commands: [] } });
   useEffect(() => {
     const controller = new AbortController();
-    fetch("/api/v1/definitions", { headers: { Accept: "application/json" }, signal: controller.signal }).then(async (response) => {
-      if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.error || `Definitions request failed (${response.status})`); }
-      return response.json();
-    }).then((value) => setResult({ loading: false, error: "", value })).catch((error) => { if (error.name !== "AbortError") setResult((current) => ({ ...current, loading: false, error: error.message })); });
-    return () => controller.abort();
+    const loader = createDefinitionsLoader({
+      request: () => requestDefinitions(controller.signal),
+      apply: (outcome) => setResult((current) => applyDefinitions(current, outcome)),
+    });
+    return () => { controller.abort(); loader.cancel(); };
   }, []);
   return result;
+}
+
+async function requestDefinitions(signal) {
+  let response;
+  try {
+    response = await fetch("/api/v1/definitions", { headers: { Accept: "application/json" }, signal });
+  } catch (error) {
+    if (error.name === "AbortError") throw error;
+    const failure = new Error("definitions request failed before a response");
+    failure.network = true;
+    throw failure;
+  }
+  if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.error || `Definitions request failed (${response.status})`); }
+  return response.json();
 }
 
 function relativeTime(value) { const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(value)) / 1000)); if (seconds < 10) return "just now"; if (seconds < 60) return `${seconds}s ago`; const minutes = Math.floor(seconds / 60); if (minutes < 60) return `${minutes}m ago`; const hours = Math.floor(minutes / 60); if (hours < 24) return `${hours}h ago`; return `${Math.floor(hours / 24)}d ago`; }
