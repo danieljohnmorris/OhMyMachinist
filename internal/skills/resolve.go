@@ -119,7 +119,19 @@ func LoadRepoBundle(ctx context.Context, dir, ref string) (RepoBundle, error) {
 		return RepoBundle{}, fmt.Errorf("resolve repository ref %q: %w", ref, err)
 	}
 	bundle.Commit = strings.TrimSpace(commit)
-	if body, err := gitShow(ctx, dir, "show", ref+":"+repoConfigPath); err == nil {
+	// Distinguish an absent config from a git failure the same way the skills
+	// listing below does: ls-tree exits 0 with empty output when the path is
+	// absent, so a non-zero exit must surface rather than silently dropping
+	// every repo entry, including required ones.
+	tracked, err := gitShow(ctx, dir, "ls-tree", "--name-only", ref, "--", repoConfigPath)
+	if err != nil {
+		return RepoBundle{}, fmt.Errorf("probe repo skills config at %q: %w", ref, err)
+	}
+	if strings.TrimSpace(tracked) != "" {
+		body, err := gitShow(ctx, dir, "show", ref+":"+repoConfigPath)
+		if err != nil {
+			return RepoBundle{}, fmt.Errorf("read repo skills config at %q: %w", ref, err)
+		}
 		entries, err := ParseConfig([]byte(body))
 		if err != nil {
 			return RepoBundle{}, err

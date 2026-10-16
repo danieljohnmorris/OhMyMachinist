@@ -348,6 +348,26 @@ func TestLoadRepoBundleLsTreeFailureFails(t *testing.T) {
 	}
 }
 
+func TestLoadRepoBundleUnreadableConfigFails(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init", "--quiet")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	writeFile(t, filepath.Join(dir, "file.txt"), "hi\n")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "--quiet", "-m", "init")
+
+	// Record the config path as a gitlink to an object that is not present:
+	// ls-tree lists the path (so it is not absent) but git show cannot read it.
+	// That must surface rather than silently dropping every repo entry.
+	runGit(t, dir, "update-index", "--add", "--cacheinfo", "160000,1111111111111111111111111111111111111111,.machinist/skills.yaml")
+	runGit(t, dir, "commit", "--quiet", "-m", "gitlink")
+
+	if _, err := LoadRepoBundle(context.Background(), dir, "HEAD"); err == nil {
+		t.Fatal("LoadRepoBundle with an unreadable config: want error, got nil")
+	}
+}
+
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	command := exec.Command("git", append([]string{"-C", dir}, args...)...)
