@@ -321,7 +321,7 @@ func (s *Server) invokeMCPTool(ctx context.Context, identity TokenIdentity, name
 		case err != nil:
 			return nil, err
 		}
-		if err := s.store.WorkflowAction(ctx, input.JobID, runID, action, input.PreviousProcessStopped); err != nil {
+		if err := s.store.WorkflowActionAs(ctx, input.JobID, runID, action, input.PreviousProcessStopped, identity.Name, ""); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return nil, errors.New("job not found")
 			}

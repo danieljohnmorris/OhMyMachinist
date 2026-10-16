@@ -68,7 +68,7 @@ they reach the log.
 | Method | Path | Description |
 | --- | --- | --- |
 | POST | `/api/v1/jobs` | Queue a job. Body: `repository` plus either `command` or `workflow`; optional `title`, `spec`, `source_url`, `prompt`, `model`, `project`. Returns `{"id": "job_…"}`. |
-| POST | `/api/v1/jobs/{id}/{action}` | Workflow actions: `cancel`, `retry` (requeue), `approve`, `request_changes`. Body may carry `run_id`, `feedback`, `previous_process_stopped`. |
+| POST | `/api/v1/jobs/{id}/{action}` | Workflow actions: `cancel`, `retry` (requeue), `approve`, `request_changes`. Body may carry `run_id`, `feedback`, `previous_process_stopped`, and for `cancel` an optional `reason` recorded beside the acting principal. |
 | DELETE | `/api/v1/jobs/{id}` | Delete a terminal job. |
 | PUT | `/api/v1/settings/{key}` | Write one setting. Body: `{"value": "…"}`. |
 | GET | `/api/v1/tokens` | List tokens (write scope; browsers read with the CSRF header). |

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/owainlewis/machinist/internal/config"
@@ -27,9 +28,10 @@ func (s *Store) upgradeWorkflows(ctx context.Context) error {
  id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id), command TEXT NOT NULL, command_hash TEXT NOT NULL,
  executor TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', repository TEXT NOT NULL, rendered_prompt TEXT NOT NULL,
  timeout_ms INTEGER NOT NULL, state TEXT NOT NULL, worker_instance TEXT, worker_name TEXT NOT NULL DEFAULT '',
- lease_token TEXT, lease_expires_at INTEGER, exit_code INTEGER, error TEXT, result TEXT, events TEXT,
+ lease_token TEXT, lease_expires_at INTEGER, exit_code INTEGER, error TEXT, cancel_actor TEXT NOT NULL DEFAULT '', cancel_reason TEXT NOT NULL DEFAULT '', result TEXT, events TEXT,
  started_at TEXT, completed_at TEXT, duration_millis INTEGER, token_usage INTEGER);
- INSERT INTO runs SELECT * FROM runs_v2;
+ INSERT INTO runs(id,job_id,command,command_hash,executor,model,repository,rendered_prompt,timeout_ms,state,worker_instance,worker_name,lease_token,lease_expires_at,exit_code,error,result,events,started_at,completed_at,duration_millis,token_usage)
+ SELECT id,job_id,command,command_hash,executor,model,repository,rendered_prompt,timeout_ms,state,worker_instance,worker_name,lease_token,lease_expires_at,exit_code,error,result,events,started_at,completed_at,duration_millis,token_usage FROM runs_v2;
  DROP TABLE runs_v2;
  CREATE INDEX runs_dispatch ON runs(state,job_id);
  PRAGMA user_version=3;`); err != nil {
@@ -227,6 +229,16 @@ func completeWorkflow(ctx context.Context, tx *sql.Tx, job, run string, c protoc
 // WorkflowAction uses the expected latest run as a compare-and-swap token so a
 // double click or stale browser cannot approve/retry a newer execution.
 func (s *Store) WorkflowAction(ctx context.Context, job, run, action string, stopped bool, feedback ...string) error {
+	return s.workflowAction(ctx, job, run, action, stopped, "", "", feedback...)
+}
+
+// WorkflowActionAs runs a workflow action and records the responsible actor and
+// reason on cancels, so the run page can show who stopped an attempt and why.
+func (s *Store) WorkflowActionAs(ctx context.Context, job, run, action string, stopped bool, actor, reason string, feedback ...string) error {
+	return s.workflowAction(ctx, job, run, action, stopped, actor, reason, feedback...)
+}
+
+func (s *Store) workflowAction(ctx context.Context, job, run, action string, stopped bool, actor, reason string, feedback ...string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -238,7 +250,7 @@ func (s *Store) WorkflowAction(ctx context.Context, job, run, action string, sto
 	if errors.Is(err, sql.ErrNoRows) {
 		// Plain (non-workflow) jobs have no workflow_jobs row; the operator can
 		// still cancel a queued one.
-		return s.cancelPlainJob(ctx, tx, job, action)
+		return s.cancelPlainJob(ctx, tx, job, action, actor, reason)
 	}
 	if err != nil {
 		return err
@@ -257,7 +269,7 @@ func (s *Store) WorkflowAction(ctx context.Context, job, run, action string, sto
 		if state == "succeeded" || state == "cancelled" {
 			return ErrWorkflowAction
 		}
-		if _, err = tx.ExecContext(ctx, `UPDATE runs SET state='cancelled',exit_code=130,error='Cancelled by operator',completed_at=? WHERE id=? AND state IN ('queued','running','awaiting_approval')`, now, run); err != nil {
+		if _, err = tx.ExecContext(ctx, `UPDATE runs SET state='cancelled',exit_code=130,error='Cancelled by operator',cancel_actor=?,cancel_reason=?,completed_at=? WHERE id=? AND state IN ('queued','running','awaiting_approval')`, cancelActor(actor), cancelReason(reason), now, run); err != nil {
 			return err
 		}
 		_, err = tx.ExecContext(ctx, `UPDATE jobs SET state='cancelled',updated_at=? WHERE id=?`, now, job)
@@ -300,7 +312,7 @@ func (s *Store) WorkflowAction(ctx context.Context, job, run, action string, sto
 // cancelPlainJob cancels a queued plain (non-workflow) job. It returns
 // sql.ErrNoRows for unknown jobs, preserving the 404 mapping, and
 // ErrWorkflowAction for jobs that cannot be cancelled.
-func (s *Store) cancelPlainJob(ctx context.Context, tx *sql.Tx, job, action string) error {
+func (s *Store) cancelPlainJob(ctx context.Context, tx *sql.Tx, job, action, actor, reason string) error {
 	if action != "cancel" {
 		return sql.ErrNoRows
 	}
@@ -312,13 +324,31 @@ func (s *Store) cancelPlainJob(ctx context.Context, tx *sql.Tx, job, action stri
 		return ErrWorkflowAction
 	}
 	now := s.now().UTC().Format(time.RFC3339Nano)
-	if _, err := tx.ExecContext(ctx, `UPDATE runs SET state='cancelled',exit_code=130,error='Cancelled by operator',completed_at=? WHERE job_id=? AND state='queued'`, now, job); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE runs SET state='cancelled',exit_code=130,error='Cancelled by operator',cancel_actor=?,cancel_reason=?,completed_at=? WHERE job_id=? AND state='queued'`, cancelActor(actor), cancelReason(reason), now, job); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET state='cancelled',updated_at=? WHERE id=?`, now, job); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+// cancelActor names who cancelled a run, defaulting to the operator so an
+// unauthenticated browser cancel still records a responsible principal.
+func cancelActor(actor string) string {
+	if strings.TrimSpace(actor) == "" {
+		return "operator"
+	}
+	return actor
+}
+
+// cancelReason records why a run was cancelled, defaulting to the standard
+// operator-cancel explanation.
+func cancelReason(reason string) string {
+	if strings.TrimSpace(reason) == "" {
+		return "Cancelled by operator"
+	}
+	return reason
 }
 
 func reclaimLeases(ctx context.Context, tx *sql.Tx, now time.Time) (int64, error) {

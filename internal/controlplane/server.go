@@ -136,6 +136,11 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 	if e = store.configureStorage(storage); e != nil {
 		return nil, e
 	}
+	// A restart must not orphan or cancel running jobs: extend their leases so
+	// a live worker can re-establish its lease before the reclaim pass runs.
+	if _, e = store.GraceRunningLeases(context.Background()); e != nil {
+		return nil, e
+	}
 	alertsDirectory, e := definition.ResolveAlerts()
 	if e != nil {
 		return nil, e
@@ -336,7 +341,7 @@ func (s *Server) routes() (http.Handler, error) {
 	mux.HandleFunc("GET /api/v1/catalog", s.catalog)
 	mux.HandleFunc("GET /api/v1/definitions", s.definitions)
 	mux.HandleFunc("POST /api/v1/jobs/{id}/{action}", s.authorizeSubmission(s.workflowAction))
-	mux.HandleFunc("POST /api/v1/jobs", s.authorizeSubmission(s.linkAttemptsAfter(s.submit)))
+	mux.HandleFunc("POST /api/v1/jobs", s.authorizeSubmission(s.submit))
 	mux.HandleFunc("DELETE /api/v1/jobs/{id}", s.authorizeSubmission(s.deleteJob))
 	mux.HandleFunc("POST /api/v1/workers/poll", s.authorizeWorker(s.poll))
 	mux.HandleFunc("POST /api/v1/webhooks/issues", s.issueWebhook)
@@ -540,6 +545,9 @@ func (s *Server) queueJob(ctx context.Context, input submitRequest, identity Tok
 		if err != nil {
 			return "", err
 		}
+		if err := s.store.linkTicketAttempts(context.WithoutCancel(ctx)); err != nil {
+			log.Printf("link ticket attempts: %v", err)
+		}
 		if err := s.store.RecordAudit(ctx, identity, "jobs.create", input.Repository+" "+input.Workflow); err != nil {
 			log.Printf("audit jobs.create: %v", err)
 		}
@@ -563,6 +571,9 @@ func (s *Server) queueJob(ctx context.Context, input submitRequest, identity Tok
 	jobID, err := s.store.CreateJobWithOptions(ctx, input.Prompt, input.Repository, input.Command, command, CreateJobOptions{Title: input.Title, Project: project})
 	if err != nil {
 		return "", err
+	}
+	if err := s.store.linkTicketAttempts(context.WithoutCancel(ctx)); err != nil {
+		log.Printf("link ticket attempts: %v", err)
 	}
 	if err := s.store.RecordAudit(ctx, identity, "jobs.create", input.Repository+" "+input.Command); err != nil {
 		log.Printf("audit jobs.create: %v", err)
@@ -818,6 +829,7 @@ func (s *Server) workflowAction(response http.ResponseWriter, request *http.Requ
 	}
 	var input struct {
 		Feedback               string `json:"feedback"`
+		Reason                 string `json:"reason"`
 		RunID                  string `json:"run_id"`
 		PreviousProcessStopped bool   `json:"previous_process_stopped"`
 	}
@@ -825,7 +837,8 @@ func (s *Server) workflowAction(response http.ResponseWriter, request *http.Requ
 		writeDecodeError(response, err)
 		return
 	}
-	if err := s.store.WorkflowAction(request.Context(), request.PathValue("id"), input.RunID, request.PathValue("action"), input.PreviousProcessStopped, input.Feedback); err != nil {
+	actor := identityFrom(request).Name
+	if err := s.store.WorkflowActionAs(request.Context(), request.PathValue("id"), input.RunID, request.PathValue("action"), input.PreviousProcessStopped, actor, input.Reason, input.Feedback); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(response, http.StatusNotFound, err)
 			return
@@ -841,15 +854,4 @@ func (s *Server) workflowAction(response http.ResponseWriter, request *http.Requ
 	}
 	s.recordAudit(request, "jobs."+request.PathValue("action"), request.PathValue("id"))
 	writeJSON(response, http.StatusOK, map[string]string{"status": "accepted"})
-}
-
-// linkAttemptsAfter relinks ticket attempts once a submission is stored, so a
-// requeue shows up in the attempt picker immediately.
-func (s *Server) linkAttemptsAfter(next http.HandlerFunc) http.HandlerFunc {
-	return func(response http.ResponseWriter, request *http.Request) {
-		next(response, request)
-		if err := s.store.linkTicketAttempts(context.WithoutCancel(request.Context())); err != nil {
-			log.Printf("link ticket attempts: %v", err)
-		}
-	}
 }

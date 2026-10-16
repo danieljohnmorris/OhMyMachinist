@@ -281,6 +281,13 @@ systemctl stop machinist-worker.service machinist-control-plane.service
 systemctl start machinist-control-plane.service machinist-worker.service
 ```
 
+Restarting the control plane grants every running job a short lease grace, so a
+restart does not reclaim, interrupt, or orphan work whose worker is still
+executing: the worker re-establishes its lease on the next heartbeat and the
+job keeps running. Restarting the worker itself still ends its in-flight
+process; the run is then interrupted and needs an operator retry. A run that is
+cancelled, timed out, or killed keeps the transcript recorded up to that point.
+
 From your computer, open an SSH tunnel:
 
 ```sh
