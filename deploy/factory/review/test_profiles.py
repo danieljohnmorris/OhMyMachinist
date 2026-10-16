@@ -6,6 +6,7 @@ routing, reconcile and redaction. Run from deploy/factory:
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -316,6 +317,36 @@ class SkillLibraryTests(unittest.TestCase):
 
     def test_prompt_alias_resolves(self):
         self.assertIsNotNone(skill_library.resolve("docs-reviewer"))
+
+    def test_versioned_library_active_version_wins(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            version_dir = Path(data_dir) / "skills" / "feature-dev_code-reviewer" / "abc123"
+            version_dir.mkdir(parents=True)
+            (version_dir / "SKILL.md").write_text(
+                "---\nname: feature-dev:code-reviewer\ndescription: library copy\n---\nLIBRARY REVIEW\n",
+                encoding="utf-8",
+            )
+            (Path(data_dir) / "skills" / "feature-dev_code-reviewer" / "manifest.json").write_text(
+                json.dumps({"name": "feature-dev:code-reviewer", "active": "abc123", "versions": [{"version": "abc123"}]}),
+                encoding="utf-8",
+            )
+            with unittest.mock.patch.dict("os.environ", {"MACHINIST_DATA_DIR": data_dir}):
+                resolved = skill_library.resolve("feature-dev:code-reviewer")
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved[1], "abc123")
+        self.assertIn("LIBRARY REVIEW", resolved[0])
+
+    def test_library_without_active_version_falls_back(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            (Path(data_dir) / "skills" / "feature-dev_code-reviewer").mkdir(parents=True)
+            (Path(data_dir) / "skills" / "feature-dev_code-reviewer" / "manifest.json").write_text(
+                json.dumps({"name": "feature-dev:code-reviewer", "active": ""}),
+                encoding="utf-8",
+            )
+            with unittest.mock.patch.dict("os.environ", {"MACHINIST_DATA_DIR": data_dir}):
+                resolved = skill_library.resolve("feature-dev:code-reviewer")
+        self.assertIsNotNone(resolved)
+        self.assertIn("review", resolved[0].lower())
 
 
 class RedactionTests(unittest.TestCase):
