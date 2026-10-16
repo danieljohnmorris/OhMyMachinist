@@ -317,7 +317,7 @@ func validateProfileNode(root *yaml.Node) []ProfileIssue {
 	if root.Kind != yaml.MappingNode {
 		return append(issues, ProfileIssue{Line: nodeLine(root), Message: "profile must be a YAML mapping"})
 	}
-	knownTop := map[string]bool{"name": true, "version": true, "description": true, "source": true, "extends": true, "extra_instructions": true, "scope": true, "checks": true, "concurrency": true, "reviewers": true, "passes": true, "routing": true, "reconcile": true, "docs": true, "blocking": true, "output": true, "skills": true}
+	knownTop := map[string]bool{"name": true, "version": true, "description": true, "source": true, "extends": true, "extra_instructions": true, "scope": true, "diff": true, "checks": true, "concurrency": true, "reviewers": true, "passes": true, "routing": true, "reconcile": true, "docs": true, "blocking": true, "output": true, "skills": true}
 	for index := 0; index < len(root.Content); index += 2 {
 		key := root.Content[index]
 		if !knownTop[key.Value] {
@@ -367,6 +367,26 @@ func validateProfileNode(root *yaml.Node) []ProfileIssue {
 			validateMappingKeys(scope, map[string]bool{"pin_head_sha": true, "lanes_from": true, "mode": true}, "scope")
 			validateStringEnum(mappingValue(scope, "lanes_from"), []string{"diff", "repo"}, "scope.lanes_from")
 			validateStringEnum(mappingValue(scope, "mode"), []string{"review_only", "amend"}, "scope.mode")
+		}
+	}
+
+	if diff := mappingValue(root, "diff"); diff != nil {
+		// MACH-58: which paths never reach the review model, and the token
+		// budget that decides full/chunk/summary mode.
+		if diff.Kind != yaml.MappingNode {
+			issues = append(issues, ProfileIssue{Line: nodeLine(diff), Message: "diff must be a mapping"})
+		} else {
+			validateMappingKeys(diff, map[string]bool{"exclude": true, "max_tokens": true}, "diff")
+			if exclude := mappingValue(diff, "exclude"); exclude != nil {
+				if exclude.Kind != yaml.SequenceNode {
+					issues = append(issues, ProfileIssue{Line: nodeLine(exclude), Message: "diff.exclude must be a list of globs"})
+				} else {
+					issues = validateGlobNode(exclude, issues)
+				}
+			}
+			if maxTokens := mappingValue(diff, "max_tokens"); maxTokens != nil && (maxTokens.Kind != yaml.ScalarNode || !isPositiveInt(maxTokens.Value)) {
+				issues = append(issues, ProfileIssue{Line: nodeLine(maxTokens), Message: "diff.max_tokens must be a positive integer"})
+			}
 		}
 	}
 
