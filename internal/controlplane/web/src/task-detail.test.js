@@ -109,6 +109,71 @@ test("run page puts the sidebar right, renders markdown instructions, and styles
   assert.equal(planAnchor.textContent, "https://example.com/plan", "trailing punctuation excluded from bare URL");
 });
 
+const skillsJob = {
+  id: "job_skills",
+  state: "succeeded",
+  repository: "example/repo",
+  command: "build",
+  task: { title: "Skills fixture", spec: "Load skills." },
+  created_at: "2026-01-01T00:00:00Z",
+  updated_at: "2026-01-01T00:01:00Z",
+  runs: [
+    {
+      id: "run_skills",
+      command: "build",
+      state: "succeeded",
+      outcome: "complete",
+      summary: "Done.",
+      skills: {
+        skills: [
+          { name: "feature-dev:code-reviewer", version: "0123456789abcdef0123", scope: "repo", method: "native" },
+        ],
+        warnings: ['skill "missing-skill" is not installed; skipping'],
+      },
+    },
+  ],
+};
+
+test("run page lists the skills a run loaded and its warnings", async (context) => {
+  const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost/#/runs/job_skills" });
+  const priorGlobals = new Map();
+  for (const name of ["window", "document", "navigator", "localStorage", "Event", "MouseEvent"]) {
+    priorGlobals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+    Object.defineProperty(globalThis, name, { configurable: true, writable: true, value: dom.window[name] });
+  }
+  priorGlobals.set("fetch", Object.getOwnPropertyDescriptor(globalThis, "fetch"));
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/artifacts")) return { ok: true, json: async () => [] };
+    return { ok: true, json: async () => ({ jobs: [skillsJob], workers: [], commands: [], repositories: [], triggers: [], csrf_token: "test" }) };
+  };
+
+  const server = await createServer({ server: { middlewareMode: true }, appType: "custom" });
+  let mountedRoot;
+  context.after(async () => {
+    const previousActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT;
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+    await act(async () => mountedRoot?.unmount());
+    globalThis.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+    await server.close();
+    dom.window.close();
+    for (const [name, descriptor] of priorGlobals) {
+      if (descriptor === undefined) delete globalThis[name];
+      else Object.defineProperty(globalThis, name, descriptor);
+    }
+  });
+
+  mountedRoot = (await server.ssrLoadModule("/src/main.jsx")).appRoot;
+  await eventually(() => assert.ok(document.querySelector('[aria-label="Loaded skills"]'), "skills card renders"));
+
+  const card = document.querySelector('[aria-label="Loaded skills"]');
+  assert.match(card.textContent, /feature-dev:code-reviewer/);
+  assert.match(card.textContent, /0123456789ab/);
+  assert.match(card.textContent, /repo/);
+  assert.match(card.textContent, /native/);
+  assert.match(card.textContent, /skill "missing-skill" is not installed/);
+  assert.ok(card.querySelector('[aria-label="Skill warnings"]'), "warnings are called out");
+});
+
 async function eventually(assertion) {
   for (let attempt = 0; attempt < 50; attempt += 1) {
     try { assertion(); return; } catch (error) {
