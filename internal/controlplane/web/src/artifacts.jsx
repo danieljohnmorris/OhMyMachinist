@@ -1,5 +1,6 @@
 import { FileText, Download, X } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
+import { fetchErrorMessage } from "./fetch-error.js";
 
 // One metadata request per task, shared by Result, Files, and History.
 export function useTaskArtifacts(job, csrfToken) {
@@ -14,7 +15,7 @@ export function useTaskArtifacts(job, csrfToken) {
         for (const file of files) (byRun[file.run_id] ||= []).push(file);
         if (!controller.signal.aborted) setState({ jobID: job.id, byRun, error: "" });
       })
-      .catch(e => { if (!controller.signal.aborted) setState({ jobID: job.id, byRun: {}, error: e.message }); });
+      .catch(e => { if (!controller.signal.aborted) setState({ jobID: job.id, byRun: {}, error: fetchErrorMessage(e, "Could not load outputs") }); });
     return () => controller.abort();
   }, [job?.id, job?.updated_at, Boolean(job?.task), csrfToken]);
   return state.jobID === job?.id ? state : { byRun: {}, error: "" };
@@ -43,7 +44,7 @@ export function Artifacts({ artifacts, runID, csrfToken }) {
       const body = await response.text();
       if (body.includes("\0")) throw new Error("This file is binary. Download it to view it.");
       if (!controller.signal.aborted) setPreview({file,body});
-    } catch(e) { if (!controller.signal.aborted) setError(e.message); }
+    } catch(e) { if (!controller.signal.aborted) setError(fetchErrorMessage(e, "Could not open the file")); }
     finally { if (!controller.signal.aborted) setLoading(""); }
   }
   async function download(file) {
@@ -55,7 +56,7 @@ export function Artifacts({ artifacts, runID, csrfToken }) {
       const url = URL.createObjectURL(await r.blob());
       const link = document.createElement("a"); link.href = url; link.download = file.path.split("/").at(-1); link.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } catch (e) { setError(e.message); }
+    } catch (e) { setError(fetchErrorMessage(e, "Download failed")); }
     finally { setDownloading(""); }
   }
   if (!files.length && !error && !artifacts.error) return null;

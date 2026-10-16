@@ -264,13 +264,6 @@ export function jobCounts(jobs) {
   }, { all: 0, active: 0, failed: 0, succeeded: 0, resolved: 0 });
 }
 
-// resolutionLabel describes how a resolved ticket was closed, e.g.
-// "Resolved via PR #12 (merged by dan)" or "Resolved via Plane Done".
-export function resolutionLabel(job) {
-  const detail = typeof job?.resolution_detail === "string" ? job.resolution_detail.trim() : "";
-  return job?.state === "resolved" && detail ? `Resolved via ${detail}` : "";
-}
-
 export function currentRun(job) {
   if (job.workflow) return job.runs.at(-1);
   return [...job.runs].reverse().find((run) => run.state !== "queued") || job.runs[0];

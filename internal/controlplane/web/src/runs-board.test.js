@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { attemptDurationMillis, attemptStart, attemptTime, boardCardTimestamp, boardColumnForState, boardDateFilters, boardDateWindow, boardFiltersFromHash, boardFiltersFromParams, boardHash, boardParamsFromFilters, canCancelJob, collapseIssueAttempts, collapseJobsByTicket, filterBoardJobs, filterJobs, filterJobsByDate, githubIssueReference, groupJobsByBoardColumn, jobCounts, jobDisplayTitle, jobTicketKey, needsAttention, priorAttempts, resolutionLabel, supersededJob, ticketAttempts } from "./runs-board.js";
+import { attemptDurationMillis, attemptStart, attemptTime, boardCardTimestamp, boardColumnForState, boardDateFilters, boardDateWindow, boardFiltersFromHash, boardFiltersFromParams, boardHash, boardParamsFromFilters, canCancelJob, collapseIssueAttempts, collapseJobsByTicket, filterBoardJobs, filterJobs, filterJobsByDate, githubIssueReference, groupJobsByBoardColumn, jobCounts, jobDisplayTitle, jobTicketKey, needsAttention, priorAttempts, supersededJob, ticketAttempts } from "./runs-board.js";
 
 test("board card timestamps prefer run completion for finished jobs and last update otherwise", () => {
   const finishedJob = {
@@ -60,13 +60,6 @@ test("resolved jobs land under Finished, show green and are counted with Succeed
   assert.equal(counts.succeeded, 2);
   assert.equal(counts.resolved, 1);
   assert.equal(counts.failed, 1);
-});
-
-test("resolution labels describe how the ticket was closed", () => {
-  assert.equal(resolutionLabel({ state: "resolved", resolution_kind: "pr", resolution_detail: "PR #12 (merged by dan)" }), "Resolved via PR #12 (merged by dan)");
-  assert.equal(resolutionLabel({ state: "resolved", resolution_kind: "plane", resolution_detail: "Plane Done" }), "Resolved via Plane Done");
-  assert.equal(resolutionLabel({ state: "succeeded", resolution_kind: "pr", resolution_detail: "PR #12 (merged by dan)" }), "");
-  assert.equal(resolutionLabel({ state: "resolved", resolution_kind: "pr", resolution_detail: "  " }), "");
 });
 
 test("board and table filters use the same filtered job set", () => {

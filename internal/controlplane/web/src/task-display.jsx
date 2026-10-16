@@ -1,6 +1,7 @@
 import React from "react";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { resolutionSummary } from "./run-links.js";
 const zeroTime = "0001-01-01T00:00:00Z";
 
 export function State({ value }) {
@@ -35,4 +36,31 @@ export function formatTimestamp(value) {
 }
 export function stateLabel(value) {
   return String(value || "unknown").replaceAll("_", " ");
+}
+
+// ResolutionLabel renders how a resolved ticket closed. The merged pull request
+// and the login that merged it are links when they can be identified; every
+// other resolution stays plain text.
+export function ResolutionLabel({ job, result, className = "text-sm text-success" }) {
+  const summary = resolutionSummary(job, result);
+  if (!summary) return null;
+  return (
+    <p className={className} data-testid="resolution-label">
+      {summary.parts.map((part, index) =>
+        part.href ? (
+          <a
+            key={index}
+            className="text-primary underline"
+            href={part.href}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            {part.text}
+          </a>
+        ) : (
+          <React.Fragment key={index}>{part.text}</React.Fragment>
+        ),
+      )}
+    </p>
+  );
 }
