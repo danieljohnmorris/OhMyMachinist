@@ -204,6 +204,95 @@ class EndToEndDryRunTests(unittest.TestCase):
             self.assertNotIn("commit", git_calls)
 
 
+class DiffBudgetEndToEndTests(unittest.TestCase):
+    """MACH-58: the review filters built/generated files out of the diff, says
+    which mode it used when the filtered diff is still over budget, and lists
+    the skipped files in the review comment."""
+
+    def _bins(self, root: Path, diff_text: str, changed: str) -> Path:
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        (root / "pr.diff").write_text(diff_text, encoding="utf-8")
+        (bin_dir / "git").write_text(
+            textwrap.dedent(
+                """#!/bin/sh
+                case "$*" in
+                  *"remote get-url"*) printf 'https://github.com/owner/repo.git\\n' ;;
+                  *"rev-parse --abbrev-ref"*) printf 'feature\\n' ;;
+                  *) : ;;
+                esac
+                """
+            ),
+            encoding="utf-8",
+        )
+        (bin_dir / "gh").write_text(
+            textwrap.dedent(
+                """#!/bin/sh
+                case "$*" in
+                  *"pr view"*) printf '{"headRefName":"feature","headRefOid":"head","baseRefName":"main","baseRefOid":"base","body":"body","url":"url","labels":[]}' ;;
+                  *"--name-only"*) printf '%s' "$PR_CHANGED" ;;
+                  *) cat "$PR_DIFF" ;;
+                esac
+                """
+            ),
+            encoding="utf-8",
+        )
+        (bin_dir / "review-executor").write_text("#!/bin/sh\ncat >/dev/null\nprintf 'NO FINDINGS\\n'\n", encoding="utf-8")
+        (bin_dir / "ruff").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (bin_dir / "trufflehog").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        for name in ("git", "gh", "review-executor", "ruff", "trufflehog"):
+            os.chmod(bin_dir / name, 0o755)
+        return bin_dir
+
+    def test_excluded_files_and_chunk_mode_are_reported(self) -> None:
+        def file_diff(path: str, lines: int) -> str:
+            body = [f"diff --git a/{path} b/{path}", f"--- a/{path}", f"+++ b/{path}", "@@ -1,1 +1,2 @@", "+one"]
+            body += ["+" + "x" * 60 for _ in range(lines)]
+            return "\n".join(body) + "\n"
+
+        diff_text = file_diff("web/dist/index.js", 200) + "".join(
+            file_diff(f"src/module_{index}.py", 2000) for index in range(4)
+        )
+        changed = "web/dist/index.js\n" + "".join(f"src/module_{index}.py\n" for index in range(4))
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "repo").mkdir()
+            bin_dir = self._bins(root, diff_text, changed)
+            json_out = root / "summary.json"
+            env = os.environ.copy()
+            env.update(
+                {
+                    "PATH": f"{bin_dir}:{env['PATH']}",
+                    "PR_DIFF": str(root / "pr.diff"),
+                    "PR_CHANGED": changed,
+                    "MACHINIST_REVIEW_DIFF_MAX_TOKENS": "8000",
+                }
+            )
+            env.pop("MACHINIST_CONTROL_PLANE_URL", None)
+            env.pop("MACHINIST_CONTROL_PLANE_TOKEN", None)
+            buffer = io.StringIO()
+            with mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(buffer):
+                code = post.main(
+                    [
+                        "--repo", str(root / "repo"),
+                        "--pr", "owner/repo#44",
+                        "--executor-cmd", str(bin_dir / "review-executor"),
+                        "--timeout-seconds", "5",
+                        "--dry-run",
+                        "--json-out", str(json_out),
+                    ]
+                )
+            summary = json.loads(json_out.read_text(encoding="utf-8"))
+            output = buffer.getvalue()
+        self.assertEqual(code, 0)
+        self.assertEqual(summary["diff"]["mode"], "chunk")
+        self.assertIn("web/dist/index.js", summary["diff"]["excluded"])
+        self.assertGreater(summary["diff"]["chunks"], 1)
+        self.assertIn("review diff mode: chunked", output)
+        self.assertIn("web/dist/index.js", output)
+        self.assertIn("(chunk 1/", output)
+
+
 class RequiredSkillTests(unittest.TestCase):
     """MACH-50: a required skill that is not installed must publish an error
     status and comment instead of exiting silently behind a stale green

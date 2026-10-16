@@ -119,6 +119,18 @@ pushes any leftover fix edits (or stashes them with a labelled stash plus a
 `.patch` in `$MACHINIST_OUTPUT_DIR`), keeps the PR open, and leaves the lane
 clean.
 
+MACH-58: the review sends the pull request diff to the review model, so built
+and generated files are filtered out first. The profile's `diff.exclude` globs
+(default: `web/dist/**`, minified JS/CSS, `*.map`, lockfiles, generated code)
+replace the shipped default list, and `diff.max_tokens` (env
+`MACHINIST_REVIEW_DIFF_MAX_TOKENS`, default 200000) is the token budget for one
+review prompt. The review comment's Notes list every excluded file. If the
+filtered diff is still over budget the review switches mode and says so: it
+chunks the diff per file (each reviewer pass runs once per chunk) or summarises
+the files too large to include; the JSON summary carries a `diff` object with
+the mode, token counts and excluded/summarised paths. An over-budget diff is
+never sent anyway and never fails silently.
+
 The review also runs `trufflehog git` over the pull request range
 (`--since-commit=<base> --branch=<head>`) as a built-in secret scan. A verified
 live credential (`--results=verified`) is a blocking finding that fails

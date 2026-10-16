@@ -97,6 +97,19 @@ class ValidationTests(unittest.TestCase):
         # A malformed glob is a YAML error at minimum; either way it fails.
         self.assertTrue(caught.exception.errors)
 
+    def test_diff_section_is_validated(self):
+        body = self.parse(VALID + "\ndiff:\n  exclude: [web/dist/**, \"*.map\"]\n  max_tokens: 200000\n")
+        self.assertEqual(body["diff"]["max_tokens"], 200000)
+        with self.assertRaises(profile_mod.ProfileError) as caught:
+            self.parse(VALID + "\ndiff:\n  wat: true\n")
+        self.assertTrue(any("unknown diff key: wat" in message for _, message in caught.exception.errors))
+        with self.assertRaises(profile_mod.ProfileError) as caught:
+            self.parse(VALID + "\ndiff:\n  max_tokens: 0\n")
+        self.assertTrue(any("positive integer" in message for _, message in caught.exception.errors))
+        with self.assertRaises(profile_mod.ProfileError) as caught:
+            self.parse(VALID + "\ndiff:\n  exclude: web/dist/**\n")
+        self.assertTrue(any("must be a list of globs" in message for _, message in caught.exception.errors))
+
     def test_unknown_pass_reference_rejected(self):
         broken = VALID.replace("fallback: [code-reviewer]", "fallback: [ghost]")
         with self.assertRaises(profile_mod.ProfileError) as caught:

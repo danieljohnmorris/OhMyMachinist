@@ -27,7 +27,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 try:
-    from deploy.factory.review import core, profile as profile_mod, skill_library
+    from deploy.factory.review import core, diff_budget, profile as profile_mod, skill_library
     from deploy.factory.review.runner import (
         CommandResult,
         executor_command,
@@ -40,7 +40,7 @@ except ModuleNotFoundError:
     # side with no deploy package, so import review/ from the script directory.
     if __package__ in {None, ""}:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from review import core, profile as profile_mod, skill_library
+    from review import core, diff_budget, profile as profile_mod, skill_library
     from review.runner import (
         CommandResult,
         executor_command,
@@ -587,6 +587,75 @@ def run_reviewers(
         return [future.result() for future in as_completed(futures)]
 
 
+def diff_review_config(
+    resolved: profile_mod.ResolvedProfile,
+    environ: dict[str, str] | None = None,
+) -> tuple[list[str], int]:
+    """Effective exclude globs and token budget for the review diff (MACH-58).
+
+    Precedence for the budget: MACHINIST_REVIEW_DIFF_MAX_TOKENS, then the
+    profile's ``diff.max_tokens``, then the shipped default. A profile that
+    sets ``diff.exclude`` replaces the shipped default exclude list rather than
+    extending it, so an instance can narrow the exclusions deliberately.
+    """
+    cfg = resolved.body.get("diff") or {}
+    patterns = [str(item) for item in (cfg.get("exclude") or []) if str(item).strip()]
+    excludes = patterns or list(diff_budget.DEFAULT_EXCLUDE_GLOBS)
+    env = os.environ if environ is None else environ
+    budget = 0
+    raw = env.get(diff_budget.MAX_TOKENS_ENV, "").strip()
+    if raw:
+        try:
+            budget = int(raw)
+        except (TypeError, ValueError):
+            budget = 0
+    if budget <= 0:
+        try:
+            budget = int(cfg.get("max_tokens", 0) or 0)
+        except (TypeError, ValueError):
+            budget = 0
+    if budget <= 0:
+        budget = diff_budget.default_max_tokens(env)
+    return excludes, budget
+
+
+def diff_note_text(plan: diff_budget.DiffPlan) -> str:
+    """The exclude/mode note handed to the reviewers with the diff."""
+    return "\n".join(f"- {note}" for note in plan.notes())
+
+
+def run_reviewer_passes(
+    reviewers: list[dict[str, Any]],
+    executor_args: list[str],
+    context: dict[str, str],
+    extra_instructions: str,
+    timeout: int,
+    concurrency: int,
+    plan: diff_budget.DiffPlan,
+) -> list[dict[str, Any]]:
+    """Run the reviewer passes over the planned diff (MACH-58): one wave set
+    for a whole-diff prompt, one wave set per chunk when the diff was chunked
+    so no chunk exceeds the model budget."""
+    if len(plan.chunks) <= 1:
+        prompt_context = dict(context)
+        prompt_context["diff"] = plan.prompt_text()
+        prompt_context["diff_note"] = diff_note_text(plan)
+        return run_reviewers(reviewers, executor_args, prompt_context, extra_instructions, timeout, concurrency)
+    total = len(plan.chunks)
+    results: list[dict[str, Any]] = []
+    for index, chunk in enumerate(plan.chunks, start=1):
+        prompt_context = dict(context)
+        prompt_context["diff"] = chunk.text
+        prompt_context["diff_chunk"] = f"{index}/{total}"
+        prompt_context["diff_note"] = diff_note_text(plan)
+        tagged = [
+            dict(reviewer, name=f"{reviewer.get('name', 'reviewer')} (chunk {index}/{total})")
+            for reviewer in reviewers
+        ]
+        results.extend(run_reviewers(tagged, executor_args, prompt_context, extra_instructions, timeout, concurrency))
+    return results
+
+
 def docs_prompt(diff: str, pr_body: str, repo: Path, files: list[str], instructions: str = "") -> str:
     resolved = skill_library.resolve("docs-reviewer")
     prompt = resolved[0] if resolved else ""
@@ -1081,12 +1150,16 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
         if not files_readable:
             notes.append("changed-file list unreadable; used the fallback reviewer set")
         diff = pull_request_diff(options.repo, owner, name, number_text, options.timeout)
+        exclude_globs, diff_max_tokens = diff_review_config(resolved)
+        diff_plan = diff_budget.plan_diff(diff, exclude_globs, diff_max_tokens)
+        summary["diff"] = diff_plan.summary()
         context = {
             "repository": f"{owner}/{name}",
             "pr": f"#{number}",
             "head_sha": head_sha,
             "base_sha": base_sha,
-            "diff": diff,
+            "diff": diff_plan.prompt_text(),
+            "diff_note": diff_note_text(diff_plan),
             "profile_name": resolved.name,
         }
         planned = [shlex.join(check.args) for check in checks if check.args]
@@ -1144,7 +1217,7 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
                 for reviewer in selected
             ]
         elif executor_args is not None:
-            reviewers = run_reviewers(selected, executor_args, context, extra_instructions, options.timeout, concurrency)
+            reviewers = run_reviewer_passes(selected, executor_args, context, extra_instructions, options.timeout, concurrency, diff_plan)
             # Blocking findings send the job back to amend on the same branch.
             # Each send-back consumes one retry-budget round; the checks and
             # reviewers rerun until a pass comes back clean or the budget is
@@ -1187,7 +1260,10 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
                 if remaining_new:
                     break
                 diff = pull_request_diff(options.repo, owner, name, number_text, options.timeout)
-                context["diff"] = diff
+                diff_plan = diff_budget.plan_diff(diff, exclude_globs, diff_max_tokens)
+                summary["diff"] = diff_plan.summary()
+                context["diff"] = diff_plan.prompt_text()
+                context["diff_note"] = diff_note_text(diff_plan)
                 # pin_head_sha (the default): the head may have moved while
                 # amending; re-run the affected steps against the fresh diff.
                 if not (resolved.body.get("scope") or {}).get("pin_head_sha", True):
@@ -1198,7 +1274,7 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
                     context["head_sha"] = head_sha
                     summary["head_sha"] = head_sha
                     notes.append("head moved during review; re-ran the reviewer passes against the new head")
-                reviewers = run_reviewers(selected, executor_args, context, extra_instructions, options.timeout, concurrency)
+                reviewers = run_reviewer_passes(selected, executor_args, context, extra_instructions, options.timeout, concurrency, diff_plan)
                 findings = profile_mod.blocking_findings(merged_findings())
 
         docs_config = resolved.body.get("docs") or {}
@@ -1215,7 +1291,7 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
                 number_text,
                 metadata,
                 executor_args,
-                diff,
+                diff_plan.prompt_text() if diff_plan.mode == diff_budget.MODE_FULL else diff_plan.summary_text(),
                 options.timeout,
                 options.dry_run,
                 docs_config,
@@ -1237,6 +1313,7 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
             incomplete = True
         if secret_scan.get("error"):
             incomplete = True
+        notes.extend(diff_plan.notes())
         notes.append(
             f"review budget: {budget.used}/{budget.rounds} rounds, "
             f"{budget.elapsed_minutes():.1f}/{budget.minutes:g} minutes used"

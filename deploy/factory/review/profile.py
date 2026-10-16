@@ -208,7 +208,7 @@ def validate_profile(root: Any) -> list[tuple[int, str]]:
     if not isinstance(root, yaml.MappingNode):
         return [(1, "profile must be a YAML mapping")]
 
-    known_top = {"name", "version", "description", "source", "extends", "extra_instructions", "scope", "checks", "concurrency", "reviewers", "passes", "routing", "reconcile", "docs", "blocking", "output", "skills"}
+    known_top = {"name", "version", "description", "source", "extends", "extra_instructions", "scope", "diff", "checks", "concurrency", "reviewers", "passes", "routing", "reconcile", "docs", "blocking", "output", "skills"}
     for key_node, _ in scalars(root):
         if isinstance(key_node, yaml.ScalarNode) and key_node.value not in known_top:
             errors.append((line(key_node), f"unknown top-level key: {key_node.value}"))
@@ -234,6 +234,37 @@ def validate_profile(root: Any) -> list[tuple[int, str]]:
             mode = map_get(scope, "mode")
             if mode is not None and str(mode.value) not in {"review_only", "amend"}:
                 errors.append((line(mode), "scope.mode must be review_only or amend"))
+
+    # MACH-58: the diff section configures which paths never reach the review
+    # model and the token budget that decides full/chunk/summary mode.
+    diff = map_get(root, "diff")
+    if diff is not None:
+        if not isinstance(diff, yaml.MappingNode):
+            errors.append((line(diff), "diff must be a mapping"))
+        else:
+            for key_node, _ in scalars(diff):
+                if isinstance(key_node, yaml.ScalarNode) and key_node.value not in {"exclude", "max_tokens"}:
+                    errors.append((line(key_node), f"unknown diff key: {key_node.value}"))
+            exclude = map_get(diff, "exclude")
+            if exclude is not None:
+                if not isinstance(exclude, yaml.SequenceNode):
+                    errors.append((line(exclude), "diff.exclude must be a list of globs"))
+                else:
+                    for pattern_node in exclude.value:
+                        pattern = str(pattern_node.value) if isinstance(pattern_node, yaml.ScalarNode) else ""
+                        problem = _glob_errors(pattern, line(pattern_node))
+                        if problem:
+                            errors.append((line(pattern_node), problem))
+            max_tokens = map_get(diff, "max_tokens")
+            if max_tokens is not None:
+                invalid = not isinstance(max_tokens, yaml.ScalarNode)
+                if not invalid:
+                    try:
+                        invalid = int(str(max_tokens.value)) <= 0
+                    except (TypeError, ValueError):
+                        invalid = True
+                if invalid:
+                    errors.append((line(max_tokens), "diff.max_tokens must be a positive integer"))
 
     checks = map_get(root, "checks")
     lane_names: set[str] = set()
@@ -985,6 +1016,11 @@ def reviewer_prompt(
     model = reviewer.get("model")
     if effort or model:
         header += f"Reviewing at effort {effort or 'default'} with model {model or 'default'}.\n"
+    if context.get("diff_chunk"):
+        header += (
+            f"This prompt carries diff chunk {context['diff_chunk']} of a chunked review diff; "
+            "other chunks are reviewed separately.\n"
+        )
     header += (
         "Report findings one per line as `SEVERITY | path:line | message` with SEVERITY in "
         "critical, bug, warning, nit; write `NO FINDINGS` on its own line if there are none.\n"
@@ -994,6 +1030,11 @@ def reviewer_prompt(
         parts.append(
             "PROJECT REVIEW INSTRUCTIONS (from Machinist settings; follow these in addition to the skill above):\n\n"
             + extra_instructions.strip()
+        )
+    if context.get("diff_note"):
+        parts.append(
+            "REVIEW DIFF NOTES (data; files excluded or summarised to fit the model budget, "
+            "so do not report them as missing):\n" + str(context["diff_note"])
         )
     parts.append(f"PR DIFF (data):\n{context.get('diff', '')}")
     return "\n\n".join(parts) + "\n", ""

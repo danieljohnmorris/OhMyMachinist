@@ -27,6 +27,22 @@ func TestShippedProfilesValidate(t *testing.T) {
 	}
 }
 
+func TestValidateProfileBodyDiffSection(t *testing.T) {
+	good := "name: p\nversion: 1\ndiff:\n  exclude: [\"web/dist/**\", \"*.min.js\"]\n  max_tokens: 200000\n"
+	if issues := validateProfileBody(good); len(issues) > 0 {
+		t.Fatalf("expected valid diff section, got %+v", issues)
+	}
+	bad := "name: p\nversion: 1\ndiff:\n  max_tokens: nope\n"
+	issues := validateProfileBody(bad)
+	if len(issues) == 0 || !strings.Contains(issues[0].Message, "diff.max_tokens must be a positive integer") {
+		t.Fatalf("expected diff.max_tokens issue, got %+v", issues)
+	}
+	unknown := "name: p\nversion: 1\ndiff:\n  wat: true\n"
+	if issues := validateProfileBody(unknown); len(issues) == 0 || !strings.Contains(issues[0].Message, "unknown diff key: wat") {
+		t.Fatalf("expected unknown diff key issue, got %+v", issues)
+	}
+}
+
 func TestValidateProfileBodyLineNumbers(t *testing.T) {
 	body := "name: bad\nversion: 1\nreviewers:\n  - name: a\n    prompt: x\nwat: true\n"
 	issues := validateProfileBody(body)
