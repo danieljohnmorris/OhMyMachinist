@@ -371,6 +371,7 @@ func (s *Server) routes() (http.Handler, error) {
 	mux.HandleFunc("GET /api/v1/catalog", s.catalog)
 	mux.HandleFunc("GET /api/v1/definitions", s.definitions)
 	mux.HandleFunc("POST /api/v1/jobs/{id}/{action}", s.authorizeSubmission(s.workflowAction))
+	mux.HandleFunc("POST /api/v1/jobs/{id}/move-to-queue", s.authorizeSubmission(s.linkAttemptsAfter(s.moveToQueue)))
 	mux.HandleFunc("POST /api/v1/jobs", s.authorizeSubmission(s.linkAttemptsAfter(s.submit)))
 	mux.HandleFunc("DELETE /api/v1/jobs/{id}", s.authorizeSubmission(s.deleteJob))
 	mux.HandleFunc("POST /api/v1/workers/poll", s.authorizeWorker(s.poll))
@@ -383,6 +384,7 @@ func (s *Server) routes() (http.Handler, error) {
 	mux.HandleFunc("GET /api/v1/review-default-profile", s.getReviewDefaultProfile)
 	mux.HandleFunc("PUT /api/v1/review-default-profile", s.authorizeSubmission(s.saveReviewDefaultProfile))
 	mux.HandleFunc("POST /api/v1/runs/{id}/heartbeat", s.authorizeWorker(s.heartbeat))
+	mux.HandleFunc("POST /api/v1/runs/{id}/revoked", s.authorizeWorker(s.leaseRevoked))
 	mux.HandleFunc("POST /api/v1/runs/{id}/complete", s.authorizeWorker(s.complete))
 	mux.HandleFunc("POST /api/v1/runs/{id}/events", s.authorizeWorker(s.liveEvents))
 	mux.HandleFunc("GET /api/v1/runs/{id}/events", s.authorizeArtifact(s.runEvents))
@@ -741,6 +743,58 @@ func (s *Server) heartbeat(response http.ResponseWriter, request *http.Request) 
 	}
 	if err != nil {
 		writeError(response, http.StatusBadRequest, err)
+		return
+	}
+	response.WriteHeader(http.StatusNoContent)
+}
+
+// moveToQueue cancels a running job's current attempt and requeues it as the
+// next attempt on the same card (MACH-65). The response carries the new
+// attempt id; a repeated call returns the same id.
+func (s *Server) moveToQueue(response http.ResponseWriter, request *http.Request) {
+	newJobID, err := s.store.MoveToQueue(request.Context(), request.PathValue("id"))
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(response, http.StatusNotFound, errors.New("job not found"))
+		return
+	}
+	if errors.Is(err, ErrMoveNotAvailable) {
+		writeError(response, http.StatusConflict, err)
+		return
+	}
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	s.recordAudit(request, "jobs.move_to_queue", request.PathValue("id")+" -> "+newJobID)
+	writeJSON(response, http.StatusOK, map[string]string{"job_id": newJobID})
+}
+
+// leaseRevoked records where the worker saved the lane's uncommitted work
+// after its run lease was revoked (MACH-65).
+func (s *Server) leaseRevoked(response http.ResponseWriter, request *http.Request) {
+	if !limitRequestBody(response, request, maxRequestBytes) {
+		return
+	}
+	var input protocol.LeaseRevoked
+	if err := decodeJSON(request, &input); err != nil {
+		writeDecodeError(response, err)
+		return
+	}
+	if input.InstanceID == "" || input.LeaseToken == "" {
+		writeError(response, http.StatusBadRequest, errors.New("instance_id and lease_token are required"))
+		return
+	}
+	err := s.store.RecordRevokedWIP(request.Context(), request.PathValue("id"), input)
+	if errors.Is(err, ErrLeaseConflict) || errors.Is(err, ErrRunState) {
+		writeError(response, http.StatusConflict, err)
+		return
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(response, http.StatusNotFound, errors.New("run not found"))
+		return
+	}
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
 		return
 	}
 	response.WriteHeader(http.StatusNoContent)

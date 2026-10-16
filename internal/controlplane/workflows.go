@@ -21,7 +21,9 @@ func (s *Store) upgradeWorkflows(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback()
-	// The v2 runs table has no inbound foreign keys.
+	// The v2 runs table has no inbound foreign keys. The copy lists columns
+	// explicitly so it also works when the renamed table already carries
+	// columns added by later migrations (MACH-65 added runs.wip).
 	if _, err = tx.ExecContext(ctx, `ALTER TABLE runs RENAME TO runs_v2; DROP INDEX IF EXISTS runs_dispatch;
  CREATE TABLE runs (
  id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id), command TEXT NOT NULL, command_hash TEXT NOT NULL,
@@ -29,7 +31,8 @@ func (s *Store) upgradeWorkflows(ctx context.Context) error {
  timeout_ms INTEGER NOT NULL, state TEXT NOT NULL, worker_instance TEXT, worker_name TEXT NOT NULL DEFAULT '',
  lease_token TEXT, lease_expires_at INTEGER, exit_code INTEGER, error TEXT, result TEXT, events TEXT,
  started_at TEXT, completed_at TEXT, duration_millis INTEGER, token_usage INTEGER);
- INSERT INTO runs SELECT * FROM runs_v2;
+ INSERT INTO runs (id,job_id,command,command_hash,executor,model,repository,rendered_prompt,timeout_ms,state,worker_instance,worker_name,lease_token,lease_expires_at,exit_code,error,result,events,started_at,completed_at,duration_millis,token_usage)
+ SELECT id,job_id,command,command_hash,executor,model,repository,rendered_prompt,timeout_ms,state,worker_instance,worker_name,lease_token,lease_expires_at,exit_code,error,result,events,started_at,completed_at,duration_millis,token_usage FROM runs_v2;
  DROP TABLE runs_v2;
  CREATE INDEX runs_dispatch ON runs(state,job_id);
  PRAGMA user_version=3;`); err != nil {
