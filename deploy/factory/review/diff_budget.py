@@ -314,7 +314,9 @@ def plan_diff(
         mode = MODE_FULL
     else:
         chunks, summarized = _pack_chunks(kept, budget)
-        mode = MODE_SUMMARY if len(chunks) <= 1 else MODE_CHUNK
+        # Each summarized file becomes its own summary chunk, so an
+        # all-summarized plan can have multiple chunks; it is still ``summary``.
+        mode = MODE_SUMMARY if len(chunks) == len(summarized) else MODE_CHUNK
     return DiffPlan(
         mode=mode,
         chunks=chunks,
