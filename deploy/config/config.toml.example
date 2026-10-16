@@ -64,6 +64,27 @@ timeout = "120m"
 # sparks = "https://sparks.internal/healthz"
 # pipsqueek = "https://pipsqueek.internal/healthz"
 
+# LLM-unavailable failures (MACH-69): a run failed by an unreachable model
+# endpoint is classified llm_unavailable (shown on the card, run page, failure
+# alert and Plane comment instead of a generic failure), does not consume the
+# self-healing retry budget and does not add the Plane failed label. With an
+# endpoint configured, Machinist probes it (GET /v1/models, plus an optional
+# tiny completion) and requeues the job once automatically when it is healthy
+# AND serves the expected model id — "port open" is not enough, a replacement
+# container answering with a different model must not silently inherit the
+# work. A model mismatch is always logged; block_on_model_mismatch decides
+# whether it also blocks the requeue. The endpoint URL and model come from
+# this config (or the local overlay), never from the repo.
+# [llm_unavailable]
+# enabled = true                     # classification + wait-and-requeue pass
+# endpoint = "http://model-host.local:8000"
+# model = "deepseek-v4.1-flash"
+# probe_interval = "30s"             # probe cadence while waiting
+# max_wait = "60m"                   # give up and alert after this
+# auto_requeue = 1                   # automatic requeues before alerting
+# block_on_model_mismatch = true     # a mismatch blocks the requeue
+# probe_completion = false           # also fire a 1-token completion probe
+
 # Per-project auto-merge + deploy policy (MACH-24). Seeds ship with MACH
 # (OhMyMachinist: rebuild + restart the control plane) and SPARK (sparkDash on
 # spark2) on; every other project is off until configured. An entry replaces

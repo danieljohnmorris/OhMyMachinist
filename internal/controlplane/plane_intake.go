@@ -664,13 +664,22 @@ func (p *PlaneIntake) Sync(ctx context.Context) error {
 					record.Ended = "succeeded: no PR opened, state left"
 				}
 			case "failed":
-				if cfg.Shadow {
+				if p.store.jobErrorClass(ctx, candidate.JobID) == ErrorClassLLMUnavailable {
+					// MACH-69: a run failed by an unreachable model endpoint
+					// is not a code failure — it must not add the failed
+					// label. The llm_unavailable comment comes from healing.
+					if cfg.Shadow {
+						p.recordShadow(ctx, "state-sync", candidate.IssueKey, map[string]any{"job_id": candidate.JobID, "phase": "llm_unavailable", "run_state": candidate.RunState})
+					}
+					record.Ended = "llm_unavailable: failed label not applied"
+				} else if cfg.Shadow {
 					p.recordShadow(ctx, "state-sync", candidate.IssueKey, map[string]any{"job_id": candidate.JobID, "phase": plane.PhaseFailed})
 				} else if err := p.applySync(ctx, cfg, client, candidate, plane.PhaseFailed, ""); err != nil {
 					p.logf("plane intake: state sync %s: %v", candidate.IssueKey, err)
 					continue
+				} else {
+					record.Ended = plane.PhaseFailed
 				}
-				record.Ended = plane.PhaseFailed
 			}
 		}
 		if record.Notified == "" && strings.Contains(record.Ended, "pr=") {

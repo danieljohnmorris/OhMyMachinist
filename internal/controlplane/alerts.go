@@ -25,6 +25,9 @@ type FailAlert struct {
 	ElapsedMillis int64  `json:"elapsed_millis"`
 	ExitCode      int    `json:"exit_code"`
 	Reason        string `json:"reason"`
+	// ErrorClass carries the failure classification (MACH-69): a hook can
+	// route an llm_unavailable outage differently from a code failure.
+	ErrorClass string `json:"error_class,omitempty"`
 }
 
 // alertingState reports whether a terminal process state emits a fail alert.
@@ -95,6 +98,9 @@ func (s *Store) pendingFailAlert(ctx context.Context, runID string) (FailAlert, 
 		var parsed JobMetadata
 		if err := json.Unmarshal([]byte(metadata), &parsed); err == nil {
 			alert.IssueURL = parsed.IssueURL
+			if parsed.ErrorClass != nil {
+				alert.ErrorClass = string(parsed.ErrorClass.Class)
+			}
 		}
 	}
 	return alert, true, nil

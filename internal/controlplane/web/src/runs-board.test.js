@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { attemptDurationMillis, attemptStart, attemptTime, boardCardTimestamp, boardColumnForState, boardDateFilters, boardDateWindow, boardFiltersFromHash, boardFiltersFromParams, boardHash, boardParamsFromFilters, canCancelJob, collapseIssueAttempts, collapseJobsByTicket, filterBoardJobs, filterJobs, filterJobsByDate, githubIssueReference, groupJobsByBoardColumn, jobCounts, jobDisplayTitle, jobTicketKey, needsAttention, priorAttempts, resolutionLabel, supersededJob, ticketAttempts } from "./runs-board.js";
+import { attemptDurationMillis, attemptStart, attemptTime, boardCardTimestamp, boardColumnForState, boardDateFilters, boardDateWindow, boardFiltersFromHash, boardFiltersFromParams, boardHash, boardParamsFromFilters, canCancelJob, collapseIssueAttempts, collapseJobsByTicket, errorClassLabel, filterBoardJobs, filterJobs, filterJobsByDate, githubIssueReference, groupJobsByBoardColumn, isLLMUnavailable, jobCounts, jobDisplayTitle, jobTicketKey, needsAttention, priorAttempts, resolutionLabel, supersededJob, ticketAttempts } from "./runs-board.js";
 
 test("board card timestamps prefer run completion for finished jobs and last update otherwise", () => {
   const finishedJob = {
@@ -373,4 +373,16 @@ test("only plain queued jobs are cancellable", () => {
   }
   assert.equal(canCancelJob({ state: "queued", workflow: { name: "deliver", steps: ["build"], current_step: 0 } }), false);
   assert.equal(canCancelJob({ state: "running", workflow: { name: "deliver" } }), false);
+});
+
+test("llm_unavailable jobs are labelled LLM unavailable with the reason; other jobs are not", () => {
+  const unavailable = { state: "failed", metadata: { error_class: { class: "llm_unavailable", reason: "omp auto_retry_end failed: Unable to connect" } } };
+  assert.equal(isLLMUnavailable(unavailable), true);
+  assert.equal(errorClassLabel(unavailable), "LLM unavailable — omp auto_retry_end failed: Unable to connect");
+  assert.equal(errorClassLabel({ state: "failed", metadata: { error_class: { class: "llm_unavailable" } } }), "LLM unavailable");
+  const plain = { state: "failed", metadata: { error_class: { class: "oom" } } };
+  assert.equal(isLLMUnavailable(plain), false);
+  assert.equal(errorClassLabel(plain), "");
+  assert.equal(errorClassLabel({ state: "failed" }), "");
+  assert.equal(errorClassLabel(null), "");
 });

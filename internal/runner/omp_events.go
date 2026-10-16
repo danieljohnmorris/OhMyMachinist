@@ -149,12 +149,79 @@ func (parser *ompStreamParser) parseLine(line []byte) {
 		parser.parseToolStart(event)
 	case "tool_execution_end":
 		parser.parseToolResult(event)
+	// MACH-69: retry-cycle and session-end markers carry the LLM failure
+	// signals the controlplane classifies (connection-type finalError on a
+	// failed retry loop, zero output tokens at session end).
+	case "auto_retry_end":
+		parser.parseAutoRetryEnd(event)
+	case "agent_end":
+		parser.parseAgentEnd(line)
 	}
 }
 
+// parseAutoRetryEnd records a failed omp retry cycle: the final error is kept
+// so the controlplane can tell an unreachable model endpoint from other
+// failures. Successful retry cycles are not transcript-worthy.
+func (parser *ompStreamParser) parseAutoRetryEnd(event ompEvent) {
+	if event.Success == nil || *event.Success {
+		return
+	}
+	parser.emit(Event{
+		Type:    "agent.auto_retry_end",
+		Message: truncateBytes(redactSecrets(event.FinalError), ompThinkingBytes),
+		Failed:  true,
+	})
+}
+
+// parseAgentEnd records a session end that produced no output tokens: the
+// corroboration signal for an endpoint that died before answering anything.
+func (parser *ompStreamParser) parseAgentEnd(line []byte) {
+	var agentEnd struct {
+		Tokens        *int64 `json:"tokens"`
+		OutputTokens  *int64 `json:"outputTokens"`
+		OutputTokens2 *int64 `json:"output_tokens"`
+		TotalTokens   *int64 `json:"totalTokens"`
+	}
+	if err := json.Unmarshal(line, &agentEnd); err != nil {
+		return
+	}
+	tokens := agentEnd.Tokens
+	if tokens == nil {
+		tokens = agentEnd.OutputTokens
+	}
+	if tokens == nil {
+		tokens = agentEnd.OutputTokens2
+	}
+	if tokens == nil {
+		tokens = agentEnd.TotalTokens
+	}
+	if tokens == nil {
+		// omp's agent_end often carries no counts; the last assistant
+		// message's usage is the session's output so far.
+		tokens = parser.usage
+	}
+	if tokens == nil {
+		// No counts and no assistant message arrived at all: the agent
+		// produced nothing — the MACH-60/SPARK-10 outage signature.
+		if parser.finalMessage == "" {
+			parser.emit(Event{Type: "agent.agent_end", Message: "output_tokens=0", Failed: true})
+		}
+		return
+	}
+	if *tokens != 0 {
+		return
+	}
+	parser.emit(Event{Type: "agent.agent_end", Message: "output_tokens=0", Failed: true})
+}
+
 type ompEvent struct {
-	Type    string `json:"type"`
-	Message *struct {
+	Type string `json:"type"`
+	// auto_retry_end carries the retry outcome: success=false with the last
+	// provider error (MACH-69 llm_unavailable classification).
+	Success    *bool  `json:"success"`
+	FinalError string `json:"finalError"`
+	Attempt    int    `json:"attempt"`
+	Message    *struct {
 		Role    string `json:"role"`
 		Content []struct {
 			Type      string          `json:"type"`

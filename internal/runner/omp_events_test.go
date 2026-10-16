@@ -65,6 +65,64 @@ func TestOmpStreamParserEmitsTypedTranscriptEvents(t *testing.T) {
 	}
 }
 
+// MACH-69: a failed omp retry cycle with a connection-type finalError, and a
+// session that produced no output tokens, land in the transcript for the
+// controlplane to classify as llm_unavailable.
+func TestOmpStreamParserEmitsLLMUnavailableSignals(t *testing.T) {
+	log, path := newTestEventLog(t)
+	parser := newOmpStreamParser(log)
+	stream := `{"type":"session","version":3,"id":"abc","cwd":"/tmp"}
+{"type":"agent_start"}
+{"type":"auto_retry_end","success":false,"attempt":10,"finalError":"Unable to connect. Is the computer able to access the url?"}
+{"type":"agent_end","isTerminal":true,"yielded":true}
+`
+	if _, err := parser.Write([]byte(stream)); err != nil {
+		t.Fatal(err)
+	}
+	if err := log.close(); err != nil {
+		t.Fatal(err)
+	}
+	events := readEvents(t, path)
+	var retryEnd, agentEnd Event
+	for _, event := range events {
+		switch event.Type {
+		case "agent.auto_retry_end":
+			retryEnd = event
+		case "agent.agent_end":
+			agentEnd = event
+		}
+	}
+	if !retryEnd.Failed || !strings.Contains(retryEnd.Message, "Unable to connect") {
+		t.Fatalf("auto_retry_end = %#v", retryEnd)
+	}
+	if !agentEnd.Failed || agentEnd.Message != "output_tokens=0" {
+		t.Fatalf("agent_end = %#v", agentEnd)
+	}
+}
+
+// A successful retry cycle and a session with output tokens emit nothing.
+func TestOmpStreamParserSkipsHealthyRetryCycle(t *testing.T) {
+	log, path := newTestEventLog(t)
+	parser := newOmpStreamParser(log)
+	stream := `{"type":"session","version":3,"id":"abc","cwd":"/tmp"}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Done."}],"usage":{"totalTokens":42}}}
+{"type":"auto_retry_end","success":true,"attempt":2}
+{"type":"agent_end","isTerminal":true,"yielded":true}
+`
+	if _, err := parser.Write([]byte(stream)); err != nil {
+		t.Fatal(err)
+	}
+	if err := log.close(); err != nil {
+		t.Fatal(err)
+	}
+	events := readEvents(t, path)
+	for _, event := range events {
+		if event.Type == "agent.auto_retry_end" || event.Type == "agent.agent_end" {
+			t.Fatalf("unexpected signal event %#v", event)
+		}
+	}
+}
+
 func TestOmpStreamParserTruncatesAndRedactsToolResults(t *testing.T) {
 	log, path := newTestEventLog(t)
 	parser := newOmpStreamParser(log)
