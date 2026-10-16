@@ -22,16 +22,16 @@ func newTokensCommand(options *commandOptions) *cobra.Command {
 	return tokens
 }
 
-func openTokenStore(options *commandOptions) (*controlplane.Store, func(), error) {
+func openTokenStore(options *commandOptions) (*controlplane.Store, func(), int, error) {
 	machinistConfig, err := config.LoadConfig(options.configPath)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 	store, err := controlplane.OpenStore(machinistConfig.Server.Database)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
-	return store, func() { store.Close() }, nil
+	return store, func() { store.Close() }, machinistConfig.Server.ConcurrentJobLimit(), nil
 }
 
 func newTokenCreateCommand(options *commandOptions) *cobra.Command {
@@ -41,7 +41,7 @@ func newTokenCreateCommand(options *commandOptions) *cobra.Command {
 		Short: "Create an API token (print the secret once)",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			store, closeStore, err := openTokenStore(options)
+			store, closeStore, _, err := openTokenStore(options)
 			if err != nil {
 				return err
 			}
@@ -68,7 +68,7 @@ func newTokenListCommand(options *commandOptions) *cobra.Command {
 		Short: "List API tokens (secrets are never shown)",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			store, closeStore, err := openTokenStore(options)
+			store, closeStore, _, err := openTokenStore(options)
 			if err != nil {
 				return err
 			}
@@ -96,7 +96,7 @@ func newTokenRevokeCommand(options *commandOptions) *cobra.Command {
 		Short:   "Revoke an API token",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(command *cobra.Command, args []string) error {
-			store, closeStore, err := openTokenStore(options)
+			store, closeStore, _, err := openTokenStore(options)
 			if err != nil {
 				return err
 			}
