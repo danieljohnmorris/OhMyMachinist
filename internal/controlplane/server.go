@@ -70,11 +70,12 @@ const defaultResolutionEvery = 10 * time.Minute
 type statusResponse struct {
 	Workflows []string `json:"workflows"`
 	Snapshot
-	Commands          []string `json:"commands"`
-	Repositories      []string `json:"repositories"`
-	MaxConcurrentJobs *int     `json:"max_concurrent_jobs"`
-	RunningJobs       int      `json:"running_jobs"`
-	CSRFToken         string   `json:"csrf_token"`
+	Commands          []string      `json:"commands"`
+	Repositories      []string      `json:"repositories"`
+	MaxConcurrentJobs *int          `json:"max_concurrent_jobs"`
+	RunningJobs       int           `json:"running_jobs"`
+	CSRFToken         string        `json:"csrf_token"`
+	Factory           *FactoryState `json:"factory,omitempty"`
 }
 
 type submitRequest struct {
@@ -391,6 +392,11 @@ func (s *Server) routes() (http.Handler, error) {
 	mux.HandleFunc("GET /api/v1/runs/{id}", s.authorizeRead(s.getRunHandler))
 	mux.HandleFunc("GET /api/v1/settings", s.authorizeRead(s.getSettingsHandler))
 	mux.HandleFunc("PUT /api/v1/settings/{key}", s.authorizeWrite(s.putSettingHandler))
+	mux.HandleFunc("GET /api/v1/factory", s.authorizeRead(s.getFactoryHandler))
+	mux.HandleFunc("POST /api/v1/factory/start", s.authorizeWrite(s.startFactoryHandler))
+	mux.HandleFunc("POST /api/v1/factory/stop", s.authorizeWrite(s.stopFactoryHandler))
+	mux.HandleFunc("PUT /api/v1/factory/max-concurrent-jobs", s.authorizeWrite(s.setFactoryJobsHandler))
+	mux.HandleFunc("PUT /api/v1/factory/lanes/{name}", s.authorizeWrite(s.setLaneHandler))
 	mux.HandleFunc("GET /api/v1/tokens", s.authorizeTokenList(s.listTokensHandler))
 	mux.HandleFunc("POST /api/v1/tokens", s.authorizeWrite(s.createTokenHandler))
 	mux.HandleFunc("DELETE /api/v1/tokens/{id}", s.authorizeWrite(s.revokeTokenHandler))
@@ -476,6 +482,11 @@ func (s *Server) status(response http.ResponseWriter, request *http.Request) {
 			runningJobs++
 		}
 	}
+	factory, factoryErr := s.store.FactoryStatus(request.Context(), s.maxConcurrentJobs)
+	if factoryErr != nil {
+		writeError(response, http.StatusInternalServerError, factoryErr)
+		return
+	}
 	writeJSON(response, http.StatusOK, statusResponse{
 		Snapshot:          snapshot,
 		Commands:          definition.CommandNames(),
@@ -484,6 +495,7 @@ func (s *Server) status(response http.ResponseWriter, request *http.Request) {
 		MaxConcurrentJobs: maxConcurrentJobs,
 		RunningJobs:       runningJobs,
 		CSRFToken:         s.csrfToken,
+		Factory:           &factory,
 	})
 }
 

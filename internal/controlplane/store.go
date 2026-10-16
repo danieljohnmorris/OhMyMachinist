@@ -1064,6 +1064,12 @@ func (s *Store) poll(ctx context.Context, request protocol.PollRequest, maxConcu
 	if maxConcurrentJobs < 0 {
 		return nil, errors.New("max concurrent jobs cannot be negative")
 	}
+	// Factory controls are read before the transaction: the store holds a
+	// single connection, so a query inside the open transaction would block.
+	factory, err := s.loadFactorySettings(ctx)
+	if err != nil {
+		return nil, err
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -1139,13 +1145,33 @@ func (s *Store) poll(ctx context.Context, request protocol.PollRequest, maxConcu
 	if !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
+	// A stopped factory dispatches nothing new; a disabled lane takes no new
+	// job. The active run above still returns, so a running job keeps its
+	// worker while draining and paused lanes stay connected.
+	if factory.State != FactoryRunning || factory.DisabledLanes[request.Name] {
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+	limit := maxConcurrentJobs
+	if factory.HasJobCap {
+		limit = factory.JobCap
+	}
+	if limit > 0 {
+		lanes, err := countReadyLanes(ctx, tx, nowTime.Add(-workerAvailabilityWindow), factory.DisabledLanes)
+		if err != nil {
+			return nil, err
+		}
+		limit = ClampJobCap(limit, lanes)
+	}
 	atCapacity := false
-	if maxConcurrentJobs > 0 {
+	if limit > 0 {
 		var runningJobs int
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs WHERE state='running'`).Scan(&runningJobs); err != nil {
 			return nil, fmt.Errorf("count running jobs: %w", err)
 		}
-		atCapacity = runningJobs >= maxConcurrentJobs
+		atCapacity = runningJobs >= limit
 	}
 
 	executors := stringSet(request.Executors)
@@ -1654,8 +1680,18 @@ func (s *Store) Settings(ctx context.Context) (map[string]string, error) {
 	return values, rows.Err()
 }
 
-// PutSetting stores one settings key/value pair.
+// PutSetting stores one settings key/value pair. The reserved "factory." keys
+// are managed by the factory controls (which validate and clamp) and are
+// refused here so a generic settings write cannot bypass them.
 func (s *Store) PutSetting(ctx context.Context, key, value string) error {
+	if strings.HasPrefix(key, factorySettingPrefix) {
+		return fmt.Errorf("setting %q is managed by the factory controls", key)
+	}
+	return s.putSetting(ctx, key, value)
+}
+
+// putSetting writes one settings key/value pair without the reserved-key guard.
+func (s *Store) putSetting(ctx context.Context, key, value string) error {
 	if _, err := s.db.ExecContext(ctx, `INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value); err != nil {
 		return fmt.Errorf("write setting %q: %w", key, err)
 	}

@@ -49,7 +49,8 @@ It keeps the upstream control plane, worker model and executors. Everything belo
 - Tasks board: one card per ticket with prior attempts, active and failed by default, Show succeeded, project and date filters that persist in the URL
 - Run page: attempt picker, transcript tab, full-height transcript and an activity sidebar with state timings
 - Transcript streams the whole agent session live: every assistant message, thinking summary, tool call and tool result (omp runs in `--mode json`), per attempt, followed by the delivery and review output
-- Sidebar shows worker count and job concurrency
+- Sidebar shows worker count and job concurrency, with Start/Stop and a Factory page for the job cap and lanes
+- Factory controls: pause or resume dispatch (drain or cancel the running job), set how many jobs run at once, and enable or disable individual lanes, from the UI, the API, MCP or `machinist pause|resume`
 
 ## How it works
 
