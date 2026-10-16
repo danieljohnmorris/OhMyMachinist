@@ -439,14 +439,15 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 		Revision: spec.Revision,
 		Workflow: spec.Workflow, JobID: spec.JobID,
 		Task: spec.Task, PrepareInputs: w.prepareInputs(spec),
-		RunID:         spec.ID,
-		ArtifactKey:   spec.LeaseToken,
-		Command:       command,
-		Repository:    repository,
-		ExtraEnv:      extraEnv,
-		DataDirectory: w.config.DataDirectory,
-		Stdout:        w.stdout,
-		Stderr:        w.stderr,
+		RunID:          spec.ID,
+		ArtifactKey:    spec.LeaseToken,
+		Command:        command,
+		Repository:     repository,
+		ExtraEnv:       extraEnv,
+		DataDirectory:  w.config.DataDirectory,
+		RawLogMaxBytes: w.config.RawLogMaxBytes,
+		Stdout:         w.stdout,
+		Stderr:         w.stderr,
 	})
 	if result.ID != "" {
 		completion.State = string(result.State)
@@ -456,13 +457,26 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 			completion.Events = string(events)
 		}
 	}
+	// MACH-28: every finished attempt, including failed, timed-out and
+	// cancelled ones, gets a downloadable raw agent log. Upload it before
+	// reporting completion so it is part of the run's artifact manifest.
+	if result.RawLogPath != "" {
+		publishCtx, cancelPublish := context.WithTimeout(context.WithoutCancel(ctx), completionReportTimeout)
+		id, err := w.publishRawLog(publishCtx, spec, result.RawLogPath)
+		cancelPublish()
+		if err != nil {
+			completion.PublicationError = err.Error()
+		} else {
+			completion.Artifacts = append(completion.Artifacts, id)
+		}
+	}
 	if spec.Task != nil && result.EventsPath != "" {
 		// Publishing the run outputs is part of the job's final steps, so a
 		// shutdown must not abandon it (MACH-59).
 		publishCtx, cancelPublish := context.WithTimeout(context.WithoutCancel(ctx), completionReportTimeout)
 		ids, err := w.publishOutputs(publishCtx, spec, filepath.Join(filepath.Dir(result.EventsPath), "outputs"))
 		cancelPublish()
-		completion.Artifacts = ids
+		completion.Artifacts = append(completion.Artifacts, ids...)
 		if err != nil {
 			completion.PublicationError = err.Error()
 		}

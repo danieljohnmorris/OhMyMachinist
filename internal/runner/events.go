@@ -30,6 +30,17 @@ type Event struct {
 	Args   string `json:"tool_args,omitempty"`
 	Bytes  int    `json:"bytes,omitempty"`
 	Failed bool   `json:"failed,omitempty"`
+	// MACH-28 file-edit chips and subagent markers. agent.file_edit carries the
+	// changed path, the operation (edit, write, create or delete) and the added
+	// and removed line counts when the tool reported them. agent.subagent_start
+	// and agent.subagent_end name the subagent and carry a short task summary or
+	// result, with status marking how the subagent finished.
+	Path      string `json:"path,omitempty"`
+	Operation string `json:"operation,omitempty"`
+	Additions int    `json:"additions,omitempty"`
+	Deletions int    `json:"deletions,omitempty"`
+	Subagent  string `json:"subagent,omitempty"`
+	Status    string `json:"status,omitempty"`
 }
 
 func (log *eventLog) appendOutput(stream string, data []byte) error {

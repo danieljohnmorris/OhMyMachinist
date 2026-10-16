@@ -18,6 +18,7 @@ import (
 
 	"github.com/owainlewis/machinist/internal/artifacts"
 	"github.com/owainlewis/machinist/internal/protocol"
+	"github.com/owainlewis/machinist/internal/runner"
 )
 
 func (c *Client) artifactRequest(ctx context.Context, method, path string, body io.Reader, spec protocol.RunSpec, instance string) (*http.Response, error) {
@@ -92,6 +93,32 @@ func (w *Worker) prepareInputs(spec protocol.RunSpec) func(context.Context, stri
 		return paths, nil
 	}
 }
+
+// publishRawLog uploads the run's raw agent log as an artifact. It is best
+// effort at the run level: the caller records any error as a publication error
+// rather than failing the run, and the log is still on disk in the run
+// directory.
+func (w *Worker) publishRawLog(ctx context.Context, spec protocol.RunSpec, path string) (string, error) {
+	var a protocol.Artifact
+	err := w.retryArtifact(ctx, func() error {
+		file, err := os.Open(path)
+		if err != nil {
+			return &ResponseError{Status: 422, Body: err.Error()}
+		}
+		defer file.Close()
+		resp, err := w.client.artifactRequest(ctx, "PUT", "/api/v1/runs/"+url.PathEscape(spec.ID)+"/artifacts?path="+url.QueryEscape(runner.RawLogFileName), file, spec, w.instanceID)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		return json.NewDecoder(io.LimitReader(resp.Body, 16384)).Decode(&a)
+	})
+	if err != nil {
+		return "", err
+	}
+	return a.ID, nil
+}
+
 func (w *Worker) retryArtifact(ctx context.Context, fn func() error) error {
 	backoff := 250 * time.Millisecond
 	for {

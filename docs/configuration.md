@@ -28,6 +28,21 @@ path = "/absolute/path/to/my-project"
 Managed triggers select one command with `command = "audit"`. Model selection remains
 available when the executor command includes `{{machinist.model}}`.
 
+## Worker raw agent log
+
+Each finished run uploads a raw agent log artifact for troubleshooting. Cap its
+size in the worker config; the default is 64 MB:
+
+```toml
+data_directory = "~/.machinist/worker"
+raw_log_max_bytes = 67108864
+```
+
+The cap bounds the uploaded file only; the transcript keeps its own typed events.
+When the cap is reached the artifact ends with a `[raw agent log truncated at N MB]`
+marker. The value must not be negative. The log is redacted with the same secret
+patterns as the transcript.
+
 ## Task workflows
 
 ```toml

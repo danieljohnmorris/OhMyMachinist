@@ -452,6 +452,13 @@ func TestManagedWorkerSeparatesRedispatchedLeaseArtifacts(t *testing.T) {
 		stderr:     io.Discard,
 	}
 	runID := "run_0123456789abcdef01234567"
+	// The worker uploads a raw-log artifact for every run, so it needs a
+	// control plane that accepts artifact uploads.
+	artifacts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"id":"artifact_raw","run_id":"`+runID+`","path":"agent-output.log"}`)
+	}))
+	defer artifacts.Close()
+	worker.client = &Client{base: artifacts.URL, http: artifacts.Client()}
 	for _, lease := range []string{"lease_first", "lease_second"} {
 		completion := worker.execute(t.Context(), protocol.RunSpec{
 			ID:             runID,

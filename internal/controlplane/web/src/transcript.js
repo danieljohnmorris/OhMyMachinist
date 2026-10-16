@@ -26,14 +26,26 @@ function toolArguments(event) {
   }
 }
 
+// count returns a non-negative integer for a numeric field, so a missing or
+// malformed count renders as zero rather than NaN.
+function count(value) {
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
 export function transcriptEntries(events, maxEntries = transcriptMaxEntries) {
   const entries = [];
   const pending = { stdout: "", stderr: "" };
+  // Subagent markers group the entries nested between them, when the stream
+  // carries the subagent's own events.
+  let subagentDepth = 0;
+  const push = (entry) => {
+    entries.push(subagentDepth > 0 ? { ...entry, depth: subagentDepth } : entry);
+  };
   const flush = (stream, final) => {
     const parts = pending[stream].split("\n");
     pending[stream] = final ? "" : parts.pop();
     for (const text of final ? parts.filter((part, index) => part !== "" || index < parts.length - 1) : parts) {
-      entries.push({ kind: "output", stream, text });
+      push({ kind: "output", stream, text });
     }
   };
   for (const raw of String(events || "").split("\n")) {
@@ -44,7 +56,7 @@ export function transcriptEntries(events, maxEntries = transcriptMaxEntries) {
     } catch {
       // Raw (non-JSONL) log content is real output; show it rather than
       // silently hiding it behind "Waiting for output…".
-      entries.push({ kind: "output", stream: "stdout", text: raw });
+      push({ kind: "output", stream: "stdout", text: raw });
       continue;
     }
     switch (event.type) {
@@ -55,16 +67,16 @@ export function transcriptEntries(events, maxEntries = transcriptMaxEntries) {
         continue;
       }
       case "agent.message":
-        if (event.message) entries.push({ kind: "message", text: event.message });
+        if (event.message) push({ kind: "message", text: event.message });
         continue;
       case "agent.thinking":
-        if (event.message) entries.push({ kind: "thinking", text: event.message });
+        if (event.message) push({ kind: "thinking", text: event.message });
         continue;
       case "agent.tool_call":
-        entries.push({ kind: "tool-call", tool: event.tool || "tool", args: toolArguments(event), text: event.message || "" });
+        push({ kind: "tool-call", tool: event.tool || "tool", args: toolArguments(event), text: event.message || "" });
         continue;
       case "agent.tool_result":
-        entries.push({
+        push({
           kind: "tool-result",
           tool: event.tool || "tool",
           text: event.message || "",
@@ -72,8 +84,33 @@ export function transcriptEntries(events, maxEntries = transcriptMaxEntries) {
           failed: Boolean(event.failed),
         });
         continue;
+      case "agent.file_edit":
+        push({
+          kind: "file-edit",
+          path: event.path || "",
+          operation: event.operation || "",
+          additions: count(event.additions),
+          deletions: count(event.deletions),
+          tool: event.tool || "edit",
+          args: toolArguments(event),
+          text: event.message || "",
+        });
+        continue;
+      case "agent.subagent_start":
+        push({ kind: "subagent-start", subagent: event.subagent || event.tool || "subagent", text: event.message || "" });
+        subagentDepth++;
+        continue;
+      case "agent.subagent_end":
+        subagentDepth = Math.max(0, subagentDepth - 1);
+        push({
+          kind: "subagent-end",
+          subagent: event.subagent || event.tool || "subagent",
+          status: event.status || "",
+          text: event.message || "",
+        });
+        continue;
       default:
-        entries.push({ kind: "event", text: event.message ? `${event.type}: ${event.message}` : event.type || "" });
+        push({ kind: "event", text: event.message ? `${event.type}: ${event.message}` : event.type || "" });
     }
   }
   flush("stdout", true);

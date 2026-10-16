@@ -46,12 +46,15 @@ const (
 )
 
 type Worker struct {
-	Name          string                `toml:"name"`
-	DataDirectory string                `toml:"data_directory"`
-	ControlPlane  ControlPlane          `toml:"control_plane"`
-	Executors     map[string]Executor   `toml:"executors"`
-	Repositories  map[string]Repository `toml:"repositories"`
-	configDir     string
+	Name          string `toml:"name"`
+	DataDirectory string `toml:"data_directory"`
+	// RawLogMaxBytes caps the raw agent log artifact uploaded for each run.
+	// Zero uses the runner default (64 MB).
+	RawLogMaxBytes int64                 `toml:"raw_log_max_bytes"`
+	ControlPlane   ControlPlane          `toml:"control_plane"`
+	Executors      map[string]Executor   `toml:"executors"`
+	Repositories   map[string]Repository `toml:"repositories"`
+	configDir      string
 }
 
 type ControlPlane struct {
@@ -566,6 +569,9 @@ func applyWorkerDefaultsWithHostname(worker Worker, getHostname func() (string, 
 		return Worker{}, fmt.Errorf("resolve worker data directory: %w", err)
 	}
 	worker.DataDirectory = filepath.Clean(worker.DataDirectory)
+	if worker.RawLogMaxBytes < 0 {
+		return Worker{}, errors.New("raw_log_max_bytes must not be negative")
+	}
 	for name, repository := range worker.Repositories {
 		if strings.TrimSpace(name) == "" || strings.TrimSpace(repository.Path) == "" {
 			return Worker{}, errors.New("repository names and paths must be non-empty")

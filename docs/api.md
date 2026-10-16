@@ -64,8 +64,18 @@ run page renders readably: `agent.message` (assistant text, markdown),
 `agent.thinking` (a thinking summary, dimmed), `agent.tool_call` (`tool` name
 and `tool_args` JSON) and `agent.tool_result` (`tool`, `message` truncated to
 2 KB, `bytes` for the full size, `failed` when the tool reported an error).
-Tool-call and tool-result payloads are redacted for credential shapes before
-they reach the log.
+File edits become `agent.file_edit` (`path`, `operation` of edit/write/create/
+delete, `additions` and `deletions`, plus `tool_args` and a short result) and
+subagents become `agent.subagent_start` (`subagent` name and a truncated task
+summary) and `agent.subagent_end` (`status` and a short result).
+Tool-call, tool-result and file-edit payloads are redacted for credential shapes
+before they reach the log.
+
+Each finished run also publishes a raw agent log artifact (`agent-output.log`)
+under its run directory: the complete agent stdout with the same redaction,
+capped at a configurable size and marked `[raw agent log truncated at N MB]`
+when the cap is reached. It is downloadable from the run page Artifacts list for
+every attempt, including failed, timed-out and cancelled runs.
 
 ### Changing state (write scope)
 

@@ -49,3 +49,33 @@ test("polls only while the run is active", () => {
   assert.equal(transcriptIsLive("running"), true);
   assert.equal(transcriptIsLive("succeeded"), false);
 });
+test("maps file edits and subagents to chips and markers", () => {
+  const events = [
+    line({ type: "agent.file_edit", tool: "edit", path: "docs/api.md", operation: "edit", additions: 3, deletions: 1, tool_args: '{"path":"docs/api.md"}', message: "[docs/api.md]\n1:x" }),
+    line({ type: "agent.subagent_start", tool: "task", subagent: "Reviewer", message: "Review the diff" }),
+    line({ type: "agent.message", message: "inside" }),
+    line({ type: "agent.subagent_end", tool: "task", subagent: "Reviewer", status: "completed", message: "done" }),
+  ].join("\n");
+  assert.deepEqual(transcriptEntries(events), [
+    {
+      kind: "file-edit",
+      path: "docs/api.md",
+      operation: "edit",
+      additions: 3,
+      deletions: 1,
+      tool: "edit",
+      args: '{\n  "path": "docs/api.md"\n}',
+      text: "[docs/api.md]\n1:x",
+    },
+    { kind: "subagent-start", subagent: "Reviewer", text: "Review the diff" },
+    { kind: "message", text: "inside", depth: 1 },
+    { kind: "subagent-end", subagent: "Reviewer", status: "completed", text: "done" },
+  ]);
+});
+
+test("defaults missing file edit counts to zero", () => {
+  const events = line({ type: "agent.file_edit", tool: "write", path: "a.txt" });
+  assert.deepEqual(transcriptEntries(events), [
+    { kind: "file-edit", path: "a.txt", operation: "", additions: 0, deletions: 0, tool: "write", args: "", text: "" },
+  ]);
+});
