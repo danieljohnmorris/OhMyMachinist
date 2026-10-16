@@ -3,6 +3,9 @@
 package managedworker
 
 import (
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,41 +17,68 @@ import (
 // own cgroup only hits its limit when the worker itself ran out of memory
 // (per-job scopes contain each job), which is when a run must never be
 // re-leased (MACH-62).
-func workerOOMDeath(dataDirectory string) (runID string, peakBytes int64, died bool) {
+//
+// An error means the check itself failed, which must never be read as a clean
+// restart: the run that OOM-killed the worker would then be re-leased when its
+// lease expires, the exact outcome MACH-62 forbids. The caller reports the
+// error rather than swallowing it.
+func workerOOMDeath(dataDirectory string) (runID string, peakBytes int64, died bool, err error) {
 	dataDirectory = strings.TrimSpace(dataDirectory)
 	if dataDirectory == "" {
-		return "", 0, false
+		return "", 0, false, nil
 	}
 	eventsPath := workerCgroupFile("memory.events")
 	if eventsPath == "" {
-		return "", 0, false
+		return "", 0, false, nil
 	}
+	return oomDeathSince(eventsPath, workerCgroupFile("memory.peak"), dataDirectory)
+}
+
+// oomDeathSince compares the cgroup's OOM-kill counter at eventsPath against
+// the baseline recorded under dataDirectory, so an OOM kill between two
+// restarts is detectable. The paths are parameters so the logic can be tested
+// without a real cgroup. Any I/O failure is returned, never folded into a
+// "no OOM death" result.
+func oomDeathSince(eventsPath, peakPath, dataDirectory string) (runID string, peakBytes int64, died bool, err error) {
 	count, err := cgroupCounter(eventsPath, "oom_kill")
 	if err != nil {
-		return "", 0, false
+		return "", 0, false, fmt.Errorf("read %s: %w", eventsPath, err)
+	}
+	if err := os.MkdirAll(dataDirectory, 0o700); err != nil {
+		return "", 0, false, fmt.Errorf("create data directory: %w", err)
 	}
 	statePath := filepath.Join(dataDirectory, "oom-death.state")
-	if err := os.MkdirAll(dataDirectory, 0o700); err != nil {
-		return "", 0, false
-	}
 	previous, err := readCounter(statePath)
-	if err != nil {
+	if errors.Is(err, fs.ErrNotExist) {
 		// First observation: remember the baseline, never guess a death.
-		_ = os.WriteFile(statePath, []byte(strconv.FormatInt(count, 10)+"\n"), 0o600)
-		return "", 0, false
+		if writeErr := os.WriteFile(statePath, []byte(strconv.FormatInt(count, 10)+"\n"), 0o600); writeErr != nil {
+			return "", 0, false, fmt.Errorf("write OOM baseline: %w", writeErr)
+		}
+		return "", 0, false, nil
+	}
+	if err != nil {
+		return "", 0, false, fmt.Errorf("read OOM state: %w", err)
 	}
 	if err := os.WriteFile(statePath, []byte(strconv.FormatInt(count, 10)+"\n"), 0o600); err != nil {
-		return "", 0, false
+		return "", 0, false, fmt.Errorf("write OOM state: %w", err)
 	}
 	if count <= previous {
-		return "", 0, false
+		return "", 0, false, nil
 	}
-	peakBytes, _ = readCounter(workerCgroupFile("memory.peak"))
+	// The death is real from here on: the peak is informational, so a missing
+	// or unreadable peak file must not turn the death into an error.
+	if peakPath != "" {
+		peakBytes, _ = readCounter(peakPath)
+	}
 	body, err := os.ReadFile(filepath.Join(dataDirectory, "lane.lock"))
 	if err != nil {
-		return "", peakBytes, true
+		if errors.Is(err, fs.ErrNotExist) {
+			// Died, but no run was recorded as in flight.
+			return "", peakBytes, true, nil
+		}
+		return "", peakBytes, true, fmt.Errorf("read lane.lock: %w", err)
 	}
-	return strings.TrimSpace(string(body)), peakBytes, true
+	return strings.TrimSpace(string(body)), peakBytes, true, nil
 }
 
 // workerCgroupFile returns a file inside the worker process's own cgroup, or

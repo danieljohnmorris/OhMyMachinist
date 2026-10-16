@@ -788,6 +788,30 @@ func TestExecuteSavesUntrackedLaneLeftoversBeforeRunning(t *testing.T) {
 	}
 }
 
+// MACH-62: a file the archive cannot read must surface as an error, not as a
+// successful but truncated tar that the stash then removes from the lane.
+func TestArchiveUntrackedReportsUnreadableFile(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses the file permission the test relies on")
+	}
+	repository := newGitRepository(t)
+	unreadable := filepath.Join(repository, "secret.txt")
+	if err := os.WriteFile(unreadable, []byte("classified"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(unreadable, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(unreadable, 0o600) })
+	written, err := archiveUntracked(repository, t.TempDir(), "machinist-lane-wip-test")
+	if err == nil {
+		t.Fatalf("archiveUntracked swallowed an unreadable file: written=%d, err=nil", written)
+	}
+	if written != 0 {
+		t.Fatalf("written = %d, want 0", written)
+	}
+}
+
 func TestExecuteSavesDirtyLaneBeforeRunning(t *testing.T) {
 	repository := newGitRepository(t)
 	if err := os.WriteFile(filepath.Join(repository, "tracked.txt"), []byte("clean"), 0o600); err != nil {

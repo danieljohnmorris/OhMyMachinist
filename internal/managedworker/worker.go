@@ -148,9 +148,16 @@ func (w *Worker) Run(ctx context.Context) error {
 // reportOOMDeath tells the control plane that this worker restarted after an
 // out-of-memory kill, so the run it was executing is failed with the OOM class
 // and never re-leased into another lane (MACH-62). It is a no-op off Linux and
-// when no OOM death is detected.
+// when no OOM death is detected; a detection failure is reported on stderr so
+// it is never mistaken for a clean restart.
 func (w *Worker) reportOOMDeath(ctx context.Context) {
-	runID, peakBytes, died := workerOOMDeath(w.config.DataDirectory)
+	runID, peakBytes, died, err := workerOOMDeath(w.config.DataDirectory)
+	if err != nil {
+		// Never let a failed check read as a clean restart: the run that
+		// OOM-killed the worker would then be re-leased when its lease
+		// expires, which is what MACH-62 forbids.
+		fmt.Fprintf(w.stderr, "machinist: could not determine whether the worker restarted after an OOM kill: %v\n", err)
+	}
 	if !died {
 		return
 	}

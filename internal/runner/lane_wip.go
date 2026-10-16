@@ -48,41 +48,61 @@ func archiveUntracked(repository, runDirectory, label string) (int, error) {
 	}
 	writer := tar.NewWriter(file)
 	written := 0
+	var failures []error
 	for _, name := range files {
 		full := filepath.Join(repository, name)
 		info, err := os.Lstat(full)
 		if err != nil {
+			failures = append(failures, fmt.Errorf("archive %s: %w", name, err))
 			continue
 		}
 		link := ""
 		if info.Mode()&os.ModeSymlink != 0 {
-			link, _ = os.Readlink(full)
+			if link, err = os.Readlink(full); err != nil {
+				failures = append(failures, fmt.Errorf("archive %s: %w", name, err))
+				continue
+			}
 		}
 		header, err := tar.FileInfoHeader(info, link)
 		if err != nil {
+			failures = append(failures, fmt.Errorf("archive %s: %w", name, err))
 			continue
 		}
 		header.Name = name
-		if err := writer.WriteHeader(header); err != nil {
-			break
-		}
+		// Open the file before writing its header: a header already written
+		// for a body we fail to open would leave the stream unreadable, so a
+		// failure here must not be followed by more entries.
+		var source *os.File
 		if info.Mode().IsRegular() {
-			source, err := os.Open(full)
-			if err != nil {
+			if source, err = os.Open(full); err != nil {
+				failures = append(failures, fmt.Errorf("archive %s: %w", name, err))
 				continue
 			}
+		}
+		if err := writer.WriteHeader(header); err != nil {
+			if source != nil {
+				_ = source.Close()
+			}
+			failures = append(failures, fmt.Errorf("archive %s: %w", name, err))
+			break
+		}
+		if source != nil {
+			// A copy error (short read from the source or a failed write to
+			// the archive) leaves a truncated entry that tar.Writer.Close may
+			// not re-report, so it is recorded here.
 			_, copyErr := io.Copy(writer, source)
-			_ = source.Close()
-			if copyErr != nil {
+			if copyErr = errors.Join(copyErr, source.Close()); copyErr != nil {
+				failures = append(failures, fmt.Errorf("archive %s: %w", name, copyErr))
 				break
 			}
 		}
 		written++
 	}
-	closeErr := writer.Close()
-	fileErr := file.Close()
-	if err := errors.Join(closeErr, fileErr); err != nil {
-		return written, err
+	if err := writer.Close(); err != nil {
+		failures = append(failures, fmt.Errorf("close untracked archive: %w", err))
 	}
-	return written, nil
+	if err := file.Close(); err != nil {
+		failures = append(failures, fmt.Errorf("close untracked archive file: %w", err))
+	}
+	return written, errors.Join(failures...)
 }
