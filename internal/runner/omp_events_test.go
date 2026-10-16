@@ -121,24 +121,18 @@ func TestOmpStreamParserHandlesPartialAndOversizedLines(t *testing.T) {
 func TestStructuredOmpCommandInjectsJSONMode(t *testing.T) {
 	direct := []string{"omp", "-p", "--model", "sparks/x", "--auto-approve"}
 	want := []string{"omp", "--mode", "json", "-p", "--model", "sparks/x", "--auto-approve"}
-	if got := structuredOmpCommand("omp", direct); strings.Join(got, " ") != strings.Join(want, " ") {
+	if got := structuredOmpCommand(direct); strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Fatalf("command = %v", got)
 	}
 	existing := []string{"omp", "-p", "--mode", "rpc"}
-	if got := structuredOmpCommand("omp", existing); strings.Join(got, " ") != strings.Join(existing, " ") {
+	if got := structuredOmpCommand(existing); strings.Join(got, " ") != strings.Join(existing, " ") {
 		t.Fatalf("command = %v", got)
 	}
 	// Wrappers run omp themselves and read their own arguments, so the runner
 	// must not inject flags into them.
 	wrapper := []string{"/usr/local/lib/machinist-factory/omp-glm", "medium"}
-	if got := structuredOmpCommand("omp-glm", wrapper); strings.Join(got, " ") != strings.Join(wrapper, " ") {
+	if got := structuredOmpCommand(wrapper); strings.Join(got, " ") != strings.Join(wrapper, " ") {
 		t.Fatalf("command = %v", got)
-	}
-	if !ompExecutor("omp-glm-pr", wrapper) || !ompExecutor("omp", direct) {
-		t.Fatal("omp executors not recognized")
-	}
-	if ompExecutor("codex", []string{"codex", "exec", "-"}) {
-		t.Fatal("codex treated as omp")
 	}
 }
 
@@ -149,6 +143,7 @@ func TestExecuteStreamsOmpAgentEventsAndSuppressesRawJSON(t *testing.T) {
 		Executor:   "omp-glm-pr",
 		Name:       "build-pr",
 		Command:    []string{"/bin/sh", "-c", script},
+		Output:     config.ExecutorOutputOmpJSON,
 		Prompt:     "go\n",
 		Timeout:    5 * time.Second,
 		Definition: "/definition/config.toml",
@@ -189,6 +184,73 @@ func TestExecuteStreamsOmpAgentEventsAndSuppressesRawJSON(t *testing.T) {
 	for _, kind := range []string{"agent.message", "agent.thinking", "agent.tool_call", "agent.tool_result"} {
 		if counts[kind] == 0 {
 			t.Fatalf("missing %s in %#v", kind, events)
+		}
+	}
+}
+
+// TestOmpStreamParserKeepsUnparseableLinesAsRawOutput covers MACH-57: when the
+// output format is omp-json, a line the parser cannot read must still appear in
+// the transcript as raw output rather than being dropped.
+func TestOmpStreamParserKeepsUnparseableLinesAsRawOutput(t *testing.T) {
+	log, path := newTestEventLog(t)
+	parser := newOmpStreamParser(log)
+	input := strings.Join([]string{
+		"omp-glm: model=sparks/x thinking=medium mode=json repo=/tmp",
+		ompStreamJSONL,
+		"trailing garbage",
+	}, "\n")
+	if _, err := parser.Write([]byte(input)); err != nil {
+		t.Fatal(err)
+	}
+	parser.flush()
+	if err := log.close(); err != nil {
+		t.Fatal(err)
+	}
+	raw := outputFor(t, readEvents(t, path), "stdout")
+	want := "omp-glm: model=sparks/x thinking=medium mode=json repo=/tmp\ntrailing garbage\n"
+	if raw != want {
+		t.Fatalf("raw stdout = %q, want %q", raw, want)
+	}
+}
+
+// TestExecuteTextOutputKeepsRawStdout proves the format comes from the executor
+// setting, not the executor name: an executor named after omp with the default
+// text output records its stdout as plain output instead of parsing it.
+func TestExecuteTextOutputKeepsRawStdout(t *testing.T) {
+	repository := newGitRepository(t)
+	script := "cat >/dev/null; printf '%s\\n' " + shellSingleQuotedLines(ompStreamJSONL)
+	command := config.ResolvedCommand{
+		Executor:   "omp-glm-pr",
+		Name:       "build-pr",
+		Command:    []string{"/bin/sh", "-c", script},
+		Output:     config.ExecutorOutputText,
+		Prompt:     "go\n",
+		Timeout:    5 * time.Second,
+		Definition: "/definition/config.toml",
+		Hash:       "test-hash",
+	}
+	var stdout strings.Builder
+	var stderr strings.Builder
+	result, err := Execute(context.Background(), Options{
+		Command:       command,
+		Repository:    repository,
+		DataDirectory: t.TempDir(),
+		Stdout:        &stdout,
+		Stderr:        &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalMessage != "" {
+		t.Fatalf("text output was parsed as omp events: %q", result.FinalMessage)
+	}
+	events := readEvents(t, result.EventsPath)
+	if !strings.Contains(outputFor(t, events, "stdout"), `"type":"message_end"`) {
+		t.Fatalf("raw stdout missing from events: %#v", events)
+	}
+	for _, event := range events {
+		if strings.HasPrefix(event.Type, "agent.") {
+			t.Fatalf("text output produced agent event: %#v", event)
 		}
 	}
 }

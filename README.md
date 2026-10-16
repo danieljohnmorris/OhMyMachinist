@@ -91,6 +91,9 @@ timeout = "120m"
 [executors.omp]
 command = ["omp", "--model={{machinist.model}}", "-"]
 models = { default = "<your-model>" }
+# "omp-json" streams omp's JSON session into the transcript; "text" (default)
+# passes stdout through unchanged. Never inferred from the executor name.
+output = "omp-json"
 
 [repositories.my-project]
 path = "/absolute/path/to/my-project"

@@ -30,12 +30,19 @@ destination; default `/usr/local/bin` when writable, else `~/.local/bin`). If
 stdin) and `omp-glm-pr` wraps it with `deliver-pr.py` for coding jobs. Both are
 trusted, root-owned and installed next to `deliver-pr.py`.
 
-MACH-42: `omp-glm` runs omp in `--mode text` or `--mode json` from
+MACH-42 / MACH-57: `omp-glm` runs omp in `--mode text` or `--mode json` from
 `MACHINIST_OMP_MODE` (default `text`). `omp-glm-pr` sets `MACHINIST_OMP_MODE=json`
-for its coding run only, so the worker receives the session as JSONL and renders
-every assistant message, thinking block, tool call and tool result in the run
-transcript. The built-in review calls `omp-glm` without that variable and keeps
-parsing the reviewer's text findings.
+for its coding run only. Whether the worker parses stdout as omp JSON events is
+the executor's `output` setting in `worker.toml`, never the executor name: set
+`output = "omp-json"` on the coding executor (the one running `omp-glm-pr`) so
+the worker renders every assistant message, thinking block, tool call and tool
+result in the run transcript. The non-coding wrappers (`omp-glm-low`,
+`omp-glm-code` — `foreman`, `audit`, `shepherd`, `smoke`) keep the default
+`output = "text"`, because their plain stdout must reach the transcript as-is.
+Any line in `omp-json` mode that is not valid JSON is shown as raw text rather
+than dropped. The built-in review calls `omp-glm` without the JSON variable and
+keeps parsing the reviewer's text findings, so its executor stays
+`output = "text"` too.
 
 Reviewers and the amend pass run under the executor from
 `MACHINIST_REVIEW_EXECUTOR`; if that is unset, `deliver-pr.py` uses

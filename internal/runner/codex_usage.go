@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/owainlewis/machinist/internal/config"
 )
 
 const (
@@ -38,9 +40,11 @@ func newUsageCollector(executor string, command []string) *structuredUsageCollec
 	return &structuredUsageCollector{resultType: "result", cache: true}
 }
 
-func structuredCommand(executor string, command []string) []string {
-	if ompCommand := structuredOmpCommand(executor, command); !slices.Equal(ompCommand, command) {
-		return ompCommand
+func structuredCommand(executor, output string, command []string) []string {
+	if output == config.ExecutorOutputOmpJSON {
+		if ompCommand := structuredOmpCommand(command); !slices.Equal(ompCommand, command) {
+			return ompCommand
+		}
 	}
 	if codexCommand := structuredCodexCommand(executor, command); !slices.Equal(codexCommand, command) {
 		return codexCommand

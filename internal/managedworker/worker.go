@@ -381,7 +381,9 @@ func (w *Worker) prepareSkills(ctx context.Context, spec protocol.RunSpec, comma
 	if strings.TrimSpace(w.config.DataDirectory) == "" {
 		return nil, recorded, nil
 	}
-	native := runner.IsOmpExecutor(spec.Executor, command.Command)
+	// MACH-57: an executor runs omp only when it is configured with the
+	// omp-json output format; the executor name no longer decides.
+	native := command.Output == config.ExecutorOutputOmpJSON
 	agentDir := filepath.Join(w.config.DataDirectory, "runs", spec.ID, "agent")
 	injected, err := skills.BuildInjection(resolution, agentDir, native)
 	if err != nil {

@@ -11,6 +11,8 @@
 # MACH-42: output mode defaults to text so the built-in review, which parses the
 # reviewer's stdout findings, keeps working. Coding executors call this wrapper
 # with MACHINIST_OMP_MODE=json so the worker can stream the session as JSONL.
+# MACH-57: the worker parses stdout as omp JSON only when the executor is
+# configured with output = "omp-json"; the executor name no longer decides.
 set -uo pipefail
 effort="${1:-}"
 case "$effort" in low|medium) ;; *) echo "omp-glm: effort must be low|medium (got '$effort')" >&2; exit 2;; esac

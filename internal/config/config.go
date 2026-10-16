@@ -48,9 +48,32 @@ type ControlPlane struct {
 	TokenFile string `toml:"token_file"`
 }
 
+// Executor output formats. "text" streams the executor's stdout to the
+// transcript as plain output and is the default; "omp-json" parses omp's
+// `--mode json` JSONL session into typed transcript events. The format is
+// always configured explicitly per executor (MACH-57), never inferred from the
+// executor name.
+const (
+	ExecutorOutputText    = "text"
+	ExecutorOutputOmpJSON = "omp-json"
+)
+
 type Executor struct {
 	Command []string          `toml:"command"`
 	Models  map[string]string `toml:"models"`
+	Output  string            `toml:"output"`
+}
+
+// output returns the executor's configured output format, defaulting to text.
+func (e Executor) output() string {
+	if strings.TrimSpace(e.Output) == "" {
+		return ExecutorOutputText
+	}
+	return e.Output
+}
+
+func validExecutorOutput(format string) bool {
+	return format == ExecutorOutputText || format == ExecutorOutputOmpJSON
 }
 
 func (e Executor) supportsModel() bool {
@@ -194,6 +217,7 @@ type ResolvedCommand struct {
 	Executor   string
 	Command    []string
 	Model      string
+	Output     string
 	Prompt     string
 	Timeout    time.Duration
 	Definition string
@@ -324,6 +348,7 @@ func (w Worker) ResolveCommandModel(command ResolvedCommand, requestedModel stri
 		command.Command = append(command.Command, strings.ReplaceAll(argument, modelParameter, model))
 	}
 	command.Model = model
+	command.Output = executor.output()
 	return command, nil
 }
 
@@ -570,6 +595,15 @@ func applyWorkerDefaultsWithHostname(worker Worker, getHostname func() (string, 
 		if len(executor.Models) > 0 && !executor.supportsModel() {
 			return Worker{}, fmt.Errorf("executor %q defines models but its command does not contain %s", name, modelParameter)
 		}
+		output := strings.TrimSpace(executor.Output)
+		if output == "" {
+			output = ExecutorOutputText
+		}
+		if !validExecutorOutput(output) {
+			return Worker{}, fmt.Errorf("executor %q output must be %q or %q", name, ExecutorOutputText, ExecutorOutputOmpJSON)
+		}
+		executor.Output = output
+		worker.Executors[name] = executor
 	}
 	return worker, nil
 }

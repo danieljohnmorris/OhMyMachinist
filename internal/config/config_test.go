@@ -113,6 +113,37 @@ path = "repository"
 	}
 }
 
+func TestLoadWorkerValidatesExecutorOutput(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "worker.toml")
+	writeTestFile(t, path, `data_directory = "state"
+
+[executors.plain]
+command = ["agent", "run"]
+
+[executors.events]
+command = ["agent", "run", "--json"]
+output = "omp-json"
+`)
+	worker, err := LoadWorker(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := worker.Executors["plain"].Output; got != ExecutorOutputText {
+		t.Fatalf("plain output = %q, want %q", got, ExecutorOutputText)
+	}
+	resolved, err := worker.ResolveCommandModel(ResolvedCommand{Executor: "events"}, "")
+	if err != nil || resolved.Output != ExecutorOutputOmpJSON {
+		t.Fatalf("resolved = %#v, %v", resolved, err)
+	}
+
+	badPath := filepath.Join(directory, "bad.toml")
+	writeTestFile(t, badPath, "data_directory = \"state\"\n\n[executors.bad]\ncommand = [\"agent\"]\noutput = \"json\"\n")
+	if _, err := LoadWorker(badPath); err == nil || !strings.Contains(err.Error(), "output must be") {
+		t.Fatalf("expected output validation error, got %v", err)
+	}
+}
+
 func TestLoadConfigCombinesServerAndCommands(t *testing.T) {
 	directory := t.TempDir()
 	writeTestFile(t, filepath.Join(directory, "token"), "secret")

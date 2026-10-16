@@ -155,7 +155,7 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	if err := prepareLaneCheckout(log, repository, runDirectory, options.Stderr); err != nil {
 		return completeFailure(&result, log, runDirectory, err)
 	}
-	executorCommand := structuredCommand(options.Command.Executor, options.Command.Command)
+	executorCommand := structuredCommand(options.Command.Executor, options.Command.Output, options.Command.Command)
 	_, claudeAgent := claudeCommandInfo(options.Command.Executor, executorCommand)
 	agentExecutor := codexExecIndex(options.Command.Executor, executorCommand) >= 1 || claudeAgent
 	outputDirectory := ""
@@ -280,9 +280,10 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	usageCollector := newUsageCollector(options.Command.Executor, executorCommand)
 	// omp emits its agent events as JSONL on stdout in --mode json; the parser
 	// turns them into typed transcript events while the raw JSON lines are
-	// dropped so the transcript stays readable.
+	// dropped so the transcript stays readable. The format is explicit per
+	// executor (MACH-57), never inferred from the executor name.
 	var ompStream *ompStreamParser
-	if ompExecutor(options.Command.Executor, executorCommand) {
+	if options.Command.Output == config.ExecutorOutputOmpJSON {
 		ompStream = newOmpStreamParser(log)
 	}
 	stdoutDestination := options.Stdout
