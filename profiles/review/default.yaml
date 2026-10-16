@@ -103,6 +103,7 @@ docs:
 blocking:
   severities: [critical, bug]
   amend_rounds: 3
+  max_minutes: 30
 output:
   pr_comment: true
   commit_status: machinist/review

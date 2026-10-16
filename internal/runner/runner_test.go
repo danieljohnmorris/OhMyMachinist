@@ -181,6 +181,29 @@ func TestExecuteInjectsMachinistEnvironment(t *testing.T) {
 	}
 }
 
+func TestExecuteExposesJobTimeoutEnvironment(t *testing.T) {
+	repository := newGitRepository(t)
+	var stdout bytes.Buffer
+	started := time.Now().Unix()
+	if _, err := Execute(t.Context(), Options{
+		Command:       helperAgent("jobenv", 2*time.Minute),
+		Repository:    repository,
+		DataDirectory: t.TempDir(),
+		Stdout:        &stdout,
+		Stderr:        io.Discard,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != 2 || lines[0] != "120" {
+		t.Fatalf("job timeout env = %q, want 120 seconds", stdout.String())
+	}
+	epoch, err := strconv.ParseInt(lines[1], 10, 64)
+	if err != nil || epoch < started || epoch > time.Now().Unix() {
+		t.Fatalf("job started epoch = %q (%v)", lines[1], err)
+	}
+}
+
 func TestExecuteUsesManagedRunIDAndRejectsUnsafeIDs(t *testing.T) {
 	repository := newGitRepository(t)
 	dataDirectory := t.TempDir()
@@ -786,6 +809,8 @@ func helperAgent(mode string, timeout time.Duration) config.ResolvedCommand {
 		script = "dd bs=16 count=1 of=/dev/null 2>/dev/null"
 	case "environment":
 		script = `cat >/dev/null; printf '%s\n%s\n%s\n' "$MACHINIST_RUN_ID" "$MACHINIST_REPOSITORY" "$MACHINIST_TOKEN_USAGE_PATH"`
+	case "jobenv":
+		script = `cat >/dev/null; printf '%s\n%s\n' "$MACHINIST_JOB_TIMEOUT_SECONDS" "$MACHINIST_JOB_STARTED_EPOCH"`
 	case "tokens":
 		script = `cat >/dev/null; printf 4321 > "$MACHINIST_TOKEN_USAGE_PATH"`
 	case "zero-tokens":

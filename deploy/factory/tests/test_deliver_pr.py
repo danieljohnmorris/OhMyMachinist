@@ -2,8 +2,12 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
+import subprocess
+import tempfile
 import unittest
+from unittest import mock
 
 _SPEC = Path(__file__).resolve().parents[1] / "deliver-pr.py"
 _spec = importlib.util.spec_from_file_location("deliver_pr", _SPEC)
@@ -110,6 +114,57 @@ class SecretLikeTests(unittest.TestCase):
         bad = deliver.secret_like([".env", ".env.local"])
         msg = f"refusing to commit: {'secret-like files ' + str(bad) if bad else 'too many'}; left on branch some-branch"
         self.assertEqual(msg, "refusing to commit: secret-like files ['.env', '.env.local']; left on branch some-branch")
+
+
+def _git(repo: Path, *args: str) -> str:
+    result = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise AssertionError(f"git {' '.join(args)}: {result.stderr.strip()}")
+    return result.stdout
+
+
+class FinalizeAfterReviewTests(unittest.TestCase):
+    """MACH-61: whatever the review leaves behind, delivery finishes with a
+    clean lane and the leftover fix edits either committed+pushed or stashed
+    with a labelled stash and a patch in the run artifacts."""
+
+    def _repo(self, root: Path) -> Path:
+        repo = root / "repo"
+        repo.mkdir()
+        _git(repo, "init", "-q", "-b", "main")
+        _git(repo, "config", "user.name", "Test")
+        _git(repo, "config", "user.email", "test@example.com")
+        (repo / "app.py").write_text("print(1)\n", encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "base")
+        return repo
+
+    def test_commits_and_pushes_leftover_edits(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            origin = root / "origin.git"
+            subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+            repo = self._repo(root)
+            _git(repo, "remote", "add", "origin", str(origin))
+            (repo / "app.py").write_text("print(2)\n", encoding="utf-8")
+            deliver.finalize_after_review(str(repo), "main", "", "run1")
+            self.assertEqual(_git(repo, "status", "--porcelain"), "")
+            self.assertIn("Review fixes", _git(repo, "log", "-1", "--format=%s"))
+            self.assertIn("print(2)", _git(origin, "show", "main:app.py"))
+
+    def test_stashes_with_patch_when_push_impossible(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = self._repo(root)
+            out = root / "artifacts"
+            (repo / "app.py").write_text("print(3)\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"MACHINIST_OUTPUT_DIR": str(out)}):
+                deliver.finalize_after_review(str(repo), "main", "", "run1")
+            self.assertEqual(_git(repo, "status", "--porcelain"), "")
+            self.assertIn("machinist-review-budget-run1", _git(repo, "stash", "list"))
+            patch = out / "machinist-review-budget-run1.patch"
+            self.assertTrue(patch.is_file())
+            self.assertIn("print(3)", patch.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

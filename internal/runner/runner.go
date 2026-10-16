@@ -205,6 +205,14 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	command := exec.Command(executorCommand[0], executorCommand[1:]...)
 	command.Dir = repository
 	command.Env = append(sanitizedEnvironment(os.Environ()), "MACHINIST_RUN_ID="+runID, "MACHINIST_REPOSITORY="+repository, tokenUsageEnvironment+"="+tokenUsagePath)
+	if options.Command.Timeout > 0 {
+		// MACH-61: trusted post-agent steps (the built-in PR review) budget
+		// their own time against the remaining job timeout.
+		command.Env = append(command.Env,
+			"MACHINIST_JOB_TIMEOUT_SECONDS="+strconv.FormatInt(int64(options.Command.Timeout.Seconds()), 10),
+			"MACHINIST_JOB_STARTED_EPOCH="+strconv.FormatInt(time.Now().Unix(), 10),
+		)
+	}
 	command.Env = append(command.Env, options.ExtraEnv...)
 	if options.Revision != nil {
 		revisionPath := filepath.Join(runDirectory, "revision.json")
@@ -791,7 +799,7 @@ func sanitizedEnvironment(environ []string) []string {
 	clean := make([]string, 0, len(environ))
 	for _, entry := range environ {
 		name, _, _ := strings.Cut(entry, "=")
-		if isRepositoryGitEnvironment(name) || name == "MACHINIST_STEP_RESULT_PATH" || name == "MACHINIST_JOB_ID" || name == "MACHINIST_OUTPUT_DIR" || name == "MACHINIST_INPUT_DIR" || name == "MACHINIST_SCRATCH_DIR" || name == "MACHINIST_REVISION_PATH" {
+		if isRepositoryGitEnvironment(name) || name == "MACHINIST_STEP_RESULT_PATH" || name == "MACHINIST_JOB_ID" || name == "MACHINIST_OUTPUT_DIR" || name == "MACHINIST_INPUT_DIR" || name == "MACHINIST_SCRATCH_DIR" || name == "MACHINIST_REVISION_PATH" || name == "MACHINIST_JOB_TIMEOUT_SECONDS" || name == "MACHINIST_JOB_STARTED_EPOCH" {
 			continue
 		}
 		clean = append(clean, entry)

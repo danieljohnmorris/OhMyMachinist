@@ -64,9 +64,24 @@ carries `review_status`.
 Blocking findings (new check failures, critical/bug reviewer findings) send the
 change back to the executor to amend on the same branch, then the checks and
 reviewers rerun. Each amend round counts against the retry budget:
-`--amend-rounds`, default `MACHINIST_REVIEW_AMEND_ROUNDS`, default 3. A PR still
-blocking after the budget is exhausted exits `2` (BLOCKED) and `deliver-pr.py`
-propagates it, so the run is not eligible for auto-merge.
+`--amend-rounds`, default `MACHINIST_REVIEW_AMEND_ROUNDS`, default 3. A review
+that still has blocking findings and cannot amend them (review-only scope, or a
+verified credential) exits `2` (BLOCKED) and `deliver-pr.py` propagates it, so
+the run is not eligible for auto-merge.
+
+MACH-61: the review also has a wall-clock budget so it cannot consume the whole
+job timeout. `blocking.max_minutes` (env `MACHINIST_REVIEW_MAX_MINUTES`, CLI
+`--max-minutes`, default 30) caps the whole review stage, and the budget is
+capped again to the job's remaining time (`MACHINIST_JOB_TIMEOUT_SECONDS` /
+`MACHINIST_JOB_STARTED_EPOCH`, set by the worker), reserving
+`MACHINIST_REVIEW_DELIVERY_RESERVE_SECONDS` (default 300s) for delivery. The
+budget is checked before every round and every fix pass; a pass that would not
+fit is not started. When the budget runs out the verdict is INCOMPLETE with the
+reason "review budget exhausted" (rounds, minutes or job time) — never PASS and
+never a job failure — and `deliver-pr.py` still finishes delivery: it commits and
+pushes any leftover fix edits (or stashes them with a labelled stash plus a
+`.patch` in `$MACHINIST_OUTPUT_DIR`), keeps the PR open, and leaves the lane
+clean.
 
 The review also runs `trufflehog git` over the pull request range
 (`--since-commit=<base> --branch=<head>`) as a built-in secret scan. A verified
