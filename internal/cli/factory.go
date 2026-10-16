@@ -24,7 +24,7 @@ func newPauseCommand(options *commandOptions) *cobra.Command {
 		Short: "Stop dispatching new jobs (drain the running job, or cancel it)",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			store, closeStore, err := openTokenStore(options)
+			store, closeStore, jobCap, err := openTokenStore(options)
 			if err != nil {
 				return err
 			}
@@ -41,7 +41,7 @@ func newPauseCommand(options *commandOptions) *cobra.Command {
 				action = "factory.pause"
 			}
 			recordFactoryCLIAudit(command.Context(), options, store, action, fmt.Sprintf("mode=%s reason=%s", mode, reason))
-			return printFactoryState(command.Context(), options, store)
+			return printFactoryState(command.Context(), options, store, jobCap)
 		},
 	}
 	pause.Flags().StringVar(&reason, "reason", "", "why the factory is being stopped (recorded in the audit log)")
@@ -55,7 +55,7 @@ func newResumeCommand(options *commandOptions) *cobra.Command {
 		Short: "Resume dispatching new jobs",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			store, closeStore, err := openTokenStore(options)
+			store, closeStore, jobCap, err := openTokenStore(options)
 			if err != nil {
 				return err
 			}
@@ -64,7 +64,7 @@ func newResumeCommand(options *commandOptions) *cobra.Command {
 				return err
 			}
 			recordFactoryCLIAudit(command.Context(), options, store, "factory.start", "resumed dispatch")
-			return printFactoryState(command.Context(), options, store)
+			return printFactoryState(command.Context(), options, store, jobCap)
 		},
 	}
 }
@@ -79,12 +79,12 @@ func newJobCapCommand(options *commandOptions) *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("job cap must be an integer, got %q", args[0])
 			}
-			store, closeStore, err := openTokenStore(options)
+			store, closeStore, jobCap, err := openTokenStore(options)
 			if err != nil {
 				return err
 			}
 			defer closeStore()
-			before, err := store.FactoryStatus(command.Context(), 0)
+			before, err := store.FactoryStatus(command.Context(), jobCap)
 			if err != nil {
 				return err
 			}
@@ -93,7 +93,7 @@ func newJobCapCommand(options *commandOptions) *cobra.Command {
 				return err
 			}
 			recordFactoryCLIAudit(command.Context(), options, store, "factory.job_cap", fmt.Sprintf("old=%d new=%d requested=%d", before.MaxConcurrentJobs, clamped, value))
-			return printFactoryState(command.Context(), options, store)
+			return printFactoryState(command.Context(), options, store, jobCap)
 		},
 	}
 }
@@ -108,12 +108,12 @@ func newLaneCommand(options *commandOptions) *cobra.Command {
 		Short: "List lanes with their state and repository checkouts",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			store, closeStore, err := openTokenStore(options)
+			store, closeStore, jobCap, err := openTokenStore(options)
 			if err != nil {
 				return err
 			}
 			defer closeStore()
-			return printFactoryState(command.Context(), options, store)
+			return printFactoryState(command.Context(), options, store, jobCap)
 		},
 	})
 	lane.AddCommand(newLaneToggleCommand(options, true))
@@ -131,7 +131,7 @@ func newLaneToggleCommand(options *commandOptions, enabled bool) *cobra.Command 
 		Short: short,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(command *cobra.Command, args []string) error {
-			store, closeStore, err := openTokenStore(options)
+			store, closeStore, jobCap, err := openTokenStore(options)
 			if err != nil {
 				return err
 			}
@@ -144,7 +144,7 @@ func newLaneToggleCommand(options *commandOptions, enabled bool) *cobra.Command 
 				action, value = "factory.lane_enable", "enabled"
 			}
 			recordFactoryCLIAudit(command.Context(), options, store, action, fmt.Sprintf("lane=%s new=%s", args[0], value))
-			return printFactoryState(command.Context(), options, store)
+			return printFactoryState(command.Context(), options, store, jobCap)
 		},
 	}
 }
@@ -155,9 +155,11 @@ func recordFactoryCLIAudit(ctx context.Context, options *commandOptions, store *
 	}
 }
 
-// printFactoryState renders the current dispatch state, cap and lanes.
-func printFactoryState(ctx context.Context, options *commandOptions, store *controlplane.Store) error {
-	state, err := store.FactoryStatus(ctx, 0)
+// printFactoryState renders the current dispatch state, cap and lanes. jobCap
+// is the configured default cap from the loaded config; a resolved zero means
+// unlimited.
+func printFactoryState(ctx context.Context, options *commandOptions, store *controlplane.Store, jobCap int) error {
+	state, err := store.FactoryStatus(ctx, jobCap)
 	if err != nil {
 		return err
 	}
@@ -167,7 +169,11 @@ func printFactoryState(ctx context.Context, options *commandOptions, store *cont
 	if state.Reason != "" {
 		fmt.Fprintf(options.stdout, " (%s by %s)", state.Reason, state.Actor)
 	}
-	fmt.Fprintf(options.stdout, "  jobs-at-once: %d  ready-lanes: %d\n", state.MaxConcurrentJobs, state.ReadyLanes)
+	capLabel := strconv.Itoa(state.MaxConcurrentJobs)
+	if state.MaxConcurrentJobs == 0 {
+		capLabel = "unlimited"
+	}
+	fmt.Fprintf(options.stdout, "  jobs-at-once: %s  ready-lanes: %d\n", capLabel, state.ReadyLanes)
 	for _, lane := range state.Lanes {
 		enabled := "enabled"
 		if !lane.Enabled {
