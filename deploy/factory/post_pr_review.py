@@ -270,6 +270,40 @@ def redact_value(value: Any) -> Any:
     return value
 
 
+def run_secret_scan(repo: Path, base_sha: str, head_ref: str, timeout: int) -> dict[str, Any]:
+    """Run TruffleHog over the PR range (base..head) for the built-in review.
+
+    A verified live credential is a blocking finding; unverified/unknown
+    detections are reported but never block. A missing binary or a failed scan
+    reports an error so the review is INCOMPLETE instead of silently passing.
+    """
+    scan: dict[str, Any] = {"ran": False, "verified": [], "unverified": [], "error": None}
+    if shutil.which(core.TRUFFLEHOG_BINARY) is None:
+        scan["error"] = f"{core.TRUFFLEHOG_BINARY} not installed; secret scan skipped"
+        return scan
+    verified = run_command(
+        core.trufflehog_scan_args(repo.as_posix(), base_sha, head_ref, "verified"),
+        cwd=repo,
+        timeout=timeout,
+    )
+    if verified.timed_out:
+        scan["error"] = "trufflehog scan timed out"
+        return scan
+    if not verified.ok:
+        scan["error"] = core.redact(verified.output) or "trufflehog scan failed"
+        return scan
+    scan["verified"] = [core.trufflehog_finding(payload, True) for payload in core.parse_trufflehog_output(verified.stdout)]
+    unverified = run_command(
+        core.trufflehog_scan_args(repo.as_posix(), base_sha, head_ref, "unverified,unknown"),
+        cwd=repo,
+        timeout=timeout,
+    )
+    if unverified.ok and not unverified.timed_out:
+        scan["unverified"] = [core.trufflehog_finding(payload, False) for payload in core.parse_trufflehog_output(unverified.stdout)]
+    scan["ran"] = True
+    return scan
+
+
 def changed_paths(repo: Path, timeout: int) -> list[str]:
     result = run_git(repo, ["status", "--porcelain"], timeout)
     if not result.ok:
@@ -500,6 +534,7 @@ def render_comment(
     merged: list[dict[str, Any]],
     head_sha: str,
     notes: list[str],
+    secret_scan: dict[str, Any] | None = None,
 ) -> str:
     lines = ["Machinist PR review", f"Status: {status}", ""]
     lines.append(f"Profile: {resolved.name or '(unnamed)'} (source: {resolved.source})")
@@ -509,6 +544,25 @@ def render_comment(
         lines.append("")
         lines.append("## Notes")
         lines.extend(f"- {note}" for note in notes)
+    if secret_scan is not None:
+        lines.extend(["", "## Secret scan (TruffleHog)"])
+        if secret_scan.get("ran"):
+            verified = secret_scan.get("verified") or []
+            unverified = secret_scan.get("unverified") or []
+            if verified:
+                lines.append(f"- {len(verified)} verified credential(s) — blocking")
+                for finding in verified[:20]:
+                    lines.append(f"- {finding['severity']} | {finding['location']} | {finding['message']}")
+            else:
+                lines.append("- No verified credentials.")
+            if unverified:
+                lines.append(f"- {len(unverified)} unverified finding(s) — not blocking")
+                for finding in unverified[:20]:
+                    lines.append(f"- {finding['severity']} | {finding['location']} | {finding['message']}")
+                if len(unverified) > 20:
+                    lines.append(f"- ... and {len(unverified) - 20} more")
+        else:
+            lines.append(f"- not run: {secret_scan.get('error', 'secret scan did not run')}")
     severities = resolved.severities()
     blocking = [finding for finding in merged if finding.get("blocking")]
     if blocking:
@@ -680,6 +734,9 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
             print("Planned commands:")
             for command in planned:
                 print(f"  {command}")
+        secret_scan = run_secret_scan(options.repo, base_sha, metadata["headRefName"], options.timeout)
+        if secret_scan.get("error"):
+            notes.append(f"secret scan: {secret_scan['error']}")
         checks = execute_checks(options.repo, checks, base_sha, options.timeout, blocking_mode)
         remaining_new = outstanding_failures(checks)
 
@@ -806,11 +863,15 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
         blocking = any(check.classification == "NEW" for check in checks) if blocking_mode == "new_failures" else any(check.classification in {"NEW", "failing"} for check in checks)
         if profile_mod.blocking_findings(merged):
             blocking = True
+        if secret_scan.get("verified"):
+            blocking = True
         failed_reviewers = [reviewer for reviewer in reviewers if not reviewer.get("ran") and not reviewer.get("skipped") and "no executor" not in str(reviewer.get("error", ""))]
         incomplete = bool(failed_reviewers) or (executor_args is not None and docs_config.get("enabled", True) and not docs.get("ran"))
         if docs.get("error"):
             incomplete = True
         if any(check.classification == "blocked" for check in checks):
+            incomplete = True
+        if secret_scan.get("error"):
             incomplete = True
         status = final_status(blocking, incomplete)
         summary.update(
@@ -830,12 +891,13 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
                 ],
                 "reviewers": [redact_value({key: value for key, value in reviewer.items() if key != "output"}) for reviewer in reviewers],
                 "findings": redact_value(merged),
+                "secret_scan": redact_value(secret_scan),
                 "docs": redact_value({key: value for key, value in docs.items() if key != "raw"}),
                 "amend_rounds": {"used": budget_limit - budget, "limit": budget_limit},
                 "notes": notes,
             }
         )
-        comment = render_comment(status, checks, reviewers, docs, resolved, merged, summary["head_sha"], notes)
+        comment = render_comment(status, checks, reviewers, docs, resolved, merged, summary["head_sha"], notes, secret_scan)
         print(comment)
         state = STATUS_STATES[status]
         commit_status = str((resolved.body.get("output") or {}).get("commit_status", "machinist/review"))

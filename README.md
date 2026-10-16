@@ -142,7 +142,9 @@ Shipped profiles live in [`profiles/review/`](profiles/review/) (`default`, and 
 
 **Settings editor.** Settings shows the resolved source, a library profile picker, an inline YAML editor, extra instructions, the global default picker, and a no-execution **preview**: paste changed-file paths and see the resolved profile source, matched lanes, checks, and reviewer passes. Saves are validated server-side and rejected with line-numbered errors (unknown keys, bad globs, unknown pass refs).
 
-**Secrets.** Profiles and the PR comment never echo credentials: token-shaped strings in check and reviewer output are redacted before publication, the installer refuses payloads with secret findings, and CI runs a gitleaks scan on every PR. Secrets come only from the environment or a systemd `EnvironmentFile` outside git.
+**Secret scan.** The built-in review runs a pinned, checksum-verified [TruffleHog](https://github.com/trufflesecurity/trufflehog) over the pull request range (`trufflehog git --since-commit=<base> --branch=<head> --results=verified`). A **verified** (live) credential is a blocking finding: it fails the `machinist/review` status and prevents auto-merge. Unverified and unknown detections are reported in the review comment but never block, and secret values are printed only in TruffleHog's redacted form. Factory hosts install the binary with `deploy/factory/install-review-skills.sh` (`MACHINIST_TOOL_DIR` overrides the install location; the default is `/usr/local/bin` when writable, else `~/.local/bin`); if `trufflehog` is missing the review is reported INCOMPLETE rather than silently passing. The shipped profiles also carry a `trufflehog` reviewer skill so a review pass can load it by name.
+
+**Secrets.** Profiles and the PR comment never echo credentials: token-shaped strings in check and reviewer output are redacted before publication, the installer refuses payloads with secret findings, and CI runs a gitleaks scan (and a TruffleHog scan for verified credentials) on every PR. Secrets come only from the environment or a systemd `EnvironmentFile` outside git.
 
 ## In progress
 

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import os
 from pathlib import PurePosixPath
 import re
-from typing import Iterable
+from typing import Any, Iterable
 
 
 LANGUAGE_EXTENSIONS = {
@@ -122,3 +123,77 @@ def redact(text: str) -> str:
     for pattern, replacement in _REDACTION_PATTERNS:
         result = pattern.sub(replacement or "[REDACTED]", result)
     return result
+
+
+# TruffleHog secret scan (MACH-41). The built-in review runs `trufflehog git`
+# over the pull-request range (base..head). A verified live credential blocks
+# the review; unverified/unknown detections are reported but never block, and
+# secret values are only ever surfaced in TruffleHog's redacted form.
+TRUFFLEHOG_BINARY = "trufflehog"
+
+
+def trufflehog_scan_args(repo: str, base_sha: str, head_ref: str, results: str) -> list[str]:
+    """The trufflehog command scanning commits in ``base_sha..head_ref``.
+
+    ``results`` is a trufflehog ``--results`` value: ``verified`` for live
+    credentials, or ``unverified,unknown`` for detections that do not block.
+    """
+    return [
+        TRUFFLEHOG_BINARY,
+        "git",
+        f"file://{repo}",
+        f"--since-commit={base_sha}",
+        f"--branch={head_ref}",
+        f"--results={results}",
+        "--json",
+        "--no-update",
+        "--no-color",
+    ]
+
+
+def parse_trufflehog_output(output: str) -> list[dict[str, Any]]:
+    """Parse TruffleHog's newline-delimited JSON results, ignoring its log
+    lines and any other non-result noise."""
+    findings: list[dict[str, Any]] = []
+    for line in output.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        # Results carry the detector/source metadata; trufflehog's own JSON
+        # log lines carry "level"/"logger"/"msg" and nothing else.
+        if isinstance(payload, dict) and ("DetectorName" in payload or "SourceMetadata" in payload):
+            findings.append(payload)
+    return findings
+
+
+def trufflehog_location(payload: dict[str, Any]) -> str:
+    """``path:line`` from a TruffleHog result, or ``(unknown)``."""
+    metadata = payload.get("SourceMetadata")
+    data = metadata.get("Data") if isinstance(metadata, dict) else None
+    git = data.get("Git") if isinstance(data, dict) else None
+    git = git if isinstance(git, dict) else {}
+    path = str(git.get("file") or "").strip()
+    line = git.get("line")
+    if path:
+        return f"{path}:{line}" if isinstance(line, int) and line > 0 else path
+    return "(unknown)"
+
+
+def trufflehog_finding(payload: dict[str, Any], verified: bool) -> dict[str, Any]:
+    """A review finding for one TruffleHog result. The secret value is never
+    included: only TruffleHog's redacted form (or a placeholder)."""
+    detector = str(payload.get("DetectorName") or payload.get("DetectorType") or "secret").strip() or "secret"
+    redacted = str(payload.get("Redacted") or "").strip() or "[REDACTED]"
+    return {
+        "severity": "critical" if verified else "warning",
+        "location": trufflehog_location(payload),
+        "message": f"{'verified' if verified else 'unverified'} {detector} credential ({redacted})",
+        "detector": detector,
+        "verified": verified,
+        "reviewer": "trufflehog",
+        "blocking": verified,
+    }

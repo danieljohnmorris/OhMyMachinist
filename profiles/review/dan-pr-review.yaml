@@ -76,6 +76,10 @@ reviewers:
     skills: ["pr-review-toolkit:pr-test-analyzer"]
     parallel: true
     read_only: true
+  - name: secret-scan
+    skills: [trufflehog]
+    parallel: true
+    read_only: true
   - name: ts-review
     lanes: [typescript]
     skills: [typescript-code-review, typescript-jsdoc]
@@ -102,7 +106,7 @@ reviewers:
     routing_only: true
     read_only: true
 routing:
-  fallback: [code-reviewer, silent-failure-hunter, test-analyzer]
+  fallback: [code-reviewer, silent-failure-hunter, test-analyzer, secret-scan]
   rules:
     - when: ["src/content/**/*.md", "src/content/**/*.mdx"]
       passes: [prose]   # read style guide, editor pass, report phrases considered/rejected/kept

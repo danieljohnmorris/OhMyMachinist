@@ -273,7 +273,7 @@ class SelectionTests(unittest.TestCase):
         selected = profile_mod.select_reviewers(self.body, [], set(), False, False)
         self.assertEqual(
             sorted(reviewer["name"] for reviewer in selected),
-            ["code-reviewer", "silent-failure-hunter", "test-analyzer"],
+            ["code-reviewer", "secret-scan", "silent-failure-hunter", "test-analyzer"],
         )
 
     def test_adversarial_only_on_request(self):
@@ -439,6 +439,64 @@ routing:
         with self.assertRaises(profile_mod.ProfileError) as caught:
             self.parse(text)
         self.assertTrue(any("checks.blocking" in message for _, message in caught.exception.errors))
+
+
+class TruffleHogTests(unittest.TestCase):
+    """MACH-41: the built-in review scans the PR range with TruffleHog. A
+    verified credential is blocking; unverified/unknown are reported only, and
+    secret values are never echoed (only TruffleHog's redacted form)."""
+
+    FIXTURE = REPO_ROOT / "deploy" / "factory" / "tests" / "fixtures" / "trufflehog.jsonl"
+
+    def payloads(self):
+        return core.parse_trufflehog_output(self.FIXTURE.read_text(encoding="utf-8"))
+
+    def test_scan_args_cover_the_pr_range(self):
+        args = core.trufflehog_scan_args("/repo", "base123", "feature", "verified")
+        self.assertEqual(args[:2], ["trufflehog", "git"])
+        self.assertIn("file:///repo", args)
+        self.assertIn("--since-commit=base123", args)
+        self.assertIn("--branch=feature", args)
+        self.assertIn("--results=verified", args)
+        self.assertIn("--json", args)
+
+    def test_parse_skips_non_json_noise(self):
+        log_line = '{"level":"info-0","ts":"2026-01-01","logger":"trufflehog","msg":"running source"}'
+        text = "\U0001f437 banner\n" + log_line + "\n" + self.FIXTURE.read_text(encoding="utf-8") + "not json\n"
+        self.assertEqual(len(core.parse_trufflehog_output(text)), 2)
+
+    def test_verified_finding_blocks_and_redacts(self):
+        payloads = self.payloads()
+        finding = core.trufflehog_finding(payloads[0], True)
+        self.assertTrue(finding["blocking"])
+        self.assertEqual(finding["severity"], "critical")
+        self.assertEqual(finding["location"], "src/config.py:12")
+        self.assertIn("AKIA****", finding["message"])
+        # The raw (base64) secret and its decoded form are never surfaced.
+        self.assertNotIn("cGxhY2Vob2xkZXI=", finding["message"])
+        self.assertNotIn("placeholder", finding["message"])
+
+    def test_unverified_finding_does_not_block(self):
+        payloads = self.payloads()
+        finding = core.trufflehog_finding(payloads[1], False)
+        self.assertFalse(finding["blocking"])
+        self.assertEqual(finding["severity"], "warning")
+        self.assertEqual(finding["location"], "docs/example.md:3")
+
+    def test_location_and_redaction_fall_back(self):
+        self.assertEqual(core.trufflehog_location({}), "(unknown)")
+        self.assertIn("[REDACTED]", core.trufflehog_finding({"DetectorName": "X"}, True)["message"])
+
+    def test_bundled_skill_resolves(self):
+        self.assertIsNotNone(skill_library.resolve("trufflehog"))
+
+    def test_shipped_profiles_list_the_secret_pass(self):
+        for name in ("default", "dan-pr-review"):
+            body = profile_mod.parse_profile(
+                (REPO_ROOT / "profiles" / "review" / f"{name}.yaml").read_text(encoding="utf-8"), name
+            )
+            reviewers = {reviewer["name"]: reviewer for reviewer in body["reviewers"]}
+            self.assertIn("trufflehog", reviewers["secret-scan"]["skills"])
 
 
 if __name__ == "__main__":
