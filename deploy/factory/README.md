@@ -22,6 +22,11 @@ The install snippets below are only for a one-off manual copy.
   the control plane now diagnoses failures itself, comments on Plane and
   requeues within the retry budget (see the config `healing` section).
 - `lane-clean.sh` — dirty-lane guard run as `ExecStartPre` on the worker units.
+- `omp-glm-pr-clean` — per-claim lane clean: configured as the coding executor
+  in the worker configs, it saves a dirty checkout left by a previous job
+  (tracked and untracked; patch + tar + file list in `backups/lane-clean`),
+  stashes it, then execs `omp-glm-pr`. Interim until MACH-62 lands the
+  pre-claim lane clean that also covers untracked files, which replaces it.
 - `restart-when-idle.sh` — restart a worker unit only when its lane is idle.
 - `install-review-skills.sh` — install the review skills and pinned TruffleHog.
 
