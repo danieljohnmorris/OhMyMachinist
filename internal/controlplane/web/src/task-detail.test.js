@@ -83,6 +83,17 @@ test("run page puts the sidebar right, renders markdown instructions, and styles
     assert.doesNotMatch(child.className, /lg:order-/);
   }
 
+  // The tab row must not be its own vertical scroll container: `overflow-x:
+  // auto` alone also makes the vertical axis scrollable, and the tags that
+  // stick out of the flex line (underline, focus ring) then raise a stray
+  // scrollbar. A padded wrapper scrolls sideways and clips nothing vertically.
+  const tablist = sections.querySelector('[role="tablist"]');
+  assert.ok(tablist, "tab row renders");
+  assert.doesNotMatch(tablist.className, /overflow-[xy]-/, "tab row is not a scroll container");
+  const tabScroller = tablist.parentElement;
+  assert.match(tabScroller.className, /overflow-x-auto/, "tab row scrolls sideways");
+  assert.match(tabScroller.className, /overflow-y-hidden/, "tab row cannot scroll vertically");
+
   // Instructions render markdown, not a pre-wrapped plain-text body.
   const body = instructions.querySelector(".markdown-body");
   assert.ok(body, "markdown body renders");
