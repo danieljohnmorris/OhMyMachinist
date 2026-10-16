@@ -27,6 +27,16 @@ for d in "$H/.cache" "$H/.npm" "$H/go"; do [ -d "$d" ] && b+=(--bind "$d" "$d");
 [ -e "$repo/.git" ] && b+=(--ro-bind "$repo/.git" "$repo/.git")
 for d in "$H/.ssh" "$H/.config/gh" "$H/.machinist"; do [ -d "$d" ] && b+=(--tmpfs "$d"); done
 b+=(--die-with-parent --unshare-pid --new-session --chdir "$repo")
-echo "omp-glm: model=$MODEL thinking=$effort mode=$MODE repo=$repo" >&2
-exec /usr/bin/bwrap "${b[@]}" -- "$OMP" -p --model "$MODEL" --thinking "$effort" --mode "$MODE" \
+# MACH-50: the managed worker injects a per-run skills agent directory
+# (skills/<name>/SKILL.md, RULES.md, omp.yml). Bind it read-only and point omp
+# at it: --config adds skills.customDirectories so skill://name resolves, and
+# --append-system-prompt adds the entry rules to the system prompt.
+omp_args=()
+if [[ -n "${MACHINIST_OMP_AGENT_DIR:-}" && -d "$MACHINIST_OMP_AGENT_DIR" ]]; then
+  b+=(--ro-bind "$MACHINIST_OMP_AGENT_DIR" "$MACHINIST_OMP_AGENT_DIR")
+  [[ -f "$MACHINIST_OMP_AGENT_DIR/omp.yml" ]] && omp_args+=(--config "$MACHINIST_OMP_AGENT_DIR/omp.yml")
+  [[ -f "$MACHINIST_OMP_AGENT_DIR/RULES.md" ]] && omp_args+=(--append-system-prompt "$MACHINIST_OMP_AGENT_DIR/RULES.md")
+fi
+echo "omp-glm: model=$MODEL thinking=$effort mode=$MODE repo=$repo skills=${MACHINIST_OMP_AGENT_DIR:-none}" >&2
+exec /usr/bin/bwrap "${b[@]}" -- "$OMP" "${omp_args[@]}" -p --model "$MODEL" --thinking "$effort" --mode "$MODE" \
   --no-session --no-title --no-extensions --auto-approve --approval-mode yolo

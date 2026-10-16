@@ -349,6 +349,179 @@ class SkillLibraryTests(unittest.TestCase):
         self.assertIn("review", resolved[0].lower())
 
 
+class SkillsConfigTests(unittest.TestCase):
+    """MACH-50: ordered skills.yaml + project/global setting composition."""
+
+    def setUp(self):
+        self._repo_file = skill_library._repo_file
+        self._settings = skill_library._control_plane_settings
+
+    def tearDown(self):
+        skill_library._repo_file = self._repo_file
+        skill_library._control_plane_settings = self._settings
+        skill_library.configure(None, None, None)
+
+    def test_name_at_version_pins_library_version(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            root = Path(data_dir) / "skills" / "alpha"
+            for version in ("v1", "v2"):
+                (root / version).mkdir(parents=True)
+                (root / version / "SKILL.md").write_text(f"---\nname: alpha\ndescription: d\n---\n{version}\n", encoding="utf-8")
+            (root / "manifest.json").write_text(
+                json.dumps({"name": "alpha", "active": "v2", "versions": [{"version": "v1"}, {"version": "v2"}]}),
+                encoding="utf-8",
+            )
+            with unittest.mock.patch.dict("os.environ", {"MACHINIST_DATA_DIR": data_dir}):
+                pinned = skill_library.resolve("alpha@v1")
+                active = skill_library.resolve("alpha")
+                missing = skill_library.resolve("alpha@v9")
+        self.assertEqual(pinned[1], "v1")
+        self.assertEqual(active[1], "v2")
+        self.assertIsNone(missing)
+
+    def test_repo_bundled_skill_version_is_commit(self):
+        skill_library._repo_file = lambda repo, sha, path: (
+            "---\nname: bund\ndescription: d\n---\nrepo skill\n" if path.endswith(".machinist/skills/bund/SKILL.md") else None
+        )
+        resolved = skill_library.resolve("bund", repo_dir="/tmp/repo", base_sha="deadbeef")
+        self.assertEqual(resolved, ("---\nname: bund\ndescription: d\n---\nrepo skill\n", "deadbeef"))
+
+    def test_composes_repo_project_global_in_order_and_dedupes(self):
+        def repo_file(repo, sha, path):
+            if path == ".machinist/skills.yaml":
+                return "skills:\n  - name: alpha\n  - name: beta\n"
+            if path.startswith(".machinist/skills/"):
+                name = path.split("/")[2]
+                if name in ("alpha", "beta"):
+                    return f"---\nname: {name}\ndescription: d\n---\n{name} repo\n"
+            return None
+
+        skill_library._repo_file = repo_file
+        skill_library._control_plane_settings = lambda environ, timeout: {
+            "skills.project.MACH": "skills:\n  - name: beta\n  - name: gamma\n",
+            "skills.default": "skills:\n  - name: alpha\n",
+        }
+        with tempfile.TemporaryDirectory() as data_dir:
+            root = Path(data_dir) / "skills" / "gamma"
+            (root / "abc").mkdir(parents=True)
+            (root / "abc" / "SKILL.md").write_text("---\nname: gamma\ndescription: d\n---\ngamma\n", encoding="utf-8")
+            (root / "manifest.json").write_text(
+                json.dumps({"name": "gamma", "active": "abc", "versions": [{"version": "abc"}]}),
+                encoding="utf-8",
+            )
+            with unittest.mock.patch.dict("os.environ", {"MACHINIST_DATA_DIR": data_dir}):
+                skill_library.configure(repo_dir="/tmp/repo", base_sha="deadbeef", project="MACH")
+                loaded = skill_library.loaded_skills()
+        names = [skill["name"] for skill in loaded["skills"]]
+        self.assertEqual(names, ["alpha", "beta", "gamma"])
+        versions = {skill["name"]: skill["version"] for skill in loaded["skills"]}
+        self.assertEqual(versions["alpha"], "deadbeef")  # repo wins over global
+        self.assertEqual(versions["beta"], "deadbeef")  # repo wins over project
+        self.assertEqual(versions["gamma"], "abc")  # project layer, library skill
+
+    def test_enabled_false_disables_inherited(self):
+        skill_library._repo_file = lambda repo, sha, path: (
+            "skills:\n  - name: alpha\n    enabled: false\n" if path == ".machinist/skills.yaml" else None
+        )
+        skill_library._control_plane_settings = lambda environ, timeout: {"skills.default": "- name: alpha\n"}
+        with tempfile.TemporaryDirectory() as data_dir:
+            root = Path(data_dir) / "skills" / "alpha"
+            (root / "abc").mkdir(parents=True)
+            (root / "abc" / "SKILL.md").write_text("---\nname: alpha\ndescription: d\n---\nalpha\n", encoding="utf-8")
+            (root / "manifest.json").write_text(
+                json.dumps({"name": "alpha", "active": "abc", "versions": [{"version": "abc"}]}),
+                encoding="utf-8",
+            )
+            with unittest.mock.patch.dict("os.environ", {"MACHINIST_DATA_DIR": data_dir}):
+                skill_library.configure(repo_dir="/tmp/repo", base_sha="deadbeef", project="MACH")
+                loaded = skill_library.loaded_skills()
+        self.assertEqual(loaded["skills"], [])
+
+    def _library_alpha(self, data_dir: str) -> None:
+        root = Path(data_dir) / "skills" / "alpha"
+        for version in ("v1", "v2"):
+            (root / version).mkdir(parents=True)
+            (root / version / "SKILL.md").write_text(
+                f"---\nname: alpha\ndescription: d\n---\n{version}\n", encoding="utf-8"
+            )
+        (root / "manifest.json").write_text(
+            json.dumps({"name": "alpha", "active": "v2", "versions": [{"version": "v1"}, {"version": "v2"}]}),
+            encoding="utf-8",
+        )
+
+    def test_name_at_version_pin_survives_compose(self):
+        skill_library._repo_file = lambda repo, sha, path: (
+            "skills:\n  - name: alpha@v1\n" if path == ".machinist/skills.yaml" else None
+        )
+        skill_library._control_plane_settings = lambda environ, timeout: {}
+        with tempfile.TemporaryDirectory() as data_dir:
+            self._library_alpha(data_dir)
+            with unittest.mock.patch.dict("os.environ", {"MACHINIST_DATA_DIR": data_dir}):
+                skill_library.configure(repo_dir="/tmp/repo", base_sha="deadbeef", project="MACH")
+                loaded = skill_library.loaded_skills()
+        self.assertEqual(
+            loaded["skills"],
+            [{"name": "alpha", "version": "v1", "scope": "repo", "method": "prompt", "rule": "", "required": False}],
+        )
+
+    def test_malformed_skills_config_warns(self):
+        skill_library._repo_file = lambda repo, sha, path: (
+            "skills:\n  - name: [unterminated\n" if path == ".machinist/skills.yaml" else None
+        )
+        skill_library._control_plane_settings = lambda environ, timeout: {}
+        skill_library.configure(repo_dir="/tmp/repo", base_sha="deadbeef", project="MACH")
+        loaded = skill_library.loaded_skills()
+        self.assertEqual(loaded["skills"], [])
+        self.assertEqual(len(loaded["warnings"]), 1)
+
+    def test_missing_required_skill_fails_the_run(self):
+        skill_library._repo_file = lambda repo, sha, path: (
+            "skills:\n  - name: ghost\n    required: true\n" if path == ".machinist/skills.yaml" else None
+        )
+        skill_library._control_plane_settings = lambda environ, timeout: {}
+        skill_library.configure(repo_dir="/tmp/repo", base_sha="deadbeef", project="MACH")
+        with self.assertRaises(skill_library.RequiredSkillError):
+            skill_library.loaded_skills()
+
+    def test_unknown_optional_skill_warns(self):
+        skill_library._repo_file = lambda repo, sha, path: (
+            "skills:\n  - name: ghost\n" if path == ".machinist/skills.yaml" else None
+        )
+        skill_library._control_plane_settings = lambda environ, timeout: {}
+        skill_library.configure(repo_dir="/tmp/repo", base_sha="deadbeef", project="MACH")
+        loaded = skill_library.loaded_skills()
+        self.assertEqual(loaded["skills"], [])
+        self.assertEqual(len(loaded["warnings"]), 1)
+        self.assertIn("ghost", loaded["warnings"][0])
+
+    def test_applies_to_filters_review(self):
+        skill_library._repo_file = lambda repo, sha, path: (
+            "skills:\n  - name: alpha\n    applies_to: [build]\n  - name: beta\n    applies_to: [review]\n"
+            if path == ".machinist/skills.yaml"
+            else (f"---\nname: {path.split('/')[2]}\ndescription: d\n---\nbody\n" if path.startswith(".machinist/skills/") else None)
+        )
+        skill_library._control_plane_settings = lambda environ, timeout: {}
+        skill_library.configure(repo_dir="/tmp/repo", base_sha="deadbeef", project="MACH", kind="review")
+        loaded = skill_library.loaded_skills()
+        self.assertEqual([skill["name"] for skill in loaded["skills"]], ["beta"])
+
+    def test_cache_serves_one_load_per_review(self):
+        calls = {"count": 0}
+
+        def repo_file(repo, sha, path):
+            calls["count"] += 1
+            return None
+
+        skill_library._repo_file = repo_file
+        skill_library._control_plane_settings = lambda environ, timeout: {}
+        skill_library.configure(repo_dir="/tmp/repo", base_sha="deadbeef", project="MACH")
+        first = skill_library.loaded_skills()
+        before = calls["count"]
+        second = skill_library.loaded_skills()
+        self.assertIs(first, second)
+        self.assertEqual(calls["count"], before)
+
+
 class RedactionTests(unittest.TestCase):
     def test_tokens_masked(self):
         text = "token ghp_0123456789abcdefghij0123456789 and Authorization: Bearer abc.def and api_key = supersecret123"

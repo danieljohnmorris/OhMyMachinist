@@ -40,7 +40,7 @@ All requests and responses are `application/json`. Errors are
 | --- | --- | --- |
 | GET | `/api/v1/jobs?state=queued` | List jobs newest first with their runs. Optional `state` filter. |
 | GET | `/api/v1/jobs/{id}` | One job: prompt, state, attempts and runs. |
-| GET | `/api/v1/runs/{id}` | One run: command, executor, state, exit code, timings, final message. |
+| GET | `/api/v1/runs/{id}` | One run: command, executor, state, exit code, timings, final message, and the `skills` it loaded. |
 | GET | `/api/v1/runs/{id}/events` | The run's transcript (event log). |
 | GET | `/api/v1/jobs/{id}/artifacts` | Artifact files for a job. |
 | GET | `/api/v1/artifacts/{id}/content` | Artifact content. |

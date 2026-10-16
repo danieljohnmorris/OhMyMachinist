@@ -199,7 +199,7 @@ def validate_profile(root: Any) -> list[tuple[int, str]]:
     if not isinstance(root, yaml.MappingNode):
         return [(1, "profile must be a YAML mapping")]
 
-    known_top = {"name", "version", "description", "source", "extends", "extra_instructions", "scope", "checks", "concurrency", "reviewers", "passes", "routing", "reconcile", "docs", "blocking", "output"}
+    known_top = {"name", "version", "description", "source", "extends", "extra_instructions", "scope", "checks", "concurrency", "reviewers", "passes", "routing", "reconcile", "docs", "blocking", "output", "skills"}
     for key_node, _ in scalars(root):
         if isinstance(key_node, yaml.ScalarNode) and key_node.value not in known_top:
             errors.append((line(key_node), f"unknown top-level key: {key_node.value}"))
@@ -884,21 +884,30 @@ def select_reviewers(
 
 
 def skill_versions(profile: dict[str, Any]) -> dict[str, str]:
-    """Resolve every referenced skill through the library: name -> version."""
+    """Resolve every referenced skill through the library: name -> version.
+
+    Covers both the profile's top-level ``skills`` list (resolved through the
+    MACH-50 configuration resolver) and each reviewer's ``skills``/``skill``.
+    """
     from . import skill_library
 
     versions: dict[str, str] = {}
+    names: list[str] = []
+    for entry in profile.get("skills") or []:
+        if isinstance(entry, dict) and entry.get("name"):
+            names.append(str(entry["name"]))
+        elif isinstance(entry, str):
+            names.append(entry)
     for reviewer in profile.get("reviewers") or []:
         if not isinstance(reviewer, dict):
             continue
         skills = reviewer.get("skills") or reviewer.get("skill")
         if isinstance(skills, str):
             skills = [skills]
-        for name in skills or []:
-            if not isinstance(name, str):
-                continue
-            resolved = skill_library.resolve(name)
-            versions[name] = resolved[1] if resolved else "unavailable"
+        names.extend(name for name in skills or [] if isinstance(name, str))
+    for name in names:
+        resolved = skill_library.resolve(name)
+        versions[name] = resolved[1] if resolved else "unavailable"
     return versions
 
 

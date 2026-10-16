@@ -140,6 +140,29 @@ Shipped profiles live in [`profiles/review/`](profiles/review/) (`default`, and 
 
 `machinist review install-skill <url>` is an alias for `skills install`. Private GitHub repositories read a token from `GITHUB_TOKEN`; it is never written to the manifest, the source URL, or logs.
 
+### Skills configuration
+
+A run loads an ordered list of installed skills, composed from three layers:
+
+1. `.machinist/skills.yaml` in the repository, read at the base ref,
+2. the project setting `skills.project.<project>`,
+3. the global setting `skills.default`.
+
+Layers compose in that order, de-duplicate by name, and a higher layer disables an inherited name with `enabled: false`. A `.machinist/skills/<name>/SKILL.md` bundled in the repository is a repo-scoped skill whose version is the repository commit, visible only to that project. Nothing is fetched at run time: a missing entry fails a run only when it is `required`, otherwise it is skipped with a warning. A minimal example is at [`examples/skills.yaml`](examples/skills.yaml).
+
+```yaml
+skills:
+  - name: feature-dev:code-reviewer
+  - name: rust-review@<version>
+    applies_to: [review]
+    rule: Prefer small, boring changes.
+    required: true
+  - name: typescript-jsdoc
+    enabled: false
+```
+
+The loaded list (name, version, scope `global`/`repo`, injection method `native`/`prompt`, and warnings) is recorded on the run and returned with the job and run API responses. omp executors get a per-run agent directory (`skills/<name>/SKILL.md` plus `RULES.md`) that `skill://<name>` resolves against; other executors get each SKILL.md appended to the prompt under a header naming its source and version. Review profile `skills:` and reviewer `skills` resolve through the same composed list and library.
+
 **Settings editor.** Settings shows the resolved source, a library profile picker, an inline YAML editor, extra instructions, the global default picker, and a no-execution **preview**: paste changed-file paths and see the resolved profile source, matched lanes, checks, and reviewer passes. Saves are validated server-side and rejected with line-numbered errors (unknown keys, bad globs, unknown pass refs).
 
 **Secret scan.** The built-in review runs a pinned, checksum-verified [TruffleHog](https://github.com/trufflesecurity/trufflehog) over the pull request range (`trufflehog git --since-commit=<base> --branch=<head> --results=verified`). A **verified** (live) credential is a blocking finding: it fails the `machinist/review` status and prevents auto-merge. Unverified and unknown detections are reported in the review comment but never block, and secret values are printed only in TruffleHog's redacted form. Factory hosts install the binary with `deploy/factory/install-review-skills.sh` (`MACHINIST_TOOL_DIR` overrides the install location; the default is `/usr/local/bin` when writable, else `~/.local/bin`); if `trufflehog` is missing the review is reported INCOMPLETE rather than silently passing. The shipped profiles also carry a `trufflehog` reviewer skill so a review pass can load it by name.
