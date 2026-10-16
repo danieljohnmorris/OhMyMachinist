@@ -127,6 +127,60 @@ export function attemptDurationMillis(job, now = new Date()) {
   return Math.max(0, Math.max(...ends.map((value) => Date.parse(value))) - start);
 }
 
+// End reason for a finished attempt, shown in the board card tooltip. MACH-46
+// run attempts record the reason directly once present; otherwise it is derived
+// from the terminal state, the run error and the exit code so a tooltip can
+// explain why an attempt stopped.
+export function attemptEndReason(job) {
+  const runs = job?.runs || [];
+  const last = runs.at(-1);
+  const recorded = last?.attempts?.at(-1)?.end_reason;
+  if (typeof recorded === "string" && recorded.trim()) return recorded.trim();
+  const state = job?.state || last?.state || "";
+  if (state === "running") return "running";
+  if (state === "queued") return "waiting";
+  const error = typeof last?.error === "string" ? last.error.trim().toLowerCase() : "";
+  if (error.includes("lease expired")) return "lease expired";
+  if (error.includes("worker restart")) return "worker restart";
+  if (error.includes("llm unavailable") || error.includes("model unavailable")) return "LLM unavailable";
+  if (error.includes("cancelled by operator")) return "cancelled by operator";
+  if (state === "interrupted") return "lease expired";
+  if (state === "timed_out" || last?.exit_code === 124) return "timeout";
+  if (state === "cancelled") return "cancelled by operator";
+  if (state === "succeeded" || state === "resolved") return "succeeded";
+  if (typeof last?.exit_code === "number") return `exit code ${last.exit_code}`;
+  return state ? state.replaceAll("_", " ") : "unknown";
+}
+
+const attemptToneByState = {
+  succeeded: "success",
+  resolved: "success",
+  failed: "failed",
+  cancelled: "cancelled",
+  timed_out: "timedOut",
+  interrupted: "stalled",
+  blocked: "stalled",
+  awaiting_approval: "stalled",
+  running: "running",
+  queued: "queued",
+};
+
+// Tone key for one attempt's end state, used to colour its board-card dot.
+export function attemptTone(state) {
+  return attemptToneByState[state] || "queued";
+}
+
+// Board-card dots: attempts oldest first so the latest sits on the right. At
+// most `max` newest dots render; older ones collapse into an overflow count.
+export function attemptStripEntries(attempts, max = 8) {
+  const ordered = [...attempts].sort(
+    (left, right) => (Date.parse(attemptTime(left)) || 0) - (Date.parse(attemptTime(right)) || 0),
+  );
+  const total = ordered.length;
+  const overflow = Math.max(0, total - max);
+  return { total, overflow, visible: ordered.slice(overflow) };
+}
+
 // collapseIssueAttempts reduces jobs to one entry per source issue: the latest
 // attempt, annotated with how many prior attempts failed. Jobs without an issue
 // key, and issues with a single attempt, pass through unchanged. Input order is

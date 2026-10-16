@@ -1,5 +1,6 @@
 import { TaskDetail } from "./task-detail.jsx";
-import { State, friendlyName, relativeTime, stateLabel } from "./task-display.jsx";
+import { AttemptStrip } from "./attempt-strip.jsx";
+import { State, friendlyName, relativeTime } from "./task-display.jsx";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "@fontsource-variable/manrope";
@@ -14,7 +15,7 @@ import { Card } from "@/components/ui/card";
 import { PageHeading } from "@/components/ui/page-heading";
 import { cn } from "@/lib/utils";
 import { routeFromHash } from "@/routes";
-import { attemptTime, boardCardTimestamp, boardColumns, boardDateFilters, boardFiltersFromHash, boardHash, canCancelJob, collapseIssueAttempts, collapseJobsByTicket, currentRun, filterBoardJobs, filterJobsByDate, groupEntriesByBoardColumn, groupJobsByBoardColumn, jobCounts, jobDisplayTitle, resolutionLabel } from "@/runs-board";
+import { boardCardTimestamp, boardColumns, boardDateFilters, boardFiltersFromHash, boardHash, canCancelJob, collapseIssueAttempts, collapseJobsByTicket, currentRun, filterBoardJobs, filterJobsByDate, groupEntriesByBoardColumn, groupJobsByBoardColumn, jobCounts, jobDisplayTitle, resolutionLabel } from "@/runs-board";
 import { groupEntriesByProject, groupJobsByProject } from "@/project";
 import { concurrencyLabel } from "@/concurrency";
 import { createStatusLoader } from "@/status-loader";
@@ -369,7 +370,6 @@ function RunCard({ job, priors = [], onCancelJob }) {
   const run = currentRun(job);
   const timestamp = boardCardTimestamp(job);
   const resolution = resolutionLabel(job);
-  const attemptCount = priors.length > 0 ? priors.length + 1 : (job.attempt_count || 0);
   return <Card className="overflow-hidden"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="block min-w-0 space-y-3 p-4 transition hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50" aria-label={`Open task ${title}`}>
       <p className="break-words text-sm font-medium leading-5" title={title}>{title}</p>
       <p className="text-xs text-muted-foreground">{job.repository} · {friendlyName(run?.command || job.command)}</p>
@@ -379,10 +379,7 @@ function RunCard({ job, priors = [], onCancelJob }) {
       </div>
       {resolution && <p className="text-xs text-success">{resolution}</p>}
       {priors.length === 0 && attemptBadges(job)}
-    </a>{priors.length > 0 && <div className="flex flex-wrap items-center gap-1.5 border-t border-border px-4 py-2.5">
-      <Badge className="border-border bg-surface text-muted-foreground" aria-label={`${attemptCount} attempts`}>{attemptCount} attempts</Badge>
-      {priors.map((prior) => <a key={prior.id} href={`#/runs/${encodeURIComponent(prior.id)}`} className="text-xs text-muted-foreground underline hover:text-foreground" aria-label={`Open prior attempt ${stateLabel(prior.state)} ${relativeTime(attemptTime(prior))}`}>{stateLabel(prior.state)} · {relativeTime(attemptTime(prior))}</a>)}
-    </div>}{canCancelJob(job) && <div className="flex justify-end px-4 pb-4"><Button size="sm" variant="outline" aria-label={`Cancel task ${title}`} onClick={() => onCancelJob(job)}>Cancel</Button></div>}</Card>;
+    </a><AttemptStrip attempts={[...priors, job]} />{canCancelJob(job) && <div className="flex justify-end px-4 pb-4"><Button size="sm" variant="outline" aria-label={`Cancel task ${title}`} onClick={() => onCancelJob(job)}>Cancel</Button></div>}</Card>;
 }
 
 function RunRow({ job, onCancelJob }) {

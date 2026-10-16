@@ -45,7 +45,7 @@ It keeps the upstream control plane, worker model and executors. Everything belo
 
 **Web UI**
 
-- Tasks board: one card per ticket with prior attempts, active and failed by default, Show succeeded, project and date filters that persist in the URL
+- Tasks board: one card per ticket with a compact attempts summary — `Attempt N of M` plus a coloured dot per attempt (latest on the right, `+K` overflow) — active and failed by default, Show succeeded, project and date filters that persist in the URL
 - Run page: attempt picker, transcript tab, full-height transcript and an activity sidebar with state timings
 - Transcript streams the whole agent session live: every assistant message, thinking summary, tool call and tool result (omp runs in `--mode json`), per attempt, followed by the delivery and review output
 - Sidebar shows worker count and job concurrency

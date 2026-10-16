@@ -77,12 +77,16 @@ test("runs default to board view and share filters when switching views", async 
 
   const retriedCard = [...document.querySelectorAll(".crafted-card")].find((card) => card.textContent.includes("Retried fixture"));
   assert.ok(retriedCard, "retried job renders a board card");
-  const attemptsRow = retriedCard.querySelector('a[href="#/runs/job_retried_old"]');
-  assert.ok(attemptsRow, "prior attempt link renders");
-  assert.ok(retriedCard.contains(attemptsRow), "attempts row is a descendant of the card element");
-  assert.ok(retriedCard.querySelector('[aria-label="2 attempts"]'), "attempts pill renders in the card");
+  const strip = retriedCard.querySelector('[data-testid="attempt-strip"]');
+  assert.ok(strip, "attempt strip renders in the card");
+  assert.match(strip.textContent, /Attempt 2 of 2/, "strip shows one compact attempt line");
+  assert.equal(strip.querySelectorAll('[data-testid^="attempt-dot-"]').length, 2, "one dot per attempt");
+  const priorDot = strip.querySelector('a[href="#/runs/job_retried_old"]');
+  assert.ok(priorDot, "each dot links to its attempt on the run page");
+  assert.match(priorDot.getAttribute("aria-label"), /Attempt 1 of 2 · failed · /, "dot tooltip names the attempt, reason and time");
+  assert.doesNotMatch(strip.textContent, /cancelled ·|failed ·/, "the old identical attempt links are gone");
   const singleCard = [...document.querySelectorAll(".crafted-card")].find((card) => card.textContent.includes("Failed fixture"));
-  assert.ok(singleCard && !singleCard.querySelector('[aria-label$=" attempts"]'), "single-attempt cards show no attempts row");
+  assert.ok(singleCard && !singleCard.querySelector('[data-testid="attempt-strip"]'), "single-attempt cards show no attempt strip");
 
   assert.equal(button("List").getAttribute("aria-pressed"), "false");
 
