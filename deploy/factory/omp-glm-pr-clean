@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Per-claim lane clean (MACH-67: repo-managed under deploy/factory/; interim
+# until MACH-62 lands the pre-claim lane clean that also covers untracked
+# files). Configured as the omp-glm-pr executor in worker-*.toml. It runs as
+# the first step of the claimed job, so the lane is held by this job and no
+# other job is using it. It saves anything a previous job left in the checkout
+# (tracked AND untracked; ignored files are kept) as a patch + tar + files list
+# in backups/lane-clean, stashes it (--include-untracked), then hands over to
+# the repo-managed omp-glm-pr unchanged. Covers leftovers after timeouts, kills
+# and OOMs, which the runner (-uno) and the start-time lane-clean.sh miss, and
+# which made omp-glm-pr's preflight fail every queued job.
+set -uo pipefail
+WRAPPED="${MACHINIST_WRAPPED_EXECUTOR:-/usr/local/lib/machinist-factory/omp-glm-pr}"
+repo="$(pwd)"
+out="${MACHINIST_LANE_CLEAN_DIR:-$HOME/.machinist/server/backups/lane-clean}"
+g() { git -C "$repo" -c core.hooksPath=/dev/null "$@"; }
+if [ -n "$(g status --porcelain 2>/dev/null)" ]; then
+  mkdir -p "$out"
+  base="$out/claim$(printf '%s' "$repo" | tr '/' '-')-$(date +%Y%m%d-%H%M%S)-${MACHINIST_RUN_ID:-run}"
+  { echo "run: ${MACHINIST_RUN_ID:-}"; echo "repo: $repo"; echo "branch: $(g rev-parse --abbrev-ref HEAD)"; echo "HEAD: $(g rev-parse HEAD)"; g status --porcelain; } > "$base.files.txt"
+  g diff --binary HEAD > "$base.patch" 2>/dev/null || true
+  (cd "$repo" && git ls-files --others --exclude-standard -z | tar czf "$base-untracked.tar.gz" --null -T - 2>/dev/null) || true
+  if g stash push --include-untracked -q -m "lane-clean per-claim ${MACHINIST_RUN_ID:-} $(date +%Y%m%d-%H%M%S) (saved $base.*)"; then
+    echo "lane-clean: saved leftovers from a previous job to $base.{patch,files.txt,-untracked.tar.gz} and stashed them before this run" >&2
+  else
+    echo "lane-clean: could not stash leftovers in $repo (saved to $base.*)" >&2
+  fi
+fi
+exec "$WRAPPED" "$@"
