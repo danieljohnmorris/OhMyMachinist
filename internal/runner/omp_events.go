@@ -23,6 +23,13 @@ const (
 	ompMaxEventBytes   = 1 << 20
 )
 
+// IsOmpExecutor reports whether the resolved executor runs omp, directly or
+// through the factory wrappers. Callers use it to choose the native skill
+// injection over the prompt fallback.
+func IsOmpExecutor(executor string, command []string) bool {
+	return ompExecutor(executor, command)
+}
+
 // ompExecutor reports whether the executor runs omp, either directly or through
 // the factory wrappers (omp-glm, omp-glm-pr) named after it.
 func ompExecutor(executor string, command []string) bool {

@@ -698,11 +698,17 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
             if resolved is None:
                 resolved = profile_mod.resolve_profile(options.repo, "", options.timeout, run_git)
         head_sha = metadata["headRefOid"]
+        # MACH-50: resolve the ordered skills list once (repo config, project
+        # setting, global setting) so reviewer passes and the summary share it.
+        skill_library.configure(repo_dir=str(options.repo), base_sha=base_sha, project=os.environ.get("MACHINIST_PROJECT"), kind="review")
         summary["profile"] = {
             "name": resolved.name,
             "source": resolved.source,
             "skills": profile_mod.skill_versions(resolved.body),
         }
+        loaded = skill_library.loaded_skills()
+        summary["skills"] = loaded["skills"]
+        summary["skill_warnings"] = loaded["warnings"]
         files, files_readable = changed_file_list(
             options.repo, owner, name, number_text, metadata, options.base, options.timeout
         )
