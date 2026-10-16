@@ -34,6 +34,10 @@ const (
 	legacyFactoryPrefix      = "{{factory."
 )
 
+// DefaultMaxRelaunches is the number of in-place relaunches allowed before a
+// run is failed with reason "relaunch limit".
+const DefaultMaxRelaunches = 5
+
 type Worker struct {
 	Name          string                `toml:"name"`
 	DataDirectory string                `toml:"data_directory"`
@@ -66,6 +70,10 @@ type Server struct {
 	Database          string `toml:"database"`
 	WorkerTokenFile   string `toml:"worker_token_file"`
 	MaxConcurrentJobs *int   `toml:"max_concurrent_jobs"`
+	// MaxRelaunches caps how many times an in-place relaunch (lease expiry or
+	// worker restart) may repeat the same run before it is failed with reason
+	// "relaunch limit". Zero or unset uses the built-in default.
+	MaxRelaunches *int `toml:"max_relaunches"`
 	// Auth selects the API authentication mode: "tokens" (default) requires
 	// scoped bearer tokens for machine access, "none" disables auth and is
 	// only allowed on loopback or trusted Tailscale interfaces.
@@ -387,6 +395,15 @@ func (s Server) ConcurrentJobLimit() int {
 		return 0
 	}
 	return *s.MaxConcurrentJobs
+}
+
+// RelaunchLimit returns how many in-place relaunches a run may have before it
+// is failed. Unset or non-positive values fall back to the built-in default.
+func (s Server) RelaunchLimit() int {
+	if s.MaxRelaunches == nil || *s.MaxRelaunches <= 0 {
+		return DefaultMaxRelaunches
+	}
+	return *s.MaxRelaunches
 }
 
 func LoadCommand(definitionPath, name string) (ResolvedCommand, error) {

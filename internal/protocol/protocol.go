@@ -36,6 +36,9 @@ type RunSpec struct {
 	RenderedPrompt  string              `json:"rendered_prompt"`
 	TimeoutMillis   int64               `json:"timeout_millis"`
 	LeaseToken      string              `json:"lease_token"`
+	// Attempt is the 1-based process launch number for this run. A relaunch
+	// after a lease expiry keeps the same run ID and increments the attempt.
+	Attempt int `json:"attempt,omitempty"`
 }
 
 // LoadedSkill is one skill a run loaded, recorded so the API can show what the

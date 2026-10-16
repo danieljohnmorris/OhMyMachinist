@@ -3,6 +3,9 @@ listen = "127.0.0.1:7331"
 database = "~/.machinist/server/machinist.db"
 worker_token_file = "~/.machinist/server/worker.token"
 # max_concurrent_jobs = 1
+# How many times a run may relaunch in place after a lease expiry or worker
+# restart before it fails with reason "relaunch limit". Default 5.
+# max_relaunches = 5
 
 # API authentication. Default "tokens" requires scoped bearer tokens for
 # machine clients (create with `machinist tokens create --name bot --scope write`,

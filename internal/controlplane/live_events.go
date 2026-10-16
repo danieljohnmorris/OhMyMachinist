@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/owainlewis/machinist/internal/protocol"
@@ -53,6 +54,11 @@ func (s *Store) AppendLiveEvents(ctx context.Context, runID string, input protoc
 		return err
 	} else if changed != 1 {
 		return ErrLeaseConflict
+	}
+	// Keep the open attempt's own transcript so a relaunch can be shown and
+	// injected separately from the earlier attempts.
+	if _, err := tx.ExecContext(ctx, `UPDATE run_attempts SET transcript=transcript||? WHERE run_id=? AND ended_at IS NULL`, input.Events, runID); err != nil {
+		return fmt.Errorf("append attempt transcript: %w", err)
 	}
 	return tx.Commit()
 }

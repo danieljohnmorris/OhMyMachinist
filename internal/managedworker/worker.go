@@ -375,6 +375,7 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 		Task: spec.Task, PrepareInputs: w.prepareInputs(spec),
 		RunID:         spec.ID,
 		ArtifactKey:   spec.LeaseToken,
+		Attempt:       spec.Attempt,
 		Command:       command,
 		Repository:    repository,
 		ExtraEnv:      extraEnv,

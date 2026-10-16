@@ -54,6 +54,9 @@ type Options struct {
 	DataDirectory string
 	Stdout        io.Writer
 	Stderr        io.Writer
+	// Attempt is the 1-based process launch number; a relaunch keeps the same
+	// run ID and increments it, recorded on run.started.
+	Attempt int
 }
 
 type Result struct {
@@ -149,7 +152,7 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 		StartedAt:   startedAt,
 		EventsPath:  eventsPath,
 	}
-	if err := log.append("run.started", "", fmt.Sprintf("command=%s repository=%s", options.Command.Name, repository)); err != nil {
+	if err := log.append("run.started", "", fmt.Sprintf("command=%s repository=%s attempt=%d", options.Command.Name, repository, max(options.Attempt, 1))); err != nil {
 		return result, &RuntimeError{Cause: err}
 	}
 	if err := prepareLaneCheckout(log, repository); err != nil {

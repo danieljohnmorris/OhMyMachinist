@@ -41,14 +41,34 @@ function row(kind, fields, at, now, durationMs) {
   };
 }
 
+// A relaunch is a new process launch of the same run. Each one after the first
+// becomes an activity row carrying the time, the previous attempt's end reason
+// and the lane that picked it up.
+function relaunchRows(job, now) {
+  const attempts = job.runs?.at(-1)?.attempts || [];
+  const rows = [];
+  for (let index = 1; index < attempts.length; index += 1) {
+    const attempt = attempts[index];
+    const previous = attempts[index - 1];
+    if (!validTimestamp(attempt?.started_at)) continue;
+    rows.push(row("relaunch", {
+      reason: previous?.end_reason || "",
+      worker: attempt.worker_name || "",
+    }, attempt.started_at, now, null));
+  }
+  return rows;
+}
+
 // One row per state transition, oldest first, plus a final row for the state
 // the job is still in. Each transition row carries the duration spent in the
 // state it left; the final row carries the live duration while in progress.
+// In-place relaunches appear between transitions in time order.
 export function activityRows(job, now = new Date()) {
   if (!job) return [];
   let history = recordedHistory(job);
   if (!history.length) history = fallbackHistory(job);
-  if (!history.length) return [];
+  const relaunches = relaunchRows(job, now);
+  if (!history.length) return relaunches;
 
   const rows = [];
   for (let index = 1; index < history.length; index += 1) {
@@ -56,6 +76,8 @@ export function activityRows(job, now = new Date()) {
     const durationMs = Math.max(0, Date.parse(at) - Date.parse(history[index - 1].changed_at));
     rows.push(row("transition", { from: history[index - 1].state, to: history[index].state }, at, now, durationMs));
   }
+  rows.push(...relaunches);
+  rows.sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
   const current = history.at(-1);
   const terminal = terminalStates.has(current.state);
   const end = terminal

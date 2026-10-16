@@ -9,7 +9,7 @@ import { Transcript } from "./transcript.jsx";
 import { taskPresentation } from "./task-presentation.js";
 import { linkifyText } from "./linkify.js";
 import { Markdown } from "./markdown.js";
-import { jobDisplayTitle, canCancelJob, resolutionLabel, supersededJob, ticketAttempts, attemptStart, attemptDurationMillis } from "./runs-board.js";
+import { jobDisplayTitle, canCancelJob, resolutionLabel, supersededJob, ticketAttempts, attemptStart, attemptDurationMillis, inPlaceAttemptSummary } from "./runs-board.js";
 import { runSidebarLinks } from "./run-links.js";
 import { formatDurationMillis, formatTokenUsage } from "./run-metrics.js";
 import { activityRows } from "./run-activity.js";
@@ -53,6 +53,7 @@ export function TaskDetail({
   const reviewing = job.state === "awaiting_approval";
   const retriedAs = supersededJob(jobs, job);
   const attempts = ticketAttempts(jobs, job);
+  const relaunch = inPlaceAttemptSummary(job);
   return (
     <div className="mx-auto max-w-[1200px] space-y-7 p-4 sm:p-6 lg:p-8">
       <header className="space-y-4">
@@ -426,6 +427,18 @@ export function TaskDetail({
             <section className="border-t border-border pt-4">
               <dl className="my-4 grid gap-3 sm:grid-cols-2">
                 <RunMetric label="Task ID" value={job.id} />
+                {relaunch && (
+                  <RunMetric
+                    label="Attempts"
+                    value={`Attempt ${relaunch.number} of ${relaunch.total}`}
+                  />
+                )}
+                {relaunch?.previousEndReason && (
+                  <RunMetric
+                    label="Previous attempt"
+                    value={`previous: ${relaunch.previousEndReason}`}
+                  />
+                )}
                 <RunMetric label="Repository" value={job.repository} />
                 <RunMetric
                   label="Created"
@@ -486,7 +499,9 @@ function RunActivity({ job }) {
             >
               {row.kind === "transition"
                 ? `${stateLabel(row.from)} → ${stateLabel(row.to)}`
-                : stateLabel(row.state)}
+                : row.kind === "relaunch"
+                  ? `Relaunch${row.worker ? ` · worker ${row.worker}` : ""}${row.reason ? ` · ${row.reason}` : ""}`
+                  : stateLabel(row.state)}
               <span className="text-muted-foreground"> · {row.ago}</span>
             </time>
             {row.duration && (

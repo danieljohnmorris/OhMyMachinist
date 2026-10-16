@@ -84,3 +84,27 @@ export function transcriptEntries(events, maxEntries = transcriptMaxEntries) {
 export function transcriptIsLive(state) {
   return state === "running" || state === "queued";
 }
+
+// Splits transcript entries into one section per process launch. Every
+// `run.started` event begins a new attempt; entries before the first one belong
+// to that attempt. A relaunch keeps the run ID but appends another section, so
+// the transcript shows the attempts separately.
+export function transcriptAttempts(entries) {
+  const sections = [];
+  let current = null;
+  for (const entry of entries) {
+    const started = entry.kind === "event" && typeof entry.text === "string" && entry.text.startsWith("run.started");
+    if (started || !current) {
+      const match = started ? /attempt=(\d+)/.exec(entry.text) : null;
+      current = {
+        number: match ? Number(match[1]) : sections.length + 1,
+        header: started ? entry.text : "",
+        entries: [],
+      };
+      sections.push(current);
+      if (started) continue;
+    }
+    current.entries.push(entry);
+  }
+  return sections;
+}

@@ -109,6 +109,24 @@ export function ticketAttempts(jobs, job) {
   });
 }
 
+// In-place relaunches of the run: each process launch is one attempt. Returns
+// the latest attempt's number of total attempts, plus the previous attempt's end
+// reason, or null when the run only launched once.
+export function inPlaceAttemptSummary(job) {
+  const attempts = (job?.runs || []).at(-1)?.attempts || [];
+  if (attempts.length < 2) return null;
+  const latest = attempts[attempts.length - 1];
+  const previous = attempts[attempts.length - 2];
+  // While the latest attempt runs, the interesting reason is why the one before
+  // it stopped; once the run is finished, its own final reason is the answer.
+  const reason = latest?.ended_at ? latest?.end_reason : previous?.end_reason;
+  return {
+    number: attempts.length,
+    total: attempts.length,
+    previousEndReason: reason || "",
+  };
+}
+
 // Start of an attempt: its earliest run start, falling back to job creation.
 export function attemptStart(job) {
   const starts = (job.runs || []).map((run) => run.started_at).filter(validAttemptTimestamp);

@@ -28,8 +28,9 @@ func (s *Store) upgradeWorkflows(ctx context.Context) error {
  executor TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', repository TEXT NOT NULL, rendered_prompt TEXT NOT NULL,
  timeout_ms INTEGER NOT NULL, state TEXT NOT NULL, worker_instance TEXT, worker_name TEXT NOT NULL DEFAULT '',
  lease_token TEXT, lease_expires_at INTEGER, exit_code INTEGER, error TEXT, result TEXT, events TEXT,
- started_at TEXT, completed_at TEXT, duration_millis INTEGER, token_usage INTEGER);
- INSERT INTO runs SELECT * FROM runs_v2;
+ started_at TEXT, completed_at TEXT, duration_millis INTEGER, token_usage INTEGER, lane TEXT NOT NULL DEFAULT '');
+ INSERT INTO runs(id,job_id,command,command_hash,executor,model,repository,rendered_prompt,timeout_ms,state,worker_instance,worker_name,lease_token,lease_expires_at,exit_code,error,result,events,started_at,completed_at,duration_millis,token_usage)
+ SELECT id,job_id,command,command_hash,executor,model,repository,rendered_prompt,timeout_ms,state,worker_instance,worker_name,lease_token,lease_expires_at,exit_code,error,result,events,started_at,completed_at,duration_millis,token_usage FROM runs_v2;
  DROP TABLE runs_v2;
  CREATE INDEX runs_dispatch ON runs(state,job_id);
  PRAGMA user_version=3;`); err != nil {
@@ -257,6 +258,9 @@ func (s *Store) WorkflowAction(ctx context.Context, job, run, action string, sto
 		if state == "succeeded" || state == "cancelled" {
 			return ErrWorkflowAction
 		}
+		if _, err = endLatestAttempt(ctx, tx, run, endReasonCancelled, "", now); err != nil {
+			return err
+		}
 		if _, err = tx.ExecContext(ctx, `UPDATE runs SET state='cancelled',exit_code=130,error='Cancelled by operator',completed_at=? WHERE id=? AND state IN ('queued','running','awaiting_approval')`, now, run); err != nil {
 			return err
 		}
@@ -321,22 +325,72 @@ func (s *Store) cancelPlainJob(ctx context.Context, tx *sql.Tx, job, action stri
 	return tx.Commit()
 }
 
-func reclaimLeases(ctx context.Context, tx *sql.Tx, now time.Time) (int64, error) {
-	// A workflow may have performed external effects. Never silently replay it.
-	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET state='interrupted',updated_at=? WHERE id IN (SELECT job_id FROM runs WHERE state='running' AND (lease_expires_at IS NULL OR lease_expires_at<=?) AND job_id IN (SELECT job_id FROM workflow_jobs))`, now.Format(time.RFC3339Nano), now.UnixNano()); err != nil {
-		return 0, err
-	}
-	res, err := tx.ExecContext(ctx, `UPDATE runs SET state='interrupted',error='Worker lease expired; verify the previous process stopped before retrying',completed_at=? WHERE state='running' AND (lease_expires_at IS NULL OR lease_expires_at<=?) AND job_id IN (SELECT job_id FROM workflow_jobs)`, now.Format(time.RFC3339Nano), now.UnixNano())
+func (s *Store) reclaimLeases(ctx context.Context, tx *sql.Tx, now time.Time) (int64, error) {
+	nowText := now.Format(time.RFC3339Nano)
+	rows, err := tx.QueryContext(ctx, `SELECT r.id,r.job_id,COALESCE(r.worker_instance,''),COALESCE(r.worker_name,''),COALESCE(r.events,''),EXISTS(SELECT 1 FROM workflow_jobs w WHERE w.job_id=r.job_id),(SELECT COALESCE(MAX(attempt),0) FROM run_attempts a WHERE a.run_id=r.id) FROM runs r WHERE r.state='running' AND (r.lease_expires_at IS NULL OR r.lease_expires_at<=?)`, now.UnixNano())
 	if err != nil {
 		return 0, err
 	}
-	interrupted, _ := res.RowsAffected()
-	res, err = tx.ExecContext(ctx, reclaimExpiredLeasesSQL, now.UnixNano())
-	if err != nil {
+	type expiredRun struct {
+		id, jobID, instance, worker, events string
+		workflow                            bool
+		attempts                            int
+	}
+	var expired []expiredRun
+	for rows.Next() {
+		var run expiredRun
+		if err := rows.Scan(&run.id, &run.jobID, &run.instance, &run.worker, &run.events, &run.workflow, &run.attempts); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		expired = append(expired, run)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
 		return 0, err
 	}
-	n, err := res.RowsAffected()
-	return n + interrupted, err
+	rows.Close()
+
+	var reclaimed int64
+	for _, run := range expired {
+		reason := leaseEndReason(ctx, tx, run.id, run.instance)
+		// A plain job relaunches in place, but only up to the configured cap; past
+		// it the run fails, and the attempt records why so the card can show it.
+		limitReached := !run.workflow && run.attempts > s.maxRelaunches()
+		if limitReached {
+			reason = endReasonRelaunchLimit
+		}
+		// Preserve whatever the dead attempt streamed before the lease lapsed.
+		if _, err := endLatestAttempt(ctx, tx, run.id, reason, run.events, nowText); err != nil {
+			return 0, err
+		}
+		if run.workflow {
+			// A workflow may have performed external effects. Never silently replay it.
+			if _, err := tx.ExecContext(ctx, `UPDATE jobs SET state='interrupted',updated_at=? WHERE id=? AND state='running'`, nowText, run.jobID); err != nil {
+				return 0, err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE runs SET state='interrupted',error='Worker lease expired; verify the previous process stopped before retrying',completed_at=? WHERE id=?`, nowText, run.id); err != nil {
+				return 0, err
+			}
+			reclaimed++
+			continue
+		}
+		if limitReached {
+			if _, err := tx.ExecContext(ctx, `UPDATE runs SET state='failed',exit_code=1,error=?,worker_instance=NULL,lease_token=NULL,lease_expires_at=NULL,completed_at=? WHERE id=?`, endReasonRelaunchLimit, nowText, run.id); err != nil {
+				return 0, err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE jobs SET state='failed',updated_at=? WHERE id=?`, nowText, run.jobID); err != nil {
+				return 0, err
+			}
+			reclaimed++
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE runs SET state='queued',worker_instance=NULL,worker_name='',lease_token=NULL,lease_expires_at=NULL,started_at=NULL WHERE id=? AND state='running'`, run.id); err != nil {
+			return 0, err
+		}
+		reclaimed++
+	}
+	return reclaimed, nil
 }
 
 func (s *Store) loadWorkflowProgress(ctx context.Context, jobs []Job) error {

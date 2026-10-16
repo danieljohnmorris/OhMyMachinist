@@ -271,6 +271,7 @@ func newStartCommand(options *commandOptions) *cobra.Command {
 				return err
 			}
 			defer store.Close()
+			store.SetRelaunchLimit(serverConfig.RelaunchLimit())
 			server, err := controlplane.NewServer(store, machinistConfig.Path(), token, serverConfig.ConcurrentJobLimit(), serverConfig.Auth)
 			if err != nil {
 				return err

@@ -1,11 +1,26 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { TranscriptEntry } from "./transcript-entry.js";
-import { transcriptEntries, transcriptIsLive, transcriptPollMillis } from "./transcript.js";
+import { transcriptAttempts, transcriptEntries, transcriptIsLive, transcriptPollMillis } from "./transcript.js";
+import { formatTimestamp } from "./task-display.jsx";
 
 // How close to the bottom the scroller must stay for auto-scroll to follow new
 // output; scrolling further up pauses following until the user returns.
 const followThresholdPixels = 24;
+
+// A relaunched run records one attempt per process launch. The header names the
+// attempt, its worker and model and how it ended, so the attempts read apart.
+function attemptLabel(attempt, index, fallback) {
+  if (attempt) {
+    const parts = [`Attempt ${attempt.number ?? index + 1}`];
+    if (attempt.started_at) parts.push(`started ${formatTimestamp(attempt.started_at)}`);
+    if (attempt.worker_name) parts.push(`worker ${attempt.worker_name}`);
+    if (attempt.model) parts.push(`model ${attempt.model}`);
+    if (attempt.end_reason) parts.push(`ended: ${attempt.end_reason}`);
+    return parts.join(", ");
+  }
+  return fallback || `Attempt ${index + 1}`;
+}
 
 // Shows the agent transcript for a run, polling while it is still active so the
 // log grows live, then keeping the full log once the run finishes. Structured
@@ -47,6 +62,19 @@ export function Transcript({ run, csrfToken }) {
     };
   }, [run?.id, run?.state, csrfToken, state.attempt]);
   const entries = state.runID === run?.id ? transcriptEntries(state.events) : [];
+  const sections = transcriptAttempts(entries);
+  const attemptsByNumber = new Map((run?.attempts || []).map((attempt) => [attempt.number, attempt]));
+  // The latest attempt is expanded; the others start collapsed.
+  const [expanded, setExpanded] = useState(() => new Set());
+  useEffect(() => {
+    if (sections.length > 1) setExpanded(new Set([sections.at(-1).number]));
+  }, [sections.length, sections.at(-1)?.number]);
+  function toggleAttempt(number) {
+    setExpanded((current) => {
+      if (current.has(number)) return new Set();
+      return new Set([number]);
+    });
+  }
   // The transcript grows with the page (no inner scroll box). While live, the
   // window follows new output as long as the reader is near the bottom.
   useEffect(() => {
@@ -83,11 +111,41 @@ export function Transcript({ run, csrfToken }) {
           </Button>
         </div>
       ) : entries.length ? (
-        <div className="space-y-2 rounded-md border border-border bg-muted/40 p-3 text-xs leading-5">
-          {entries.map((entry, index) => (
-            <TranscriptEntry key={index} entry={entry} />
-          ))}
-        </div>
+        sections.length > 1 ? (
+          <div className="space-y-2">
+            {sections.map((section, index) => {
+              const attempt = attemptsByNumber.get(section.number);
+              const open = expanded.has(section.number);
+              return (
+                <div key={section.number} className="rounded-md border border-border bg-muted/40 text-xs leading-5">
+                  <button
+                    type="button"
+                    className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left font-medium"
+                    aria-expanded={open}
+                    aria-label={`Attempt ${section.number} transcript`}
+                    onClick={() => toggleAttempt(section.number)}
+                  >
+                    <span className="min-w-0 break-words">{attemptLabel(attempt, index, section.header)}</span>
+                    <span className="shrink-0 text-muted-foreground">{open ? "Hide" : "Show"}</span>
+                  </button>
+                  {open && (
+                    <div className="space-y-2 border-t border-border p-3">
+                      {section.entries.map((entry, entryIndex) => (
+                        <TranscriptEntry key={entryIndex} entry={entry} />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="space-y-2 rounded-md border border-border bg-muted/40 p-3 text-xs leading-5">
+            {entries.map((entry, index) => (
+              <TranscriptEntry key={index} entry={entry} />
+            ))}
+          </div>
+        )
       ) : (
         <p className="rounded-md border border-border bg-muted/40 p-3 text-xs text-muted-foreground">
           {live ? "Waiting for output…" : "No output recorded for this run."}
