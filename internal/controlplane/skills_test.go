@@ -316,6 +316,27 @@ func TestSkillsAPIUpload(t *testing.T) {
 		t.Fatalf("uploaded sources = %#v", sources)
 	}
 
+	// Re-uploading an uploaded skill adds an active version: the documented way
+	// to update a skill whose staging path the server deleted.
+	response = uploadSkill(t, endpoint, writeSecret, "file", "SKILL.md", []byte(strings.Replace(testSkillMarkdown, "Review the diff.", "Review the diff twice.", 1)))
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("re-upload status = %d, want 201", response.StatusCode)
+	}
+	var reuploaded skills.InstallResult
+	if err := json.NewDecoder(response.Body).Decode(&reuploaded); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if !reuploaded.Added || reuploaded.Active != reuploaded.Version {
+		t.Fatalf("re-upload result = %#v, want a new active version", reuploaded)
+	}
+	versions := decode[struct {
+		Versions []skills.Version `json:"versions"`
+	}](t, authRequest(t, http.MethodGet, webServer.URL+"/api/v1/skills/feature-dev:code-reviewer", readSecret, nil))
+	if len(versions.Versions) != 2 {
+		t.Fatalf("versions after re-upload = %d, want 2", len(versions.Versions))
+	}
+
 	// Updating an uploaded skill reports it must be re-uploaded instead of
 	// failing to stat the removed temporary file.
 	response = authRequest(t, http.MethodPost, webServer.URL+"/api/v1/skills/feature-dev:code-reviewer/update", writeSecret, nil)

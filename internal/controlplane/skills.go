@@ -103,7 +103,8 @@ func (s *Server) installSkill(ctx context.Context, source string) (skills.Instal
 // staging the bytes in a temporary directory the library can read. The install
 // records an "upload:" sentinel source, not the staging path: the staged bytes
 // are removed once the version is written, so a later update reports that the
-// skill must be re-uploaded.
+// skill must be re-uploaded. Re-uploading a skill that was itself installed
+// from an upload adds the new content as another active version.
 func (s *Server) installSkillArchive(ctx context.Context, filename string, content []byte) (skills.InstallResult, error) {
 	directory, err := os.MkdirTemp("", "machinist-skill-upload-*")
 	if err != nil {
@@ -132,7 +133,7 @@ func (s *Server) installSkillArchive(ctx context.Context, filename string, conte
 	if err != nil {
 		return skills.InstallResult{}, err
 	}
-	return library.Install(ctx, parsed)
+	return library.InstallUpload(ctx, parsed)
 }
 
 // updateSkill re-resolves a skill's recorded source and adds the new version.

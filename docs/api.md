@@ -164,4 +164,6 @@ A skill installed through `/api/v1/skills/upload` records its source as the
 sentinel `upload:<name>` rather than the staging path, which the server deletes
 once the version is written. Updating such a skill fails with `400` and
 `skill "…" was installed from an upload; re-upload it to add a version`; upload
-the archive or `SKILL.md` again to add a version.
+the archive or `SKILL.md` again to add a version and activate it. Re-uploading
+content that matches an installed version adds no new version and makes that
+version active.
