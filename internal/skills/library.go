@@ -122,6 +122,10 @@ type InstallResult struct {
 	Added bool `json:"added"`
 }
 
+// ErrNotInstalled reports that a skill is not present in the library. Callers
+// wrap it with the skill name and use errors.Is to tell it from a read error.
+var ErrNotInstalled = errors.New("not installed")
+
 // UninstallOptions controls whether a referenced skill may be removed.
 type UninstallOptions struct {
 	// Referenced is set by the caller when a review profile still uses the
@@ -252,7 +256,7 @@ func (l *Library) load(name string) (Manifest, string, error) {
 	dir := filepath.Join(l.Root, key)
 	manifest, err := readManifest(dir)
 	if errors.Is(err, os.ErrNotExist) {
-		return Manifest{}, "", fmt.Errorf("skill %q is not installed", name)
+		return Manifest{}, "", fmt.Errorf("skill %q is %w", name, ErrNotInstalled)
 	}
 	if err != nil {
 		return Manifest{}, "", err

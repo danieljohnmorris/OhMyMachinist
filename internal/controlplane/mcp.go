@@ -9,6 +9,9 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
+
+	"github.com/owainlewis/machinist/internal/skills"
 )
 
 // The Model Context Protocol endpoint exposes the documented API as tools
@@ -59,6 +62,7 @@ type mcpTool struct {
 // write-scope token. Everything else is read scope.
 var mcpWriteTools = map[string]bool{
 	"queue_job": true, "cancel_job": true, "requeue_job": true, "set_setting": true,
+	"install_skill": true, "update_skill": true, "pin_skill": true, "uninstall_skill": true,
 }
 
 func mcpSchema(properties map[string]any, required ...string) map[string]any {
@@ -90,6 +94,16 @@ var mcpToolList = []mcpTool{
 	{Name: "set_setting", Description: "Write one settings key/value pair.", InputSchema: mcpSchema(map[string]any{
 		"key": map[string]any{"type": "string"}, "value": map[string]any{"type": "string"},
 	}, "key", "value")},
+	{Name: "list_skills", Description: "List installed skills with their versions and the projects or review profiles that reference them.", InputSchema: mcpSchema(map[string]any{})},
+	{Name: "get_skill", Description: "Get one installed skill with all of its versions.", InputSchema: mcpSchema(map[string]any{"name": map[string]any{"type": "string"}}, "name")},
+	{Name: "install_skill", Description: "Install a skill from a GitHub URL, a local directory or a zip archive.", InputSchema: mcpSchema(map[string]any{"source": map[string]any{"type": "string", "description": "GitHub URL, local skill directory, or zip path"}}, "source")},
+	{Name: "update_skill", Description: "Re-resolve a skill's recorded source and add the new version. Set activate=true to make it active.", InputSchema: mcpSchema(map[string]any{
+		"name": map[string]any{"type": "string"}, "activate": map[string]any{"type": "boolean"},
+	}, "name")},
+	{Name: "pin_skill", Description: "Set the active version of an installed skill to any installed version.", InputSchema: mcpSchema(map[string]any{
+		"name": map[string]any{"type": "string"}, "version": map[string]any{"type": "string"},
+	}, "name", "version")},
+	{Name: "uninstall_skill", Description: "Remove a skill and every installed version.", InputSchema: mcpSchema(map[string]any{"name": map[string]any{"type": "string"}}, "name")},
 }
 
 // handleMCP serves the streamable HTTP MCP transport.
@@ -331,6 +345,98 @@ func (s *Server) invokeMCPTool(ctx context.Context, identity TokenIdentity, name
 			log.Printf("audit %s: %v", action, err)
 		}
 		return map[string]string{"status": "accepted", "job_id": input.JobID, "run_id": runID}, nil
+	case "list_skills":
+		views, err := s.listSkills()
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"skills": views}, nil
+	case "get_skill":
+		var input struct {
+			Name string `json:"name"`
+		}
+		if err := args(&input); err != nil {
+			return nil, err
+		}
+		if _, err := skills.Key(input.Name); err != nil {
+			return nil, errors.New("skill name is not usable")
+		}
+		view, err := s.getSkill(input.Name)
+		if err != nil {
+			return nil, err
+		}
+		return view, nil
+	case "install_skill":
+		var input struct {
+			Source string `json:"source"`
+		}
+		if err := args(&input); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(input.Source) == "" {
+			return nil, errors.New("source is required")
+		}
+		result, err := s.installSkill(ctx, input.Source)
+		if err != nil {
+			return nil, err
+		}
+		s.recordSkillAudit(ctx, identity, "skills.install", result.Name)
+		return result, nil
+	case "update_skill":
+		var input struct {
+			Name     string `json:"name"`
+			Activate bool   `json:"activate"`
+		}
+		if err := args(&input); err != nil {
+			return nil, err
+		}
+		if _, err := skills.Key(input.Name); err != nil {
+			return nil, errors.New("skill name is not usable")
+		}
+		result, err := s.updateSkill(ctx, input.Name, input.Activate)
+		if err != nil {
+			return nil, err
+		}
+		s.recordSkillAudit(ctx, identity, "skills.update", result.Name)
+		return result, nil
+	case "pin_skill":
+		var input struct {
+			Name    string `json:"name"`
+			Version string `json:"version"`
+		}
+		if err := args(&input); err != nil {
+			return nil, err
+		}
+		if _, err := skills.Key(input.Name); err != nil {
+			return nil, errors.New("skill name is not usable")
+		}
+		if strings.TrimSpace(input.Version) == "" {
+			return nil, errors.New("version is required")
+		}
+		if err := s.pinSkill(input.Name, input.Version); err != nil {
+			return nil, err
+		}
+		s.recordSkillAudit(ctx, identity, "skills.pin", input.Name+" "+input.Version)
+		view, err := s.getSkill(input.Name)
+		if err != nil {
+			return nil, err
+		}
+		return view, nil
+	case "uninstall_skill":
+		var input struct {
+			Name string `json:"name"`
+		}
+		if err := args(&input); err != nil {
+			return nil, err
+		}
+		if _, err := skills.Key(input.Name); err != nil {
+			return nil, errors.New("skill name is not usable")
+		}
+		if err := s.uninstallSkill(input.Name); err != nil {
+			return nil, err
+		}
+		s.recordSkillAudit(ctx, identity, "skills.uninstall", input.Name)
+		return map[string]string{"status": "removed", "name": input.Name}, nil
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", name)
 	}
