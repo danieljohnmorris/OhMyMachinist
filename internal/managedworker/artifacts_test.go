@@ -18,6 +18,7 @@ import (
 	"github.com/owainlewis/machinist/internal/config"
 	"github.com/owainlewis/machinist/internal/controlplane"
 	"github.com/owainlewis/machinist/internal/protocol"
+	"github.com/owainlewis/machinist/internal/runner"
 )
 
 func TestSharedTaskFolderAcrossRealExecutions(t *testing.T) {
@@ -124,14 +125,27 @@ printf '{"outcome":"complete","summary":"Built"}' > "$MACHINIST_STEP_RESULT_PATH
 		t.Fatalf("%s %v", b, err)
 	}
 	files, err := store.ListArtifacts(t.Context(), id)
-	if err != nil || len(files) != 3 {
-		t.Fatalf("%v %v", files, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Each run also publishes its raw agent log; the task outputs are the rest.
+	var outputs []protocol.Artifact
+	rawLogs := 0
+	for _, a := range files {
+		if a.Path == runner.RawLogFileName {
+			rawLogs++
+			continue
+		}
+		outputs = append(outputs, a)
+	}
+	if len(outputs) != 3 || rawLogs != 2 {
+		t.Fatalf("outputs %d raw logs %d: %v", len(outputs), rawLogs, files)
 	}
 	// Destroy the worker's workspace; outputs remain available on the control plane.
 	if err = os.RemoveAll(filepath.Join(dir, "worker")); err != nil {
 		t.Fatal(err)
 	}
-	for _, a := range files {
+	for _, a := range outputs {
 		_, f, e := store.OpenArtifact(t.Context(), a.ID)
 		if e != nil {
 			t.Fatal(e)
@@ -146,7 +160,8 @@ printf '{"outcome":"complete","summary":"Built"}' > "$MACHINIST_STEP_RESULT_PATH
 	if strings.Count(string(count), "executed") != 1 {
 		t.Fatalf("upload retry reran process: %s", count)
 	}
-	if uploads.Load() != 4 {
+	// Three output uploads, two raw logs, and the one retried PUT.
+	if uploads.Load() != 6 {
 		t.Fatal(uploads.Load())
 	}
 }
@@ -201,5 +216,98 @@ func TestInputLocalFilesystemFailureDoesNotRetry(t *testing.T) {
 	var response *ResponseError
 	if !errors.As(err, &response) || response.Retryable() || downloads.Load() != 1 {
 		t.Fatalf("local error retried: %v; downloads %d", err, downloads.Load())
+	}
+}
+
+// TestFailedRunUploadsRedactedRawLogArtifact covers MACH-28: a failed attempt
+// still publishes a downloadable raw agent log, redacted like the transcript.
+func TestFailedRunUploadsRedactedRawLogArtifact(t *testing.T) {
+	dir := t.TempDir()
+	repository := filepath.Join(dir, "repository")
+	if output, err := exec.Command("git", "init", "--quiet", repository).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
+	secret := "ghp_" + strings.Repeat("a", 36)
+	definitionPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(filepath.Join(dir, "plan.md"), []byte("{{machinist.prompt}}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	definition := "[commands.plan]\nexecutor=\"test\"\nprompt_file=\"plan.md\"\ntimeout=\"5s\"\n"
+	if err := os.WriteFile(definitionPath, []byte(definition), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := controlplane.OpenStore(filepath.Join(dir, "machinist.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	agent, err := config.LoadCommand(definitionPath, "plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent, err = config.RenderPrompt(agent, "managed request"); err != nil {
+		t.Fatal(err)
+	}
+	jobID, err := store.CreateJob(t.Context(), "managed request", "machinist", "plan", agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := controlplane.NewServer(store, definitionPath, "secret", 0, config.AuthTokens)
+	if err != nil {
+		t.Fatal(err)
+	}
+	web := httptest.NewServer(server.Handler())
+	defer web.Close()
+	token := filepath.Join(dir, "token")
+	if err := os.WriteFile(token, []byte("secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := "cat >/dev/null; printf 'boom line\\n'; printf '" + secret + "\\n'; exit 3"
+	worker, err := New(config.Worker{
+		Name:          "raw-worker",
+		DataDirectory: filepath.Join(dir, "worker"),
+		ControlPlane:  config.ControlPlane{URL: web.URL, TokenFile: token},
+		Executors:     map[string]config.Executor{"test": {Command: []string{"/bin/sh", "-c", script}}},
+		Repositories:  map[string]config.Repository{"machinist": {Path: repository}},
+	}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := worker.poll(t.Context())
+	if err != nil || spec == nil {
+		t.Fatalf("poll: %v %v", spec, err)
+	}
+	completion := worker.execute(t.Context(), *spec)
+	if completion.State != "failed" || completion.PublicationError != "" {
+		t.Fatalf("completion = %#v", completion)
+	}
+	if err := worker.deliver(t.Context(), spec.ID, completion); err != nil {
+		t.Fatal(err)
+	}
+	files, err := store.ListArtifacts(t.Context(), jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw *protocol.Artifact
+	for i := range files {
+		if files[i].Path == runner.RawLogFileName {
+			raw = &files[i]
+		}
+	}
+	if raw == nil {
+		t.Fatalf("no raw log artifact in %v", files)
+	}
+	_, file, err := store.OpenArtifact(t.Context(), raw.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	body, err := io.ReadAll(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	if !strings.Contains(text, "boom line") || !strings.Contains(text, "[REDACTED]") || strings.Contains(text, secret) {
+		t.Fatalf("raw log = %q", text)
 	}
 }

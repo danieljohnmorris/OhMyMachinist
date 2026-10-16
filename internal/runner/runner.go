@@ -52,8 +52,11 @@ type Options struct {
 	// (e.g. the built-in PR review) can read per-project settings.
 	ExtraEnv      []string
 	DataDirectory string
-	Stdout        io.Writer
-	Stderr        io.Writer
+	// RawLogMaxBytes caps the raw agent log artifact written into the run
+	// directory. Zero uses DefaultRawLogMaxBytes.
+	RawLogMaxBytes int64
+	Stdout         io.Writer
+	Stderr         io.Writer
 }
 
 type Result struct {
@@ -71,6 +74,7 @@ type Result struct {
 	TokenUsage     *int64               `json:"token_usage,omitempty"`
 	FinalMessage   string               `json:"final_message,omitempty"`
 	EventsPath     string               `json:"events_path"`
+	RawLogPath     string               `json:"raw_log_path,omitempty"`
 }
 
 type OutcomeError struct {
@@ -137,6 +141,19 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 		}
 	}()
 
+	// MACH-28: the complete agent stdout is written next to the event log and
+	// uploaded as a raw-log artifact, redacted like the transcript.
+	rawLogPath := filepath.Join(runDirectory, RawLogFileName)
+	raw, err := newRawLog(rawLogPath, options.RawLogMaxBytes)
+	if err != nil {
+		return Result{}, &RuntimeError{Cause: err}
+	}
+	defer func() {
+		if err := raw.close(); err != nil {
+			returnErr = addRuntimeError(returnErr, err)
+		}
+	}()
+
 	startedAt := time.Now().UTC()
 	result = Result{
 		ID:          runID,
@@ -148,6 +165,7 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 		ExitCode:    1,
 		StartedAt:   startedAt,
 		EventsPath:  eventsPath,
+		RawLogPath:  rawLogPath,
 	}
 	if err := log.append("run.started", "", fmt.Sprintf("command=%s repository=%s", options.Command.Name, repository)); err != nil {
 		return result, &RuntimeError{Cause: err}
@@ -296,8 +314,8 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	if ompStream == nil {
 		stdoutLog = log
 	}
-	go pumpStream(&streams, stdoutReader, stdoutDestination, "stdout", stdoutLog, streamErrors)
-	go pumpStream(&streams, stderrReader, options.Stderr, "stderr", log, streamErrors)
+	go pumpStream(&streams, stdoutReader, stdoutDestination, "stdout", stdoutLog, raw, streamErrors)
+	go pumpStream(&streams, stderrReader, options.Stderr, "stderr", log, nil, streamErrors)
 	streamsDone := make(chan struct{})
 	go func() {
 		streams.Wait()
@@ -624,7 +642,7 @@ func laneGitFailure(command string, output []byte, err error) string {
 	return fmt.Sprintf("%s: %s", command, message)
 }
 
-func pumpStream(group *sync.WaitGroup, source *os.File, destination io.Writer, stream string, log *eventLog, errorsChannel chan<- error) {
+func pumpStream(group *sync.WaitGroup, source *os.File, destination io.Writer, stream string, log *eventLog, raw *rawLog, errorsChannel chan<- error) {
 	defer group.Done()
 	defer source.Close()
 	buffer := make([]byte, outputChunkBytes)
@@ -639,6 +657,11 @@ func pumpStream(group *sync.WaitGroup, source *os.File, destination io.Writer, s
 			if writeErr != nil {
 				sendError(errorsChannel, fmt.Errorf("write %s: %w", stream, writeErr))
 				return
+			}
+			// MACH-28: the raw log keeps the complete stdout for the run
+			// artifact, redacted and capped; it never fails the run.
+			if raw != nil {
+				raw.Write(chunk)
 			}
 			// A nil log means the stream is consumed by a structured parser
 			// that records typed events instead of raw output.

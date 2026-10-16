@@ -21,6 +21,10 @@ const (
 	ompThinkingBytes   = 4 << 10
 	ompToolArgsBytes   = 8 << 10
 	ompMaxEventBytes   = 1 << 20
+	// subagentSummaryBytes and subagentResultBytes keep subagent markers to one
+	// readable line each, matching the one-line summary the marker shows.
+	subagentSummaryBytes = 512
+	subagentResultBytes  = 512
 )
 
 // IsOmpExecutor reports whether the resolved executor runs omp, directly or
@@ -65,10 +69,19 @@ type ompStreamParser struct {
 	discarding   bool
 	finalMessage string
 	usage        *int64
+	// pending holds the name, arguments and intent of a tool call between its
+	// assistant message and its execution result, so file edits and subagents
+	// can be mapped with both the request and the result.
+	pending map[string]pendingToolCall
+}
+
+type pendingToolCall struct {
+	args   json.RawMessage
+	intent string
 }
 
 func newOmpStreamParser(log *eventLog) *ompStreamParser {
-	return &ompStreamParser{log: log}
+	return &ompStreamParser{log: log, pending: map[string]pendingToolCall{}}
 }
 
 func (parser *ompStreamParser) Write(data []byte) (int, error) {
@@ -132,6 +145,8 @@ func (parser *ompStreamParser) parseLine(line []byte) {
 	switch event.Type {
 	case "message_end":
 		parser.parseMessage(event)
+	case "tool_execution_start":
+		parser.parseToolStart(event)
 	case "tool_execution_end":
 		parser.parseToolResult(event)
 	}
@@ -145,21 +160,21 @@ type ompEvent struct {
 			Type      string          `json:"type"`
 			Text      string          `json:"text"`
 			Thinking  string          `json:"thinking"`
+			ID        string          `json:"id"`
 			Name      string          `json:"name"`
+			Intent    string          `json:"intent"`
 			Arguments json.RawMessage `json:"arguments"`
 		} `json:"content"`
 		Usage struct {
 			TotalTokens *int64 `json:"totalTokens"`
 		} `json:"usage"`
 	} `json:"message"`
-	ToolName string `json:"toolName"`
-	Result   *struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
-	} `json:"result"`
-	IsError bool `json:"isError"`
+	ToolCallId string          `json:"toolCallId"`
+	ToolName   string          `json:"toolName"`
+	Intent     string          `json:"intent"`
+	Args       json.RawMessage `json:"args"`
+	Result     *ompToolResult  `json:"result"`
+	IsError    bool            `json:"isError"`
 }
 
 func (parser *ompStreamParser) parseMessage(event ompEvent) {
@@ -187,6 +202,18 @@ func (parser *ompStreamParser) parseMessage(event ompEvent) {
 			if item.Name == "" {
 				continue
 			}
+			if item.ID != "" {
+				parser.pending[item.ID] = pendingToolCall{args: item.Arguments, intent: item.Intent}
+			}
+			// MACH-28: subagents get a start marker; file edits wait for their
+			// result so the chip can carry the change summary.
+			if isSubagentTool(item.Name) {
+				parser.emit(subagentStartEvent(item.Name, item.Arguments, item.Intent))
+				continue
+			}
+			if isFileEditTool(item.Name) {
+				continue
+			}
 			parser.emit(Event{
 				Type:    "agent.tool_call",
 				Message: item.Name,
@@ -197,8 +224,31 @@ func (parser *ompStreamParser) parseMessage(event ompEvent) {
 	}
 }
 
+// parseToolStart remembers a tool call's arguments so a later result can be
+// mapped even when the assistant message did not carry them.
+func (parser *ompStreamParser) parseToolStart(event ompEvent) {
+	if event.ToolCallId == "" || event.ToolName == "" {
+		return
+	}
+	if _, ok := parser.pending[event.ToolCallId]; ok {
+		return
+	}
+	parser.pending[event.ToolCallId] = pendingToolCall{args: event.Args, intent: event.Intent}
+}
+
 func (parser *ompStreamParser) parseToolResult(event ompEvent) {
 	if event.ToolName == "" {
+		return
+	}
+	pending := parser.pending[event.ToolCallId]
+	delete(parser.pending, event.ToolCallId)
+	if isSubagentTool(event.ToolName) {
+		name, _ := subagentIdentity(pending.args, pending.intent)
+		parser.emit(subagentEndEvent(event.ToolName, name, event.Result, event.IsError))
+		return
+	}
+	if isFileEditTool(event.ToolName) {
+		parser.emit(fileEditEvent(event.ToolName, pending.args, event.Result))
 		return
 	}
 	var text strings.Builder

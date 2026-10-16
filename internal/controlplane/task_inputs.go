@@ -10,6 +10,7 @@ import (
 
 	"github.com/owainlewis/machinist/internal/config"
 	"github.com/owainlewis/machinist/internal/protocol"
+	"github.com/owainlewis/machinist/internal/runner"
 )
 
 const artifactSchema = `
@@ -90,6 +91,11 @@ func bindTaskInputs(ctx context.Context, tx *sql.Tx, job, run string, step confi
 			return "", err
 		}
 		for _, a := range files {
+			// The raw agent log is a diagnostic artifact, not a task file, so it
+			// is never carried into the next stage's workspace (MACH-28).
+			if a.Path == runner.RawLogFileName {
+				continue
+			}
 			if a.ExpiredAt != nil {
 				problem = "Expired task file " + a.Path
 			}

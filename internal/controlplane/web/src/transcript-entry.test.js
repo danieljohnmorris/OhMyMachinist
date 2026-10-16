@@ -41,3 +41,24 @@ test("stderr output keeps the danger styling", () => {
   assert.match(html, /text-danger/);
   assert.match(html, /deliver-pr: failed/);
 });
+test("file edit chips show the path and change counts", () => {
+  const html = render({ kind: "file-edit", path: "docs/api.md", operation: "edit", additions: 3, deletions: 1, tool: "edit", args: '{"path":"docs/api.md"}', text: "[docs/api.md]" });
+  assert.match(html, /<details/);
+  assert.match(html, /docs\/api.md/);
+  assert.match(html, /\+3/);
+  assert.match(html, /-1/);
+  assert.match(html, /edit/);
+});
+
+test("subagent markers name the subagent and its task", () => {
+  const start = render({ kind: "subagent-start", subagent: "Reviewer", text: "Review the diff" });
+  assert.match(start, /Subagent · Reviewer/);
+  assert.match(start, /Review the diff/);
+
+  const end = render({ kind: "subagent-end", subagent: "Reviewer", status: "completed", text: "done" });
+  assert.match(end, /Subagent finished · Reviewer/);
+
+  const failed = render({ kind: "subagent-end", subagent: "Reviewer", status: "failed", text: "boom" });
+  assert.match(failed, /Subagent failed · Reviewer/);
+  assert.match(failed, /text-danger/);
+});
