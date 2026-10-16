@@ -50,7 +50,16 @@ type Options struct {
 	// ExtraEnv is appended to the executor command environment. The managed
 	// worker uses it to expose the control plane so trusted post-agent scripts
 	// (e.g. the built-in PR review) can read per-project settings.
-	ExtraEnv      []string
+	ExtraEnv []string
+	// ResumeSession is a coding agent session ID to continue (Poke and Resume
+	// for MACH-45). It is exposed to the executor as MACHINIST_RESUME_SESSION
+	// so a wrapper can pass it to the agent's own resume flag.
+	ResumeSession string
+	// Input streams steer messages (Poke) into the command's stdin while it
+	// runs, keeping stdin open until the process exits. It is nil for executors
+	// that read their prompt until EOF; only workers whose executor declares
+	// stream_stdin set it.
+	Input         <-chan string
 	DataDirectory string
 	Stdout        io.Writer
 	Stderr        io.Writer
@@ -70,7 +79,10 @@ type Result struct {
 	DurationMillis int64                `json:"duration_millis"`
 	TokenUsage     *int64               `json:"token_usage,omitempty"`
 	FinalMessage   string               `json:"final_message,omitempty"`
-	EventsPath     string               `json:"events_path"`
+	// SessionID is the coding agent's own session identifier when it reports
+	// one (omp's `session` event); a later Resume continues it.
+	SessionID  string `json:"session_id,omitempty"`
+	EventsPath string `json:"events_path"`
 }
 
 type OutcomeError struct {
@@ -206,6 +218,9 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	command.Dir = repository
 	command.Env = append(sanitizedEnvironment(os.Environ()), "MACHINIST_RUN_ID="+runID, "MACHINIST_REPOSITORY="+repository, tokenUsageEnvironment+"="+tokenUsagePath)
 	command.Env = append(command.Env, options.ExtraEnv...)
+	if options.ResumeSession != "" {
+		command.Env = append(command.Env, "MACHINIST_RESUME_SESSION="+options.ResumeSession)
+	}
 	if options.Revision != nil {
 		revisionPath := filepath.Join(runDirectory, "revision.json")
 		body, err := json.Marshal(options.Revision)
@@ -233,6 +248,12 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	if err != nil {
 		return completeFailure(&result, log, runDirectory, fmt.Errorf("create command stdin: %w", err))
 	}
+	// inputStop releases the stdin pump when the process ends or is stopped, so
+	// a streaming (Poke) input goroutine never outlives the run.
+	inputStop := make(chan struct{})
+	var stopInputOnce sync.Once
+	stopInput := func() { stopInputOnce.Do(func() { close(inputStop) }) }
+	defer stopInput()
 	stdoutReader, stdoutWriter, err := os.Pipe()
 	if err != nil {
 		closeFiles(stdinReader, stdinWriter)
@@ -265,7 +286,11 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	}
 
 	inputResult := make(chan error, 1)
-	go writePrompt(stdinWriter, options.Command.Prompt, inputResult)
+	if options.Input != nil {
+		go pumpInput(stdinWriter, options.Command.Prompt, options.Input, inputStop, inputResult)
+	} else {
+		go writePrompt(stdinWriter, options.Command.Prompt, inputResult)
+	}
 	streamErrors := make(chan error, 2)
 	var streams sync.WaitGroup
 	streams.Add(2)
@@ -301,7 +326,7 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 		processResult <- processWait{state: state, err: err}
 	}()
 
-	closeInput := func() { _ = stdinWriter.Close() }
+	closeInput := func() { _ = stdinWriter.Close(); stopInput() }
 	closeStreams := func() { closeFiles(stdoutReader, stderrReader) }
 	state, exitCode, outcome := supervise(ctx, command.Process, options.Command.Timeout, processResult, inputResult, streamErrors, streamsDone, closeInput, closeStreams, options.Stdout, options.Stderr)
 	if options.Workflow && state == StateSucceeded {
@@ -322,6 +347,7 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 		collectedTokenUsageIsAuthoritative = true
 		collectedTokenUsage = ompStream.tokenUsage()
 		result.FinalMessage = ompStream.lastMessage()
+		result.SessionID = ompStream.sessionIDValue()
 	}
 	if err := finish(&result, log, runDirectory, state, exitCode, outcome, collectedTokenUsage, collectedTokenUsageIsAuthoritative); err != nil {
 		if outcome != nil {
@@ -629,6 +655,34 @@ func writePrompt(destination io.WriteCloser, prompt string, result chan<- error)
 		closeErr = nil
 	}
 	result <- errors.Join(writeErr, closeErr)
+}
+
+// pumpInput writes the prompt and then streams steer messages (Poke) to the
+// command's stdin, keeping it open until the process ends. The stop channel is
+// closed when the process exits or is terminated so the goroutine always
+// reports exactly one result, matching writePrompt's contract with supervise.
+func pumpInput(destination io.WriteCloser, prompt string, input <-chan string, stop <-chan struct{}, result chan<- error) {
+	written, writeErr := io.WriteString(destination, prompt)
+	if writeErr == nil && written != len(prompt) {
+		writeErr = io.ErrShortWrite
+	}
+	runErr := writeErr
+	for runErr == nil {
+		select {
+		case <-stop:
+			result <- nil
+			return
+		case message, ok := <-input:
+			if !ok {
+				result <- nil
+				return
+			}
+			if _, runErr = io.WriteString(destination, "\n"+message+"\n"); runErr != nil {
+				break
+			}
+		}
+	}
+	result <- runErr
 }
 
 func processOutcome(waited processWait) (State, int, error) {

@@ -45,7 +45,9 @@ func (s *Store) AppendLiveEvents(ctx context.Context, runID string, input protoc
 	if size+int64(len(input.Events)) > runner.MaxEventLogBytes {
 		return ErrLiveEventsFull
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE runs SET events=COALESCE(events,'')||? WHERE id=? AND state='running' AND worker_instance=? AND lease_token=?`, input.Events, runID, input.InstanceID, input.LeaseToken)
+	// New output is progress: it moves the run's last-progress clock so a
+	// silent agent (a lost LLM backend) stalls after the configured idle time.
+	result, err := tx.ExecContext(ctx, `UPDATE runs SET events=COALESCE(events,'')||?,last_progress_at=? WHERE id=? AND state='running' AND worker_instance=? AND lease_token=?`, input.Events, s.now().UTC().Format(time.RFC3339Nano), runID, input.InstanceID, input.LeaseToken)
 	if err != nil {
 		return err
 	}

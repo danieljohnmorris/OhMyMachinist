@@ -58,6 +58,7 @@ type ompStreamParser struct {
 	discarding   bool
 	finalMessage string
 	usage        *int64
+	sessionID    string
 }
 
 func newOmpStreamParser(log *eventLog) *ompStreamParser {
@@ -102,6 +103,13 @@ func (parser *ompStreamParser) tokenUsage() *int64 {
 	return parser.usage
 }
 
+// sessionID reports the coding agent's session identifier from its `session`
+// event, used by Resume to continue the same session (MACH-45).
+func (parser *ompStreamParser) sessionIDValue() string {
+	parser.flush()
+	return parser.sessionID
+}
+
 func (parser *ompStreamParser) appendFragment(fragment []byte) {
 	if parser.discarding {
 		return
@@ -123,6 +131,10 @@ func (parser *ompStreamParser) parseLine(line []byte) {
 		return
 	}
 	switch event.Type {
+	case "session":
+		if event.ID != "" {
+			parser.sessionID = event.ID
+		}
 	case "message_end":
 		parser.parseMessage(event)
 	case "tool_execution_end":
@@ -132,6 +144,7 @@ func (parser *ompStreamParser) parseLine(line []byte) {
 
 type ompEvent struct {
 	Type    string `json:"type"`
+	ID      string `json:"id"`
 	Message *struct {
 		Role    string `json:"role"`
 		Content []struct {

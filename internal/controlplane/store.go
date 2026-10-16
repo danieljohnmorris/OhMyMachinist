@@ -67,7 +67,25 @@ type Job struct {
 	CreatedAt        time.Time         `json:"created_at"`
 	UpdatedAt        time.Time         `json:"updated_at"`
 	StateHistory     []StateTransition `json:"state_history,omitempty"`
-	Runs             []Run             `json:"runs"`
+	Activity         []RunActivity     `json:"activity,omitempty"`
+	// StallReason and StallEndpoint describe why a stalled job lost its LLM
+	// backend (e.g. "LLM unavailable" against the model endpoint). StalledAt is
+	// when the control plane made that call.
+	StallReason   string     `json:"stall_reason,omitempty"`
+	StallEndpoint string     `json:"stall_endpoint,omitempty"`
+	StalledAt     *time.Time `json:"stalled_at,omitempty"`
+	Runs          []Run      `json:"runs"`
+}
+
+// RunActivity is one recorded control or lifecycle action on a job, with the
+// responsible actor and time. The run activity sidebar renders these next to
+// the job's state transitions.
+type RunActivity struct {
+	RunID  string    `json:"run_id,omitempty"`
+	Action string    `json:"action"`
+	Actor  string    `json:"actor,omitempty"`
+	Detail string    `json:"detail,omitempty"`
+	At     time.Time `json:"at"`
 }
 
 // StateTransition is one recorded job state change with the time it happened.
@@ -83,6 +101,11 @@ type Run struct {
 	Outcome        string             `json:"outcome,omitempty"`
 	Summary        string             `json:"summary,omitempty"`
 	ID             string             `json:"id"`
+	// PreviousRunID links a restarted or resumed attempt to the run it
+	// replaces; SessionID is the coding agent's own session so a resume can
+	// continue it.
+	PreviousRunID  string             `json:"previous_run_id,omitempty"`
+	SessionID      string             `json:"session_id,omitempty"`
 	Command        string             `json:"command"`
 	Executor       string             `json:"executor"`
 	Model          string             `json:"model,omitempty"`
@@ -216,7 +239,7 @@ func OpenStore(path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) initialize(ctx context.Context) error {
-	const schemaVersion = 8
+	const schemaVersion = 9
 	var version int
 	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		return fmt.Errorf("read database schema version: %w", err)
@@ -247,14 +270,16 @@ CREATE TABLE IF NOT EXISTS jobs (
  trigger_subject TEXT NOT NULL DEFAULT '', github_issue_title TEXT NOT NULL DEFAULT '',
  issue_key TEXT NOT NULL DEFAULT '', resolution_kind TEXT NOT NULL DEFAULT '', resolution_detail TEXT NOT NULL DEFAULT '',
  resolved_at TEXT,
+ stall_reason TEXT NOT NULL DEFAULT '', stall_endpoint TEXT NOT NULL DEFAULT '', stalled_at TEXT,
  fixed_trigger INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
  previous_job_id TEXT NOT NULL DEFAULT '', attempt INTEGER NOT NULL DEFAULT 1, superseded_by TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS runs (
- id TEXT PRIMARY KEY, job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id), command TEXT NOT NULL, command_hash TEXT NOT NULL,
+ id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id), command TEXT NOT NULL, command_hash TEXT NOT NULL,
  executor TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', repository TEXT NOT NULL, rendered_prompt TEXT NOT NULL,
  timeout_ms INTEGER NOT NULL, state TEXT NOT NULL, worker_instance TEXT, worker_name TEXT NOT NULL DEFAULT '',
  lease_token TEXT, lease_expires_at INTEGER, exit_code INTEGER, error TEXT, result TEXT, events TEXT,
- started_at TEXT, completed_at TEXT, duration_millis INTEGER, token_usage INTEGER);
+ started_at TEXT, completed_at TEXT, duration_millis INTEGER, token_usage INTEGER,
+ previous_run_id TEXT NOT NULL DEFAULT '', session_id TEXT NOT NULL DEFAULT '', last_progress_at TEXT);
 CREATE INDEX IF NOT EXISTS runs_dispatch ON runs(state, job_id);
 CREATE TABLE IF NOT EXISTS workers (instance_id TEXT PRIMARY KEY, name TEXT NOT NULL, last_seen_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS worker_repositories (worker_instance TEXT NOT NULL REFERENCES workers(instance_id) ON DELETE CASCADE, repository TEXT NOT NULL, PRIMARY KEY(worker_instance,repository));
@@ -269,6 +294,17 @@ CREATE TABLE IF NOT EXISTS job_state_history (
  job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
  state TEXT NOT NULL, changed_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS job_state_history_job ON job_state_history(job_id);
+CREATE TABLE IF NOT EXISTS run_activity (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+ run_id TEXT NOT NULL DEFAULT '', action TEXT NOT NULL, actor TEXT NOT NULL DEFAULT '',
+ detail TEXT NOT NULL DEFAULT '', at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS run_activity_job ON run_activity(job_id);
+CREATE TABLE IF NOT EXISTS run_pokes (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+ message TEXT NOT NULL, actor TEXT NOT NULL DEFAULT '',
+ created_at TEXT NOT NULL, delivered_at TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS review_instructions (
  repository TEXT PRIMARY KEY,
  instructions TEXT NOT NULL,
@@ -334,8 +370,39 @@ END;`
 			return fmt.Errorf("upgrade database schema to version 8: %w", err)
 		}
 	}
-	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+jobMetadataSchema+"PRAGMA user_version=8;")
+	if version < 9 {
+		if err := s.addRunControlColumns(ctx); err != nil {
+			return fmt.Errorf("upgrade database schema to version 9: %w", err)
+		}
+	}
+	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+jobMetadataSchema+"PRAGMA user_version=9;")
 	return err
+}
+
+// addRunControlColumns adds the stalled-run bookkeeping on jobs and the
+// attempt/session links on runs used by Restart, Resume and Poke. Existing
+// rows keep empty defaults.
+func (s *Store) addRunControlColumns(ctx context.Context) error {
+	for _, column := range []struct{ table, name, definition string }{
+		{"jobs", "stall_reason", "TEXT NOT NULL DEFAULT ''"},
+		{"jobs", "stall_endpoint", "TEXT NOT NULL DEFAULT ''"},
+		{"jobs", "stalled_at", "TEXT"},
+		{"runs", "previous_run_id", "TEXT NOT NULL DEFAULT ''"},
+		{"runs", "session_id", "TEXT NOT NULL DEFAULT ''"},
+		{"runs", "last_progress_at", "TEXT"},
+	} {
+		var present int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`, column.table, column.name).Scan(&present); err != nil {
+			return err
+		}
+		if present > 0 {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE `+column.table+` ADD COLUMN `+column.name+` `+column.definition); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // addJobResolution adds the ticket-resolution columns to jobs. Existing rows
@@ -1065,7 +1132,7 @@ func (s *Store) poll(ctx context.Context, request protocol.PollRequest, maxConcu
 			return nil, fmt.Errorf("store worker repository: %w", err)
 		}
 	}
-	active, err := scanRunSpec(tx.QueryRowContext(ctx, `SELECT id,job_id,command,command_hash,executor,model,repository,rendered_prompt,timeout_ms,lease_token FROM runs WHERE worker_instance=? AND state='running' LIMIT 1`, request.InstanceID))
+	active, err := scanRunSpec(tx.QueryRowContext(ctx, `SELECT id,job_id,command,command_hash,executor,model,repository,rendered_prompt,timeout_ms,lease_token,COALESCE(session_id,'') FROM runs WHERE worker_instance=? AND state='running' LIMIT 1`, request.InstanceID))
 	if err == nil {
 		var activeWorkflow bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM workflow_jobs WHERE job_id=?)`, active.JobID).Scan(&activeWorkflow); err != nil {
@@ -1122,7 +1189,7 @@ func (s *Store) poll(ctx context.Context, request protocol.PollRequest, maxConcu
 	}
 
 	executors := stringSet(request.Executors)
-	rows, err := tx.QueryContext(ctx, `SELECT r.id,r.job_id,r.command,r.command_hash,r.executor,r.model,r.repository,r.rendered_prompt,r.timeout_ms,j.state,COALESCE((SELECT plan FROM workflow_jobs WHERE job_id=j.id),'') FROM runs r JOIN jobs j ON j.id=r.job_id WHERE r.state='queued' AND (NOT EXISTS(SELECT 1 FROM workflow_jobs w WHERE w.job_id=j.id) OR (? AND EXISTS(SELECT 1 FROM workflow_jobs w WHERE w.job_id=j.id AND (w.worker_name='' OR w.worker_name=?)))) AND (? OR NOT EXISTS(SELECT 1 FROM task_inputs t WHERE t.job_id=j.id)) AND (? OR NOT EXISTS(SELECT 1 FROM execution_reviews er WHERE er.run_id=r.id)) ORDER BY r.rowid`, request.Workflows, request.Name, request.Artifacts, request.Reviews)
+	rows, err := tx.QueryContext(ctx, `SELECT r.id,r.job_id,r.command,r.command_hash,r.executor,r.model,r.repository,r.rendered_prompt,r.timeout_ms,COALESCE(r.session_id,''),j.state,COALESCE((SELECT plan FROM workflow_jobs WHERE job_id=j.id),'') FROM runs r JOIN jobs j ON j.id=r.job_id WHERE r.state='queued' AND (NOT EXISTS(SELECT 1 FROM workflow_jobs w WHERE w.job_id=j.id) OR (? AND EXISTS(SELECT 1 FROM workflow_jobs w WHERE w.job_id=j.id AND (w.worker_name='' OR w.worker_name=?)))) AND (? OR NOT EXISTS(SELECT 1 FROM task_inputs t WHERE t.job_id=j.id)) AND (? OR NOT EXISTS(SELECT 1 FROM execution_reviews er WHERE er.run_id=r.id)) ORDER BY r.rowid`, request.Workflows, request.Name, request.Artifacts, request.Reviews)
 	if err != nil {
 		return nil, err
 	}
@@ -1130,7 +1197,7 @@ func (s *Store) poll(ctx context.Context, request protocol.PollRequest, maxConcu
 	for rows.Next() {
 		var candidate protocol.RunSpec
 		var jobState, workflowPlan string
-		if err := rows.Scan(&candidate.ID, &candidate.JobID, &candidate.Command, &candidate.CommandHash, &candidate.Executor, &candidate.Model, &candidate.Repository, &candidate.RenderedPrompt, &candidate.TimeoutMillis, &jobState, &workflowPlan); err != nil {
+		if err := rows.Scan(&candidate.ID, &candidate.JobID, &candidate.Command, &candidate.CommandHash, &candidate.Executor, &candidate.Model, &candidate.Repository, &candidate.RenderedPrompt, &candidate.TimeoutMillis, &candidate.ResumeSession, &jobState, &workflowPlan); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -1181,7 +1248,7 @@ func (s *Store) poll(ctx context.Context, request protocol.PollRequest, maxConcu
 		return nil, err
 	}
 	expiresAt := nowTime.Add(leaseDuration).UnixNano()
-	result, err := tx.ExecContext(ctx, `UPDATE runs SET state='running',worker_instance=?,worker_name=?,lease_token=?,lease_expires_at=?,started_at=? WHERE id=? AND state='queued'`, request.InstanceID, request.Name, selected.LeaseToken, expiresAt, now, selected.ID)
+	result, err := tx.ExecContext(ctx, `UPDATE runs SET state='running',worker_instance=?,worker_name=?,lease_token=?,lease_expires_at=?,started_at=?,last_progress_at=? WHERE id=? AND state='queued'`, request.InstanceID, request.Name, selected.LeaseToken, expiresAt, now, now, selected.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -1189,7 +1256,9 @@ func (s *Store) poll(ctx context.Context, request protocol.PollRequest, maxConcu
 	if err != nil || changed != 1 {
 		return nil, fmt.Errorf("lease run: concurrent state change")
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET state='running',updated_at=? WHERE id=? AND state='queued'`, now, selected.JobID); err != nil {
+	// A reclaimed or resumed run moves the job back to running from queued or
+	// from a stalled state, clearing the stall record once work resumes.
+	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET state='running',stall_reason='',stall_endpoint='',stalled_at=NULL,updated_at=? WHERE id=? AND state IN ('queued','stalled')`, now, selected.JobID); err != nil {
 		return nil, err
 	}
 	if err := s.enrichRun(ctx, tx, &selected); err != nil {
@@ -1239,7 +1308,19 @@ func (s *Store) Complete(ctx context.Context, runID string, completion protocol.
 	if durationMillis == nil {
 		durationMillis = elapsedMillis(startedAt, now)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE runs SET state=?,exit_code=?,error=?,result=?,events=?,lease_expires_at=NULL,completed_at=?,duration_millis=?,token_usage=? WHERE id=?`, completion.State, completion.ExitCode, completion.Error, string(completion.Result), completion.Events, now, durationMillis, tokenUsage, runID); err != nil {
+	// The agent's own session ID (reported by the executor) lets a later Resume
+	// continue the same session. Poke events are re-appended because completion
+	// replaces the live event log with the worker's full log.
+	events := strings.TrimRight(completion.Events, "\n")
+	if pokes, err := pokeEventLines(ctx, tx, runID); err != nil {
+		return err
+	} else if pokes != "" {
+		if events != "" {
+			events += "\n"
+		}
+		events += pokes
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE runs SET state=?,exit_code=?,error=?,result=?,events=?,lease_expires_at=NULL,completed_at=?,duration_millis=?,token_usage=?,session_id=CASE WHEN ?<>'' THEN ? ELSE session_id END WHERE id=?`, completion.State, completion.ExitCode, completion.Error, string(completion.Result), events, now, durationMillis, tokenUsage, completion.SessionID, completion.SessionID, runID); err != nil {
 		return err
 	}
 	if handled, err := completeWorkflow(ctx, tx, jobID, runID, completion, now); handled || err != nil {
@@ -1249,7 +1330,7 @@ func (s *Store) Complete(ctx context.Context, runID string, completion protocol.
 		return tx.Commit()
 	}
 	if completion.State == "succeeded" {
-		if _, err := tx.ExecContext(ctx, `UPDATE jobs SET state='succeeded',updated_at=? WHERE id=?`, now, jobID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE jobs SET state='succeeded',stall_reason='',stall_endpoint='',stalled_at=NULL,updated_at=? WHERE id=?`, now, jobID); err != nil {
 			return err
 		}
 		if triggerIdentity != "" {
@@ -1258,7 +1339,7 @@ func (s *Store) Complete(ctx context.Context, runID string, completion protocol.
 			}
 		}
 	} else {
-		if _, err := tx.ExecContext(ctx, `UPDATE jobs SET state='failed',updated_at=? WHERE id=?`, now, jobID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE jobs SET state='failed',stall_reason='',stall_endpoint='',stalled_at=NULL,updated_at=? WHERE id=?`, now, jobID); err != nil {
 			return err
 		}
 		if triggerIdentity != "" {
@@ -1460,8 +1541,8 @@ func (s *Store) RunOutput(ctx context.Context, runID string) (RunOutput, error) 
 // listJobs returns jobs newest first with their runs attached. A non-empty
 // jobID restricts the result to that job.
 func (s *Store) listJobs(ctx context.Context, jobID string) ([]Job, error) {
-	query := `SELECT j.id,j.title,j.prompt,j.repository,j.github_issue_title,j.command,j.trigger_identity,j.occurrence_key,j.trigger_subject,j.state,j.previous_job_id,j.attempt,COALESCE(j.superseded_by,''),j.issue_key,j.resolution_kind,j.resolution_detail,COALESCE(j.resolved_at,''),j.created_at,j.updated_at,
-COALESCE(r.id,''),COALESCE(r.command,''),COALESCE(r.executor,''),COALESCE(r.model,''),COALESCE(r.state,''),COALESCE(NULLIF(r.worker_name,''),w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,''),r.duration_millis,r.token_usage,a.step,COALESCE(a.outcome,''),COALESCE(NULLIF(a.summary,''),CASE WHEN json_valid(r.result) THEN json_extract(r.result,'$.final_message') END,'')
+	query := `SELECT j.id,j.title,j.prompt,j.repository,j.github_issue_title,j.command,j.trigger_identity,j.occurrence_key,j.trigger_subject,j.state,j.previous_job_id,j.attempt,COALESCE(j.superseded_by,''),j.issue_key,j.resolution_kind,j.resolution_detail,COALESCE(j.resolved_at,''),COALESCE(j.stall_reason,''),COALESCE(j.stall_endpoint,''),COALESCE(j.stalled_at,''),j.created_at,j.updated_at,
+COALESCE(r.id,''),COALESCE(r.previous_run_id,''),COALESCE(r.session_id,''),COALESCE(r.command,''),COALESCE(r.executor,''),COALESCE(r.model,''),COALESCE(r.state,''),COALESCE(NULLIF(r.worker_name,''),w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,''),r.duration_millis,r.token_usage,a.step,COALESCE(a.outcome,''),COALESCE(NULLIF(a.summary,''),CASE WHEN json_valid(r.result) THEN json_extract(r.result,'$.final_message') END,'')
 FROM jobs j LEFT JOIN runs r ON r.job_id=j.id LEFT JOIN workers w ON w.instance_id=r.worker_instance LEFT JOIN workflow_attempts a ON a.run_id=r.id`
 	args := []any{}
 	if jobID != "" {
@@ -1479,9 +1560,9 @@ FROM jobs j LEFT JOIN runs r ON r.job_id=j.id LEFT JOIN workers w ON w.instance_
 		job := Job{Runs: []Run{}}
 		var run Run
 		var created, updated, started, completed string
-		var resolutionKind, resolutionDetail, resolvedAt string
-		if err := rows.Scan(&job.ID, &job.Title, &job.Prompt, &job.Repository, &job.GitHubIssueTitle, &job.Command, &job.TriggerID, &job.OccurrenceKey, &job.TriggerSubject, &job.State, &job.PreviousJobID, &job.Attempt, &job.SupersededBy, &job.IssueKey, &resolutionKind, &resolutionDetail, &resolvedAt, &created, &updated,
-			&run.ID, &run.Command, &run.Executor, &run.Model, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &started, &completed, &run.DurationMillis, &run.TokenUsage, &run.Step, &run.Outcome, &run.Summary); err != nil {
+		var resolutionKind, resolutionDetail, resolvedAt, stalledAt string
+		if err := rows.Scan(&job.ID, &job.Title, &job.Prompt, &job.Repository, &job.GitHubIssueTitle, &job.Command, &job.TriggerID, &job.OccurrenceKey, &job.TriggerSubject, &job.State, &job.PreviousJobID, &job.Attempt, &job.SupersededBy, &job.IssueKey, &resolutionKind, &resolutionDetail, &resolvedAt, &job.StallReason, &job.StallEndpoint, &stalledAt, &created, &updated,
+			&run.ID, &run.PreviousRunID, &run.SessionID, &run.Command, &run.Executor, &run.Model, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &started, &completed, &run.DurationMillis, &run.TokenUsage, &run.Step, &run.Outcome, &run.Summary); err != nil {
 			return nil, err
 		}
 		job.ResolutionKind = resolutionKind
@@ -1489,6 +1570,11 @@ FROM jobs j LEFT JOIN runs r ON r.job_id=j.id LEFT JOIN workers w ON w.instance_
 		if resolvedAt != "" {
 			if parsed, err := time.Parse(time.RFC3339Nano, resolvedAt); err == nil {
 				job.ResolvedAt = &parsed
+			}
+		}
+		if stalledAt != "" {
+			if parsed, err := time.Parse(time.RFC3339Nano, stalledAt); err == nil {
+				job.StalledAt = &parsed
 			}
 		}
 		job.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
@@ -1523,7 +1609,48 @@ FROM jobs j LEFT JOIN runs r ON r.job_id=j.id LEFT JOIN workers w ON w.instance_
 	if err := loadJobStateHistory(ctx, s.db, jobs); err != nil {
 		return nil, fmt.Errorf("read job state history: %w", err)
 	}
+	if err := loadRunActivity(ctx, s.db, jobs); err != nil {
+		return nil, fmt.Errorf("read run activity: %w", err)
+	}
 	return jobs, nil
+}
+
+// loadRunActivity attaches each job's recorded control actions, oldest first,
+// so the activity sidebar can show Restart, Resume and Poke with actor and time.
+func loadRunActivity(ctx context.Context, db *sql.DB, jobs []Job) error {
+	if len(jobs) == 0 {
+		return nil
+	}
+	byID := make(map[string]*Job, len(jobs))
+	for index := range jobs {
+		byID[jobs[index].ID] = &jobs[index]
+	}
+	rows, err := db.QueryContext(ctx, `SELECT job_id,run_id,action,actor,detail,at FROM run_activity ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var jobID string
+		var entry RunActivity
+		var at string
+		if err := rows.Scan(&jobID, &entry.RunID, &entry.Action, &entry.Actor, &entry.Detail, &at); err != nil {
+			return err
+		}
+		entry.At, _ = time.Parse(time.RFC3339Nano, at)
+		if job := byID[jobID]; job != nil {
+			job.Activity = append(job.Activity, entry)
+		}
+	}
+	return rows.Err()
+}
+
+// recordActivity appends one control action for a job inside an existing
+// transaction.
+func recordActivity(ctx context.Context, tx *sql.Tx, jobID, runID, action, actor, detail string, at time.Time) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO run_activity(job_id,run_id,action,actor,detail,at) VALUES(?,?,?,?,?,?)`,
+		jobID, runID, action, actor, detail, at.UTC().Format(time.RFC3339Nano))
+	return err
 }
 
 // ListJobs returns every job newest first with runs attached.
@@ -1549,9 +1676,9 @@ func (s *Store) GetJob(ctx context.Context, jobID string) (Job, error) {
 func (s *Store) GetRun(ctx context.Context, runID string) (Run, error) {
 	var run Run
 	var started, completed string
-	err := s.db.QueryRowContext(ctx, `SELECT r.id,r.command,r.executor,r.model,r.state,COALESCE(NULLIF(r.worker_name,''),w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,''),r.duration_millis,r.token_usage,a.step,COALESCE(a.outcome,''),COALESCE(NULLIF(a.summary,''),CASE WHEN json_valid(r.result) THEN json_extract(r.result,'$.final_message') END,'')
+	err := s.db.QueryRowContext(ctx, `SELECT r.id,COALESCE(r.previous_run_id,''),COALESCE(r.session_id,''),r.command,r.executor,r.model,r.state,COALESCE(NULLIF(r.worker_name,''),w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,''),r.duration_millis,r.token_usage,a.step,COALESCE(a.outcome,''),COALESCE(NULLIF(a.summary,''),CASE WHEN json_valid(r.result) THEN json_extract(r.result,'$.final_message') END,'')
 FROM runs r LEFT JOIN workers w ON w.instance_id=r.worker_instance LEFT JOIN workflow_attempts a ON a.run_id=r.id WHERE r.id=?`, runID).
-		Scan(&run.ID, &run.Command, &run.Executor, &run.Model, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &started, &completed, &run.DurationMillis, &run.TokenUsage, &run.Step, &run.Outcome, &run.Summary)
+		Scan(&run.ID, &run.PreviousRunID, &run.SessionID, &run.Command, &run.Executor, &run.Model, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &started, &completed, &run.DurationMillis, &run.TokenUsage, &run.Step, &run.Outcome, &run.Summary)
 	if err != nil {
 		return Run{}, err
 	}
@@ -1695,7 +1822,7 @@ func (s *Store) listWorkers(ctx context.Context) ([]Worker, error) {
 
 func scanRunSpec(row *sql.Row) (protocol.RunSpec, error) {
 	var run protocol.RunSpec
-	err := row.Scan(&run.ID, &run.JobID, &run.Command, &run.CommandHash, &run.Executor, &run.Model, &run.Repository, &run.RenderedPrompt, &run.TimeoutMillis, &run.LeaseToken)
+	err := row.Scan(&run.ID, &run.JobID, &run.Command, &run.CommandHash, &run.Executor, &run.Model, &run.Repository, &run.RenderedPrompt, &run.TimeoutMillis, &run.LeaseToken, &run.ResumeSession)
 	return run, err
 }
 

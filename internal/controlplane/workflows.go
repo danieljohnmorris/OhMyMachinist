@@ -112,10 +112,12 @@ func (s *Store) createWorkflowJob(ctx context.Context, prompt, repository, name,
 	return id, tx.Commit()
 }
 
-func enqueueStep(ctx context.Context, tx *sql.Tx, job, repository string, index int, step config.WorkflowStep, approved bool, now string) error {
+// enqueueStep queues one workflow step attempt and returns the run it created.
+// Restart and Resume reuse it so a new attempt follows the same step contract.
+func enqueueStep(ctx context.Context, tx *sql.Tx, job, repository string, index int, step config.WorkflowStep, approved bool, now string) (string, error) {
 	id, err := randomID("run", 12)
 	if err != nil {
-		return err
+		return "", err
 	}
 	state := "queued"
 	if step.Approval && !approved {
@@ -123,34 +125,36 @@ func enqueueStep(ctx context.Context, tx *sql.Tx, job, repository string, index 
 	}
 	c := step.Command
 	if _, err = tx.ExecContext(ctx, `INSERT INTO runs(id,job_id,command,command_hash,executor,model,repository,rendered_prompt,timeout_ms,state) VALUES(?,?,?,?,?,?,?,?,?,?)`, id, job, c.Name, c.Hash, c.Executor, c.Model, repository, c.Prompt, c.Timeout.Milliseconds(), state); err != nil {
-		return err
+		return "", err
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO workflow_attempts(run_id,step) VALUES(?,?)`, id, index); err != nil {
-		return err
+		return "", err
 	}
 	if state == "awaiting_approval" {
 		if err = bindReviewGate(ctx, tx, job, id, index); err != nil {
-			return err
+			return "", err
 		}
 	}
 	problem, err := bindTaskInputs(ctx, tx, job, id, step)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if problem != "" {
 		state = "blocked"
 		if _, err = tx.ExecContext(ctx, "UPDATE runs SET state='failed',error=? WHERE id=?", problem, id); err != nil {
-			return err
+			return "", err
 		}
 		if _, err = tx.ExecContext(ctx, "UPDATE workflow_attempts SET outcome='blocked',summary=? WHERE run_id=?", problem, id); err != nil {
-			return err
+			return "", err
 		}
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE workflow_jobs SET current_step=? WHERE job_id=?`, index, job); err != nil {
-		return err
+		return "", err
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE jobs SET state=?,updated_at=? WHERE id=?`, state, now, job)
-	return err
+	if _, err = tx.ExecContext(ctx, `UPDATE jobs SET state=?,updated_at=? WHERE id=?`, state, now, job); err != nil {
+		return "", err
+	}
+	return id, nil
 }
 
 // completeWorkflow runs in the same transaction as the process completion.
