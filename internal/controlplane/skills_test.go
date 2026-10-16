@@ -374,24 +374,47 @@ func TestSkillsAPIUpload(t *testing.T) {
 	response.Body.Close()
 }
 
-// TestSkillsAPIUninstall covers the delete endpoint and its scope rule.
+// TestSkillsAPIUninstall covers the delete endpoint: its scope rule, the
+// referenced-skill guard, and the force override.
 func TestSkillsAPIUninstall(t *testing.T) {
 	_, webServer, readSecret, writeSecret := newSkillsTestServer(t)
 	defer webServer.Close()
 	source := writeSkillSource(t, testSkillMarkdown)
 	decode[skills.InstallResult](t, authRequest(t, http.MethodPost, webServer.URL+"/api/v1/skills", writeSecret, map[string]any{"source": source}))
 
+	// A skill no shipped review profile references deletes without force.
+	free := writeSkillSource(t, "---\nname: unreferenced-skill\ndescription: Unused\n---\n\nBody.\n")
+	decode[skills.InstallResult](t, authRequest(t, http.MethodPost, webServer.URL+"/api/v1/skills", writeSecret, map[string]any{"source": free}))
+	response := authRequest(t, http.MethodDelete, webServer.URL+"/api/v1/skills/unreferenced-skill", writeSecret, nil)
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("unreferenced delete status = %d, want 204", response.StatusCode)
+	}
+	response.Body.Close()
+
 	// Read scope cannot delete.
-	response := authRequest(t, http.MethodDelete, webServer.URL+"/api/v1/skills/feature-dev:code-reviewer", readSecret, nil)
+	response = authRequest(t, http.MethodDelete, webServer.URL+"/api/v1/skills/feature-dev:code-reviewer", readSecret, nil)
 	if response.StatusCode != http.StatusForbidden {
 		t.Fatalf("read-scope delete status = %d, want 403", response.StatusCode)
 	}
 	response.Body.Close()
 
-	// Write scope deletes; the skill is then gone.
+	// A skill a shipped review profile still references is refused with 409 and
+	// stays installed.
 	response = authRequest(t, http.MethodDelete, webServer.URL+"/api/v1/skills/feature-dev:code-reviewer", writeSecret, nil)
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("referenced delete status = %d, want 409", response.StatusCode)
+	}
+	response.Body.Close()
+	response = authRequest(t, http.MethodGet, webServer.URL+"/api/v1/skills/feature-dev:code-reviewer", readSecret, nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("referenced skill after refused delete status = %d, want 200", response.StatusCode)
+	}
+	response.Body.Close()
+
+	// force removes it; the skill is then gone.
+	response = authRequest(t, http.MethodDelete, webServer.URL+"/api/v1/skills/feature-dev:code-reviewer?force=true", writeSecret, nil)
 	if response.StatusCode != http.StatusNoContent {
-		t.Fatalf("delete status = %d, want 204", response.StatusCode)
+		t.Fatalf("force delete status = %d, want 204", response.StatusCode)
 	}
 	response.Body.Close()
 	response = authRequest(t, http.MethodGet, webServer.URL+"/api/v1/skills/feature-dev:code-reviewer", readSecret, nil)
@@ -451,33 +474,54 @@ func TestSkillsAPIBadInput(t *testing.T) {
 	response.Body.Close()
 }
 
-// TestMCPSkillsTools pins the MCP contract for the skills library.
+// mcpCall posts one JSON-RPC message to the /mcp endpoint and decodes the
+// response payload.
+func mcpCall(t *testing.T, endpoint, token, method string, params any, id int) map[string]any {
+	t.Helper()
+	body := map[string]any{"jsonrpc": "2.0", "id": id, "method": method}
+	if params != nil {
+		body["params"] = params
+	}
+	response := authRequest(t, http.MethodPost, endpoint, token, body)
+	defer response.Body.Close()
+	var payload map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	return payload
+}
+
+// mcpCallTool invokes one MCP tool and returns its text content.
+func mcpCallTool(t *testing.T, endpoint, token, name string, arguments map[string]any, id int) string {
+	t.Helper()
+	return mcpText(mcpCall(t, endpoint, token, "tools/call", map[string]any{"name": name, "arguments": arguments}, id))
+}
+
+// auditEntry returns the newest audit entry for an action, or nil.
+func auditEntry(t *testing.T, server *Server, action string) map[string]any {
+	t.Helper()
+	entries, err := server.store.AuditLog(t.Context(), 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry["action"] == action {
+			return entry
+		}
+	}
+	return nil
+}
+
+// TestMCPSkillsTools pins the MCP contract for the skills library, including
+// the referenced-skill guard and the audit entry a removal records.
 func TestMCPSkillsTools(t *testing.T) {
-	_, webServer, readSecret, writeSecret := newSkillsTestServer(t)
+	server, webServer, readSecret, writeSecret := newSkillsTestServer(t)
 	defer webServer.Close()
+	endpoint := webServer.URL + "/mcp"
 	source := writeSkillSource(t, testSkillMarkdown)
 
-	call := func(token, method string, params any, id int) map[string]any {
-		t.Helper()
-		body := map[string]any{"jsonrpc": "2.0", "id": id, "method": method}
-		if params != nil {
-			body["params"] = params
-		}
-		response := authRequest(t, http.MethodPost, webServer.URL+"/mcp", token, body)
-		defer response.Body.Close()
-		var payload map[string]any
-		if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
-			t.Fatal(err)
-		}
-		return payload
-	}
-	callTool := func(token, name string, arguments map[string]any, id int) string {
-		t.Helper()
-		return mcpText(call(token, "tools/call", map[string]any{"name": name, "arguments": arguments}, id))
-	}
-
 	// tools/list advertises every skills tool.
-	payload := call(readSecret, "tools/list", map[string]any{}, 1)
+	payload := mcpCall(t, endpoint, readSecret, "tools/list", map[string]any{}, 1)
 	tools, _ := payload["result"].(map[string]any)["tools"].([]any)
 	names := map[string]bool{}
 	for _, tool := range tools {
@@ -492,33 +536,117 @@ func TestMCPSkillsTools(t *testing.T) {
 	}
 
 	// list_skills is a read tool and starts empty.
-	if text := callTool(readSecret, "list_skills", map[string]any{}, 2); !strings.Contains(text, `"skills"`) {
+	if text := mcpCallTool(t, endpoint, readSecret, "list_skills", map[string]any{}, 2); !strings.Contains(text, `"skills"`) {
 		t.Fatalf("list_skills = %s", text)
 	}
 
 	// A read token cannot install.
-	if text := callTool(readSecret, "install_skill", map[string]any{"source": source}, 3); !strings.Contains(text, "write-scope") {
+	if text := mcpCallTool(t, endpoint, readSecret, "install_skill", map[string]any{"source": source}, 3); !strings.Contains(text, "write-scope") {
 		t.Fatalf("read-scope install_skill = %s", text)
 	}
 
 	// A write token installs, then reads back through the tools.
-	if text := callTool(writeSecret, "install_skill", map[string]any{"source": source}, 4); !strings.Contains(text, "feature-dev:code-reviewer") {
+	if text := mcpCallTool(t, endpoint, writeSecret, "install_skill", map[string]any{"source": source}, 4); !strings.Contains(text, "feature-dev:code-reviewer") {
 		t.Fatalf("install_skill = %s", text)
 	}
-	listText := callTool(readSecret, "list_skills", map[string]any{}, 5)
+	listText := mcpCallTool(t, endpoint, readSecret, "list_skills", map[string]any{}, 5)
 	if !strings.Contains(listText, "feature-dev:code-reviewer") || !strings.Contains(listText, "used_by") {
 		t.Fatalf("list_skills after install = %s", listText)
 	}
-	if text := callTool(readSecret, "get_skill", map[string]any{"name": "feature-dev:code-reviewer"}, 6); !strings.Contains(text, `"versions"`) {
+	if text := mcpCallTool(t, endpoint, readSecret, "get_skill", map[string]any{"name": "feature-dev:code-reviewer"}, 6); !strings.Contains(text, `"versions"`) {
 		t.Fatalf("get_skill = %s", text)
 	}
 
-	// uninstall_skill removes it.
-	if text := callTool(writeSecret, "uninstall_skill", map[string]any{"name": "feature-dev:code-reviewer"}, 7); !strings.Contains(text, "removed") {
+	// uninstall_skill refuses a skill a shipped review profile still
+	// references, leaving it installed, until force is set.
+	if text := mcpCallTool(t, endpoint, writeSecret, "uninstall_skill", map[string]any{"name": "feature-dev:code-reviewer"}, 7); !strings.Contains(text, "referenced") {
+		t.Fatalf("referenced uninstall_skill = %s", text)
+	}
+	if text := mcpCallTool(t, endpoint, readSecret, "get_skill", map[string]any{"name": "feature-dev:code-reviewer"}, 8); !strings.Contains(text, `"versions"`) {
+		t.Fatalf("get_skill after refused uninstall = %s", text)
+	}
+	if text := mcpCallTool(t, endpoint, writeSecret, "uninstall_skill", map[string]any{"name": "feature-dev:code-reviewer", "force": true}, 9); !strings.Contains(text, "removed") {
 		t.Fatalf("uninstall_skill = %s", text)
 	}
-	if text := callTool(readSecret, "get_skill", map[string]any{"name": "feature-dev:code-reviewer"}, 8); !strings.Contains(text, "not installed") {
+	if text := mcpCallTool(t, endpoint, readSecret, "get_skill", map[string]any{"name": "feature-dev:code-reviewer"}, 10); !strings.Contains(text, "not installed") {
 		t.Fatalf("get_skill after uninstall = %s", text)
+	}
+
+	// The removal is audit-logged under the write token's name.
+	if entry := auditEntry(t, server, "skills.uninstall"); entry == nil || entry["token_name"] != "writer" || entry["detail"] != "feature-dev:code-reviewer" {
+		t.Fatalf("skills.uninstall audit = %#v", entry)
+	}
+}
+
+// TestMCPSkillsUpdatePin covers the MCP update_skill and pin_skill handlers —
+// the activate passthrough, the returned view, the version-required guard — and
+// the audit entry every MCP skills write records under the token's name.
+func TestMCPSkillsUpdatePin(t *testing.T) {
+	server, webServer, readSecret, writeSecret := newSkillsTestServer(t)
+	defer webServer.Close()
+	endpoint := webServer.URL + "/mcp"
+	source := writeSkillSource(t, testSkillMarkdown)
+
+	var installed skills.InstallResult
+	if err := json.Unmarshal([]byte(mcpCallTool(t, endpoint, writeSecret, "install_skill", map[string]any{"source": source}, 1)), &installed); err != nil {
+		t.Fatalf("decode install_skill: %v", err)
+	}
+
+	// update_skill re-resolves the same source and adds nothing.
+	var unchanged skills.InstallResult
+	if err := json.Unmarshal([]byte(mcpCallTool(t, endpoint, writeSecret, "update_skill", map[string]any{"name": installed.Name}, 2)), &unchanged); err != nil {
+		t.Fatalf("decode update_skill: %v", err)
+	}
+	if unchanged.Added || unchanged.Version != installed.Version {
+		t.Fatalf("unchanged update_skill = %#v", unchanged)
+	}
+
+	// A changed source adds a version; activate=true makes it active.
+	updatedBody := strings.Replace(testSkillMarkdown, "Review the diff.", "Review the diff, carefully.", 1)
+	if err := os.WriteFile(filepath.Join(source, "SKILL.md"), []byte(updatedBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var updated skills.InstallResult
+	if err := json.Unmarshal([]byte(mcpCallTool(t, endpoint, writeSecret, "update_skill", map[string]any{"name": installed.Name, "activate": true}, 3)), &updated); err != nil {
+		t.Fatalf("decode update_skill: %v", err)
+	}
+	if !updated.Added || updated.Version == installed.Version || updated.Active != updated.Version {
+		t.Fatalf("update_skill activate = %#v", updated)
+	}
+
+	// pin_skill rolls back to the first version and returns the updated view.
+	var view skillView
+	if err := json.Unmarshal([]byte(mcpCallTool(t, endpoint, writeSecret, "pin_skill", map[string]any{"name": installed.Name, "version": installed.Version}, 4)), &view); err != nil {
+		t.Fatalf("decode pin_skill: %v", err)
+	}
+	if view.Active != installed.Version || len(view.Versions) != 2 {
+		t.Fatalf("pin_skill view = %#v", view)
+	}
+
+	// A pin without a version is refused before the library is touched.
+	if text := mcpCallTool(t, endpoint, writeSecret, "pin_skill", map[string]any{"name": installed.Name}, 5); !strings.Contains(text, "version is required") {
+		t.Fatalf("pin_skill without version = %q", text)
+	}
+
+	// Read scope cannot drive either write.
+	if text := mcpCallTool(t, endpoint, readSecret, "update_skill", map[string]any{"name": installed.Name}, 6); !strings.Contains(text, "write-scope") {
+		t.Fatalf("read-scope update_skill = %q", text)
+	}
+
+	// Every MCP skills write is audit-logged with the token's name and detail.
+	want := map[string]string{
+		"skills.install": installed.Name,
+		"skills.update":  installed.Name,
+		"skills.pin":     installed.Name + " " + installed.Version,
+	}
+	for action, detail := range want {
+		entry := auditEntry(t, server, action)
+		if entry == nil {
+			t.Fatalf("%s was not audit-logged", action)
+		}
+		if entry["token_name"] != "writer" || entry["detail"] != detail {
+			t.Fatalf("%s audit = %#v, want detail %q from writer", action, entry, detail)
+		}
 	}
 }
 

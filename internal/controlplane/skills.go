@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/owainlewis/machinist/internal/skills"
+	review "github.com/owainlewis/machinist/profiles/review"
 )
 
 // The skills endpoints expose the versioned skills library on disk
@@ -154,13 +155,19 @@ func (s *Server) pinSkill(name, version string) error {
 	return library.Pin(name, version)
 }
 
-// uninstallSkill removes a skill and every installed version.
-func (s *Server) uninstallSkill(name string) error {
+// uninstallSkill removes a skill and every installed version. A skill still
+// referenced by a shipped review profile is refused unless force is set, so the
+// API and MCP paths enforce the same guard as the CLI.
+func (s *Server) uninstallSkill(name string, force bool) error {
+	referenced, err := review.SkillReferenced(name)
+	if err != nil {
+		return err
+	}
 	library, err := s.openSkills()
 	if err != nil {
 		return err
 	}
-	return library.Uninstall(name, skills.UninstallOptions{})
+	return library.Uninstall(name, skills.UninstallOptions{Referenced: referenced, Force: force})
 }
 
 // recordSkillAudit writes one audit entry for a skills change made over MCP,
@@ -172,13 +179,17 @@ func (s *Server) recordSkillAudit(ctx context.Context, identity TokenIdentity, a
 }
 
 // writeSkillError maps a library error onto an HTTP response: a skill missing
-// from the library is 404, anything else uses the supplied status.
+// from the library is 404, a skill still referenced by a review profile is 409,
+// anything else uses the supplied status.
 func writeSkillError(response http.ResponseWriter, err error, status int) {
-	if errors.Is(err, skills.ErrNotInstalled) {
+	switch {
+	case errors.Is(err, skills.ErrNotInstalled):
 		writeError(response, http.StatusNotFound, errors.New("skill not found"))
-		return
+	case errors.Is(err, skills.ErrReferenced):
+		writeError(response, http.StatusConflict, err)
+	default:
+		writeError(response, status, err)
 	}
-	writeError(response, status, err)
 }
 
 // skillPathValue returns the validated {name} path value. A name that could not
@@ -348,13 +359,15 @@ func (s *Server) pinSkillHandler(response http.ResponseWriter, request *http.Req
 	writeJSON(response, http.StatusOK, view)
 }
 
-// uninstallSkillHandler serves DELETE /api/v1/skills/{name}.
+// uninstallSkillHandler serves DELETE /api/v1/skills/{name} with an optional
+// ?force=true that removes a skill a review profile still references.
 func (s *Server) uninstallSkillHandler(response http.ResponseWriter, request *http.Request) {
 	name, ok := skillPathValue(response, request)
 	if !ok {
 		return
 	}
-	if err := s.uninstallSkill(name); err != nil {
+	force := request.URL.Query().Get("force") == "true"
+	if err := s.uninstallSkill(name, force); err != nil {
 		writeSkillError(response, err, http.StatusInternalServerError)
 		return
 	}

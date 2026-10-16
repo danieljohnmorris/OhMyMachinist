@@ -103,7 +103,9 @@ var mcpToolList = []mcpTool{
 	{Name: "pin_skill", Description: "Set the active version of an installed skill to any installed version.", InputSchema: mcpSchema(map[string]any{
 		"name": map[string]any{"type": "string"}, "version": map[string]any{"type": "string"},
 	}, "name", "version")},
-	{Name: "uninstall_skill", Description: "Remove a skill and every installed version.", InputSchema: mcpSchema(map[string]any{"name": map[string]any{"type": "string"}}, "name")},
+	{Name: "uninstall_skill", Description: "Remove a skill and every installed version. Set force=true to remove a skill a review profile still references.", InputSchema: mcpSchema(map[string]any{
+		"name": map[string]any{"type": "string"}, "force": map[string]any{"type": "boolean"},
+	}, "name")},
 }
 
 // handleMCP serves the streamable HTTP MCP transport.
@@ -424,7 +426,8 @@ func (s *Server) invokeMCPTool(ctx context.Context, identity TokenIdentity, name
 		return view, nil
 	case "uninstall_skill":
 		var input struct {
-			Name string `json:"name"`
+			Name  string `json:"name"`
+			Force bool   `json:"force"`
 		}
 		if err := args(&input); err != nil {
 			return nil, err
@@ -432,7 +435,7 @@ func (s *Server) invokeMCPTool(ctx context.Context, identity TokenIdentity, name
 		if _, err := skills.Key(input.Name); err != nil {
 			return nil, errors.New("skill name is not usable")
 		}
-		if err := s.uninstallSkill(input.Name); err != nil {
+		if err := s.uninstallSkill(input.Name, input.Force); err != nil {
 			return nil, err
 		}
 		s.recordSkillAudit(ctx, identity, "skills.uninstall", input.Name)

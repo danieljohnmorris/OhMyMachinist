@@ -126,6 +126,11 @@ type InstallResult struct {
 // wrap it with the skill name and use errors.Is to tell it from a read error.
 var ErrNotInstalled = errors.New("not installed")
 
+// ErrReferenced reports that a skill is still referenced by a review profile
+// and was therefore not removed. Callers wrap it with the skill name and use
+// errors.Is to answer with a conflict rather than a server error.
+var ErrReferenced = errors.New("referenced by a review profile")
+
 // UninstallOptions controls whether a referenced skill may be removed.
 type UninstallOptions struct {
 	// Referenced is set by the caller when a review profile still uses the
@@ -278,7 +283,7 @@ func (l *Library) Uninstall(name string, options UninstallOptions) error {
 		return err
 	}
 	if options.Referenced && !options.Force {
-		return fmt.Errorf("skill %q is referenced by a review profile; pass force to remove it", manifest.Name)
+		return fmt.Errorf("skill %q is %w; pass force to remove it", manifest.Name, ErrReferenced)
 	}
 	return os.RemoveAll(dir)
 }

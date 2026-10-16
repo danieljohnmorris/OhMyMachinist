@@ -83,7 +83,7 @@ they reach the log.
 | POST | `/api/v1/skills/upload` | Install an uploaded skill. Multipart form with one `file` part holding a `.zip` archive or a bare `SKILL.md`. |
 | POST | `/api/v1/skills/{name}/update` | Re-resolve the recorded source and add the new version. Body: `{"activate": true}` (optional). |
 | POST | `/api/v1/skills/{name}/pin` | Set the active version. Body: `{"version": "…"}`. Returns the updated skill. |
-| DELETE | `/api/v1/skills/{name}` | Remove a skill and every installed version. |
+| DELETE | `/api/v1/skills/{name}` | Remove a skill and every installed version. Add `?force=true` to remove a skill a shipped review profile still references. |
 
 ### Worker endpoints (worker token)
 
@@ -159,6 +159,10 @@ always present and currently empty; reference tracking lands with the skills
 configuration work. Recorded sources and manifests never contain credentials, so
 no response returns a token or a token-bearing URL. Every install, update, pin
 and removal is audit-logged with the token's name.
+
+A removal is refused with `409` while a shipped review profile still references
+the skill; pass `?force=true` to remove it anyway. The CLI `--force` flag and the
+MCP `force` argument carry the same override.
 
 A skill installed through `/api/v1/skills/upload` records its source as the
 sentinel `upload:<name>` rather than the staging path, which the server deletes
