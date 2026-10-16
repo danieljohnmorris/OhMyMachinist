@@ -1,0 +1,22 @@
+[Unit]
+Description=Plane webhook intake for Machinist (Tailscale-only, 100.70.205.115:7340)
+After=network-online.target tailscaled.service machinist-control.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=machinist
+Group=machinist
+WorkingDirectory=/home/machinist
+Environment=HOME=/home/machinist
+Environment=PATH=/home/machinist/.local/share/mise/shims:/home/machinist/.local/bin:/usr/local/bin:/usr/bin
+NoNewPrivileges=yes
+PrivateTmp=yes
+EnvironmentFile=-/home/machinist/.machinist/secrets/plane-intake.env
+Environment=PLANE_INTAKE_LISTEN=100.70.205.115:7340
+ExecStart=/usr/bin/python3 /home/machinist/.local/bin/plane-intake.py serve
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

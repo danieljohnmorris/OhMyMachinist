@@ -51,6 +51,7 @@ All requests and responses are `application/json`. Errors are
 | GET | `/api/v1/review-default-profile` | The global default profile name. |
 | GET | `/api/v1/skills` | Installed skills with their versions and `used_by` references. |
 | GET | `/api/v1/skills/{name}` | One installed skill with every version. |
+| GET | `/api/v1/plane/intake` | Plane intake settings, shadow-mode decisions and imported script jobs. |
 
 `GET /api/v1/status` (board state: jobs, workers, triggers, plus the CSRF
 token) and `GET /api/v1/catalog` and `GET /api/v1/definitions` remain open so

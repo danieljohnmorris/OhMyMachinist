@@ -215,8 +215,156 @@ export function SettingsPage({ repositories = [], csrfToken }) {
       {!loaded && <QuietState title={project ? "Loading review profile" : "No repositories yet"} description={project ? "Fetching the resolved profile for this project." : "Register a worker repository to edit its review profile."} role="status" />}
     </Card>
     <ProjectSkillsCard project={project} csrfToken={csrfToken} />
+    <PlaneIntakeCard csrfToken={csrfToken} project={project} />
     <TokensCard csrfToken={csrfToken} />
   </div>;
+}
+
+// PlaneIntakeCard edits the built-in Plane intake configuration. Every value
+// is a "plane.*" setting read at request time by the intake, so changes apply
+// to the next webhook, poll or sync without a restart.
+const PLANE_TEXT_FIELDS = [
+  ["plane.trigger_label", "Trigger label", "factory"],
+  ["plane.approve_label", "Approve label", "approved"],
+  ["plane.command", "Command", "build-pr"],
+  ["plane.default_repo", "Default repository", ""],
+  ["plane.ui_url", "Machinist UI URL", ""],
+];
+
+const PLANE_TOGGLE_FIELDS = [
+  ["plane.auto_submit", "Auto-submit", "Queue a job when a ticket becomes eligible"],
+  ["plane.start_comment", "Start comment", "Post a run link on the ticket when a job is queued"],
+  ["plane.shadow", "Shadow mode", "Evaluate every event and record decisions without acting"],
+];
+
+const PLANE_JSON_FIELDS = [
+  ["plane.repositories", "Project to repository map (JSON)"],
+  ["plane.supervisors", "Ticket supervisor map (JSON)"],
+  ["plane.prompt_template", "Prompt template"],
+];
+
+function PlaneIntakeCard({ csrfToken, project = "" }) {
+  const [values, setValues] = useState(null);
+  const [raw, setRaw] = useState({});
+  const [shadow, setShadow] = useState([]);
+  const [scriptJobs, setScriptJobs] = useState([]);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [busy, setBusy] = useState(false);
+  const projectPromptKey = project ? `plane.prompt_template.${project}` : "";
+  const [projectPrompt, setProjectPrompt] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch("/api/v1/plane/intake", { headers: { Accept: "application/json", "X-Machinist-CSRF": csrfToken }, signal: controller.signal })
+      .then((response) => response.json().then((body) => {
+        if (!response.ok) throw new Error(body.error || `Plane intake request failed (${response.status})`);
+        const settings = body.settings && typeof body.settings === "object" ? body.settings : {};
+        const next = {};
+        for (const [key] of PLANE_TEXT_FIELDS) next[key] = settings[key] || "";
+        for (const [key] of PLANE_TOGGLE_FIELDS) next[key] = settings[key] || "1";
+        for (const [key] of PLANE_JSON_FIELDS) next[key] = settings[key] || "";
+        setValues(next);
+        setRaw(settings);
+        setShadow(Array.isArray(body.shadow_decisions) ? body.shadow_decisions : []);
+        setScriptJobs(Array.isArray(body.script_jobs) ? body.script_jobs : []);
+      }))
+      .catch((loadError) => { if (loadError.name !== "AbortError") setError(loadError.message); });
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    setProjectPrompt(projectPromptKey ? raw[projectPromptKey] || "" : "");
+  }, [projectPromptKey, raw]);
+
+  const update = (key, value) => setValues((current) => ({ ...current, [key]: value }));
+
+  const save = async () => {
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      for (const [key] of [...PLANE_TEXT_FIELDS, ...PLANE_TOGGLE_FIELDS, ...PLANE_JSON_FIELDS]) {
+        await saveSetting(key, values[key] || "", csrfToken);
+      }
+      if (projectPromptKey) await saveSetting(projectPromptKey, projectPrompt, csrfToken);
+      setNotice("Saved. Intake reads these settings on the next webhook, poll or sync.");
+    } catch (saveError) {
+      setError(saveError.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return <Card className="p-4 sm:p-5">
+    <div className="space-y-1">
+      <h2 className="font-medium">Plane intake</h2>
+      <p className="text-sm text-muted-foreground">Webhook and poll intake for Plane tickets. Shadow mode records what intake would do without creating jobs, patching tickets or writing alerts.</p>
+    </div>
+    {error && <div role="alert" className="mt-3 whitespace-pre-wrap rounded-md border border-danger/35 bg-danger/10 px-3 py-2 text-sm text-danger">{error}</div>}
+    {notice && <div role="status" className="mt-3 rounded-md border border-success/35 bg-success/10 px-3 py-2 text-sm text-success">{notice}</div>}
+    {!values ? <QuietState title="Loading Plane intake" description="Fetching the stored intake settings." role="status" />
+      : <>
+        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+          {PLANE_TEXT_FIELDS.map(([key, label, placeholder]) => <label key={key} className="space-y-1">
+            <span className="field-label">{label}</span>
+            <input className="field-control" value={values[key]} placeholder={placeholder} onChange={(event) => update(key, event.target.value)} aria-label={label} />
+          </label>)}
+        </div>
+        <div className="mt-4 flex flex-wrap gap-4">
+          {PLANE_TOGGLE_FIELDS.map(([key, label, hint]) => <label key={key} className="flex items-center gap-2" title={hint}>
+            <input type="checkbox" className="size-4 accent-primary" checked={values[key] === "1"} onChange={(event) => update(key, event.target.checked ? "1" : "0")} aria-label={label} />
+            <span className="text-sm">{label}</span>
+          </label>)}
+        </div>
+        <div className="mt-4 grid gap-3">
+          {PLANE_JSON_FIELDS.filter(([key]) => key !== "plane.prompt_template").map(([key, label]) => <label key={key} className="space-y-1">
+            <span className="field-label">{label}</span>
+            <textarea className="field-control min-h-24 resize-y font-mono text-xs" value={values[key]} spellCheck="false" onChange={(event) => update(key, event.target.value)} aria-label={label} />
+          </label>)}
+          {project && <label className="space-y-1">
+            <span className="field-label">Prompt template for {project} (blank uses the template above)</span>
+            <textarea className="field-control min-h-24 resize-y font-mono text-xs" value={projectPrompt} spellCheck="false" onChange={(event) => setProjectPrompt(event.target.value)} aria-label={`Prompt template for ${project}`} />
+          </label>}
+          <label className="space-y-1">
+            <span className="field-label">Prompt template (all projects)</span>
+            <textarea className="field-control min-h-24 resize-y font-mono text-xs" value={values["plane.prompt_template"]} spellCheck="false" onChange={(event) => update("plane.prompt_template", event.target.value)} aria-label="Prompt template" />
+          </label>
+        </div>
+        <div className="mt-3">
+          <Button disabled={busy} onClick={save}>{busy ? "Saving…" : "Save intake settings"}</Button>
+        </div>
+        <div className="mt-4 space-y-3">
+          <div>
+            <h3 className="text-sm font-medium">Shadow decisions</h3>
+            <p className="text-xs text-muted-foreground">What intake would create, patch and alert on, newest first. Compare against the imported script jobs below for the cutover report.</p>
+          </div>
+          {shadow.length === 0 ? <p className="text-sm text-muted-foreground">No shadow decisions recorded yet.</p>
+            : <div className="overflow-x-auto"><table className="w-full min-w-[28rem] border-collapse text-sm">
+              <thead><tr className="border-b border-border text-left text-xs uppercase tracking-wide text-muted-foreground">
+                <th className="py-2 pr-4 font-medium">Kind</th>
+                <th className="py-2 pr-4 font-medium">Ticket</th>
+                <th className="py-2 pr-4 font-medium">Decision</th>
+                <th className="py-2 font-medium">At</th>
+              </tr></thead>
+              <tbody>
+                {shadow.map((decision) => <tr key={decision.id} className="border-b border-border last:border-b-0">
+                  <td className="py-2 pr-4">{decision.kind}</td>
+                  <td className="py-2 pr-4 font-mono text-xs">{decision.key}</td>
+                  <td className="py-2 pr-4 break-all font-mono text-xs">{decision.decision}</td>
+                  <td className="py-2">{decision.at}</td>
+                </tr>)}
+              </tbody>
+            </table></div>}
+        </div>
+        {scriptJobs.length > 0 && <div className="mt-4">
+          <h3 className="text-sm font-medium">Imported script jobs</h3>
+          <ul className="mt-1 space-y-1 text-xs text-muted-foreground">
+            {scriptJobs.map((job) => <li key={`${job.key}:${job.decision}`} className="font-mono">{job.key} — {job.decision}</li>)}
+          </ul>
+        </div>}
+      </>}
+  </Card>;
 }
 
 // ProjectSkillsCard edits the ordered skills list for one project, stored in the

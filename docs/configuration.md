@@ -132,3 +132,62 @@ Plane webhook at `POST /api/v1/webhooks/issues` (HMAC-SHA256 in the
 `X-Signature` header) to resolve cards immediately on state changes. The
 shared secret comes from `issue_sources.webhook_secret` or the
 `MACHINIST_ISSUE_WEBHOOK_SECRET` environment variable.
+
+## Plane intake
+
+Machinist runs Plane intake itself: a webhook endpoint and a poll fallback that
+stands down while webhooks are arriving. The same behaviour used to live in the
+retired `plane-intake.py` (archived under `contrib/legacy/plane-intake/`). Every
+value below is a default that an editable `plane.*` setting overrides, so an
+empty `[plane]` table keeps working:
+
+```toml
+[plane]
+url = "https://plane.danieljohnmorris.com"
+workspace = "dan"
+trigger_label = "factory"
+approve_label = "approved"
+command = "build-pr"
+default_repo = ""            # unmapped projects get no job when empty
+ui_url = "http://127.0.0.1:7331"
+shadow = true                # evaluate and record without acting
+auto_submit = true
+start_comment = true
+sync_since = "2026-10-10T10:48:00Z"
+poll_every = "2m"
+sync_every = "20s"
+repositories = { p1 = "OhMyMachinist" }
+identifiers = { p1 = "MACH" }
+supervisors = { OMM = "Om", _default = "LocalAI" }
+```
+
+Secrets stay in the environment: `PLANE_API_KEY` for the REST API and
+`PLANE_WEBHOOK_SECRET` (or `plane.webhook_secret`) for the HMAC signature on
+`POST /api/v1/webhooks/issues`. The endpoint accepts CE v1 (`event = "issue"`,
+action create/update) and v2 (`workitem.created`/`workitem.updated`) deliveries
+in the `X-Plane-Signature` header, tolerating a re-serialised body.
+
+The intake deduplicates per ticket: an edit to a ticket with a queued job
+rewrites that job's spec, an edit while a job is running is ignored, and only a
+ticket without active work queues a new job. Each job carries the ticket key,
+its attempt chain, and the intake source, Plane delivery id and spec hash shown
+on the run page.
+
+Ticket state syncs back from runs: a start moves the ticket to `In Progress`
+from backlog/unstarted and drops the `failed` label; a succeeded run with an
+opened pull request moves it to `In Review`; a failed run adds the `failed`
+label. Done and Cancelled tickets are never touched. A run that opens a pull
+request writes a `pr-<KEY>-<job>.json` alert for the ticket's supervisor.
+
+Editable settings (`plane.trigger_label`, `plane.approve_label`,
+`plane.command`, `plane.default_repo`, `plane.ui_url`, `plane.auto_submit`,
+`plane.start_comment`, `plane.shadow`, `plane.repositories`,
+`plane.supervisors`, `plane.prompt_template`, …) are read on the next webhook,
+poll or sync. Import the retired JSON state on first start with
+`machinist plane poll` or by starting the server: `plane-repos.json`,
+`plane-supervisors.json`, `plane-jobs/.seen.json`,
+`plane-jobs/.state-sync.json` and `alerts/.plane-states.json` become database
+rows. `GET /api/v1/plane/intake` serves the settings plus the shadow-mode
+comparison report, and `machinist plane poll | sync | file F` runs one pass.
+When the intake webhook is mounted, its `X-Plane-Delivery` header is recorded
+on every job.

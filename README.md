@@ -30,6 +30,7 @@ It keeps the upstream control plane, worker model and executors. Everything belo
 **Intake**
 
 - Plane intake by label poll or webhook, with project-to-repository mapping
+- Built-in intake with an approve bridge, run-to-ticket state sync, supervisor alerts and a shadow mode for cutover
 - One job per ticket (deduplicated), with Plane and PR links on every run
 - Tickets resolve automatically when the ticket or its linked PR completes
 
