@@ -84,6 +84,7 @@ type submitRequest struct {
 	Command    string `json:"command"`
 	Model      string `json:"model"`
 	Project    string `json:"project"`
+	JobType    string `json:"job_type"`
 }
 
 type commandDefinitionResponse struct {
@@ -357,6 +358,11 @@ func (s *Server) routes() (http.Handler, error) {
 	mux.HandleFunc("GET /api/v1/runs/{id}", s.authorizeRead(s.getRunHandler))
 	mux.HandleFunc("GET /api/v1/settings", s.authorizeRead(s.getSettingsHandler))
 	mux.HandleFunc("PUT /api/v1/settings/{key}", s.authorizeWrite(s.putSettingHandler))
+	mux.HandleFunc("GET /api/v1/workflows", s.authorizeRead(s.getWorkflowHandler))
+	mux.HandleFunc("PUT /api/v1/workflows", s.authorizeWrite(s.putWorkflowHandler))
+	mux.HandleFunc("GET /api/v1/job-types", s.authorizeRead(s.getJobTypesHandler))
+	mux.HandleFunc("PUT /api/v1/job-types", s.authorizeWrite(s.putJobTypeHandler))
+	mux.HandleFunc("DELETE /api/v1/job-types", s.authorizeWrite(s.deleteJobTypeHandler))
 	mux.HandleFunc("GET /api/v1/tokens", s.authorizeTokenList(s.listTokensHandler))
 	mux.HandleFunc("POST /api/v1/tokens", s.authorizeWrite(s.createTokenHandler))
 	mux.HandleFunc("DELETE /api/v1/tokens/{id}", s.authorizeWrite(s.revokeTokenHandler))
@@ -513,6 +519,16 @@ func (s *Server) queueJob(ctx context.Context, input submitRequest, identity Tok
 	if projectErr != nil {
 		return bad(projectErr)
 	}
+	input.JobType = strings.TrimSpace(input.JobType)
+	if input.JobType != "" {
+		config, err := s.store.ProjectWorkflowConfig(ctx, input.Repository)
+		if err != nil {
+			return "", err
+		}
+		if _, ok := config.Type(input.JobType); !ok {
+			return bad(fmt.Errorf("job type %q is not configured for %q", input.JobType, input.Repository))
+		}
+	}
 	if input.Workflow != "" {
 		if input.Command != "" {
 			return bad(errors.New("choose either workflow or command"))
@@ -540,6 +556,11 @@ func (s *Server) queueJob(ctx context.Context, input submitRequest, identity Tok
 		if err != nil {
 			return "", err
 		}
+		if input.JobType != "" {
+			if err := s.store.SetJobType(ctx, id, input.JobType); err != nil {
+				return "", err
+			}
+		}
 		if err := s.store.RecordAudit(ctx, identity, "jobs.create", input.Repository+" "+input.Workflow); err != nil {
 			log.Printf("audit jobs.create: %v", err)
 		}
@@ -560,7 +581,7 @@ func (s *Server) queueJob(ctx context.Context, input submitRequest, identity Tok
 		return bad(err)
 	}
 	command.Model = input.Model
-	jobID, err := s.store.CreateJobWithOptions(ctx, input.Prompt, input.Repository, input.Command, command, CreateJobOptions{Title: input.Title, Project: project})
+	jobID, err := s.store.CreateJobWithOptions(ctx, input.Prompt, input.Repository, input.Command, command, CreateJobOptions{Title: input.Title, Project: project, JobType: input.JobType})
 	if err != nil {
 		return "", err
 	}

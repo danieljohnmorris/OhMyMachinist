@@ -42,10 +42,15 @@ scope.
 | `list_review_profiles` | read | — | Stored review profiles. |
 | `get_settings` | read | — | All settings key/value pairs. |
 | `get_setting` | read | `key` | One setting; errors if missing. |
-| `queue_job` | write | `repository` (required), `command?`, `workflow?`, `title?`, `spec?`, `source_url?`, `prompt?`, `model?`, `project?` | Queue a job; returns the job id. |
+| `workflows_get` | read | `project` | A project's workflow config: default type, label mappings and job types with ordered stages. |
+| `job_types_list` | read | `project` | A project's job types and default type. |
+| `queue_job` | write | `repository` (required), `command?`, `workflow?`, `title?`, `spec?`, `source_url?`, `prompt?`, `model?`, `project?`, `job_type?` | Queue a job; returns the job id. |
 | `cancel_job` | write | `job_id` | Cancel the job and its latest run, or a queued job that has no runs yet. |
 | `requeue_job` | write | `job_id`, `previous_process_stopped?` | Retry a failed/blocked/interrupted/cancelled job. |
 | `set_setting` | write | `key`, `value` | Write one settings key/value pair. |
+| `workflows_put` | write | `project`, `config` | Replace a project's workflow config (validated). |
+| `job_types_put` | write | `project`, `name`, `stages` | Add or replace one job type. |
+| `job_types_delete` | write | `project`, `name` | Delete one job type. |
 
 Tool results are JSON rendered as text content; failures return
 `isError: true` with the reason. Every change made through the tools is

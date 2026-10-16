@@ -28,6 +28,9 @@ type JobScreenshot struct {
 
 type JobMetadata struct {
 	Project       string          `json:"project,omitempty"`
+	JobType       string          `json:"job_type,omitempty"`
+	Stage         string          `json:"stage,omitempty"`
+	ReviewRound   int             `json:"review_round,omitempty"`
 	IssueURL      string          `json:"issue_url,omitempty"`
 	Branch        string          `json:"branch,omitempty"`
 	PRURL         string          `json:"pr_url,omitempty"`
@@ -90,9 +93,18 @@ func NormalizeJobMetadata(raw map[string]any) (*JobMetadata, error) {
 	if metadata.Project != "" && !projectKeyPattern.MatchString(metadata.Project) {
 		return nil, fmt.Errorf("%w: project must match [A-Z][A-Z0-9]{1,9}", ErrJobMetadataInvalid)
 	}
+	if metadata.JobType != "" && !validSettingKey(metadata.JobType) {
+		return nil, fmt.Errorf("%w: job_type must be letters, digits, dash or underscore", ErrJobMetadataInvalid)
+	}
+	if metadata.Stage != "" && !validSettingKey(metadata.Stage) {
+		return nil, fmt.Errorf("%w: stage must be letters, digits, dash or underscore", ErrJobMetadataInvalid)
+	}
+	if metadata.ReviewRound < 0 || metadata.ReviewRound > 100 {
+		return nil, fmt.Errorf("%w: review_round must be between 0 and 100", ErrJobMetadataInvalid)
+	}
 	if metadata.IssueURL == "" && metadata.Branch == "" && metadata.PRURL == "" && metadata.PreviewURL == "" &&
 		metadata.ReviewVerdict == "" && metadata.ReviewSummary == "" && len(metadata.Screenshots) == 0 {
-		if metadata.Project == "" {
+		if metadata.Project == "" && metadata.JobType == "" && metadata.Stage == "" && metadata.ReviewRound == 0 {
 			return nil, nil
 		}
 	}
@@ -113,22 +125,27 @@ func ResolveProjectKey(explicit, title string) (string, error) {
 }
 
 func saveJobMetadata(ctx context.Context, tx *sql.Tx, jobID string, raw map[string]any) error {
-	var existingProject string
+	var existingProject, existingJobType string
 	var existing string
 	err := tx.QueryRowContext(ctx, `SELECT metadata FROM job_metadata WHERE job_id=?`, jobID).Scan(&existing)
 	if err == nil {
 		var prior JobMetadata
 		if decodeErr := json.Unmarshal([]byte(existing), &prior); decodeErr == nil {
 			existingProject = prior.Project
+			existingJobType = prior.JobType
 		}
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	if existingProject != "" && (raw == nil || raw["project"] == nil) {
-		if raw == nil {
-			raw = map[string]any{}
-		}
+	if raw == nil {
+		raw = map[string]any{}
+	}
+	if existingProject != "" && raw["project"] == nil {
 		raw["project"] = existingProject
+	}
+	// The job type is chosen once at intake; stage results must not drop it.
+	if existingJobType != "" && raw["job_type"] == nil {
+		raw["job_type"] = existingJobType
 	}
 	metadata, err := NormalizeJobMetadata(raw)
 	if err != nil || metadata == nil {

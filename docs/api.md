@@ -49,6 +49,15 @@ All requests and responses are `application/json`. Errors are
 | GET | `/api/v1/review-profiles` | Stored review profiles. |
 | GET | `/api/v1/review-profile?project=X` | Resolved review profile for a project. |
 | GET | `/api/v1/review-default-profile` | The global default profile name. |
+| GET | `/api/v1/workflows?project=X` | A project's workflow config: `default_type`, `label_mappings`, and job types with their ordered stages. Includes `default: true` when the project has not saved its own. |
+| GET | `/api/v1/job-types?project=X` | A project's job types and default type only. |
+
+`GET /api/v1/jobs` and `GET /api/v1/jobs/{id}` attach a derived `stage` strip
+(`{job_type, current, round, attention, stages:[{id,name,state,round}]}`) and a
+`job_type` to every job, computed from the job state, the stage the executor
+last reported and the ticket/PR resolution. A succeeded pull-request job waits
+in UAT; it only reaches the finished stage when the PR merges or the Plane
+ticket is Done.
 
 `GET /api/v1/status` (board state: jobs, workers, triggers, plus the CSRF
 token) and `GET /api/v1/catalog` and `GET /api/v1/definitions` remain open so
@@ -77,6 +86,17 @@ they reach the log.
 | PUT | `/api/v1/review-profiles` | Save a library review profile. |
 | PUT | `/api/v1/review-profile` | Save a project review profile. |
 | PUT | `/api/v1/review-default-profile` | Set the global default profile name. |
+| PUT | `/api/v1/workflows?project=X` | Replace a project's workflow config. Body is the config object (`default_type`, `label_mappings`, `types`). Validated before saving and audit-logged as `workflows.write`. |
+| PUT | `/api/v1/job-types?project=X` | Add or replace one job type. Body: `{"name": "…", "stages": [...]}`. |
+| DELETE | `/api/v1/job-types?project=X&name=Y` | Delete one job type (the last type cannot be removed). |
+
+A stage is `{"id","name","kind","agent","model","session","human_approval","review_profile"}`.
+`kind` is one of `queued`, `planning`, `coding`, `review`, `uat`, `apply`,
+`verify`, `approve`, `finished`; `session` is `continue` (same agent session)
+or `fresh` (an independent one). Shipped templates: `web_pr` (Queued, Planning,
+Coding, PR review, UAT, Finished) and `config_ops` (Queued, Planning, Apply,
+Verify, Approve, Finished, no pull request), with `type:config → config_ops`
+mapped by default. `POST /api/v1/jobs` accepts an optional `job_type`.
 
 ### Worker endpoints (worker token)
 

@@ -15,6 +15,7 @@ import { cn } from "@/lib/utils";
 import { routeFromHash } from "@/routes";
 import { attemptTime, boardCardTimestamp, boardColumns, boardDateFilters, boardFiltersFromHash, boardHash, canCancelJob, collapseIssueAttempts, collapseJobsByTicket, currentRun, filterBoardJobs, filterJobsByDate, groupEntriesByBoardColumn, groupJobsByBoardColumn, jobCounts, jobDisplayTitle, resolutionLabel } from "@/runs-board";
 import { groupEntriesByProject, groupJobsByProject } from "@/project";
+import { stageStripItems } from "@/workflow-stages";
 import { concurrencyLabel } from "@/concurrency";
 import { createStatusLoader } from "@/status-loader";
 import { TriggersPage } from "@/triggers";
@@ -354,6 +355,25 @@ function RunColumn({ column, entries, idPrefix, onCancelJob }) {
   </section>;
 }
 
+// StageStrip renders a job's configured workflow stages: completed ticked, the
+// current stage highlighted, and a review round when the built-in review is
+// running.
+function StageStrip({ stage }) {
+  const items = stageStripItems(stage);
+  if (!items.length) return null;
+  const label = items.map((item) => `${item.label}${item.tick ? " done" : ""}`).join(", ");
+  return <ol className="flex flex-wrap items-center gap-x-1 gap-y-0.5 text-[11px] leading-4" aria-label={`Stages: ${label}`}>
+    {items.map((item, index) => <li key={item.id} className="flex items-center gap-1">
+      {index > 0 && <span aria-hidden="true" className="text-muted-foreground/50">·</span>}
+      <span className={cn("whitespace-nowrap",
+        item.tick && "text-success",
+        item.current && "font-medium text-foreground",
+        item.attention && "font-medium text-danger",
+        !item.tick && !item.current && !item.attention && "text-muted-foreground/70")}>{item.label}{item.tick ? " ✓" : ""}</span>
+    </li>)}
+  </ol>;
+}
+
 function attemptBadges(job) {
   if (!job.attempt_count || job.attempt_count < 2) return null;
   return <div className="flex flex-wrap items-center gap-1.5">
@@ -371,6 +391,7 @@ function RunCard({ job, priors = [], onCancelJob }) {
   return <Card className="overflow-hidden"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="block min-w-0 space-y-3 p-4 transition hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50" aria-label={`Open task ${title}`}>
       <p className="break-words text-sm font-medium leading-5" title={title}>{title}</p>
       <p className="text-xs text-muted-foreground">{job.repository} · {friendlyName(run?.command || job.command)}</p>
+      <StageStrip stage={job.stage} />
       <div className="flex flex-wrap items-center justify-between gap-2">
         <State value={job.state} />
         <time className="text-xs text-muted-foreground" dateTime={timestamp} title={timestamp ? new Date(timestamp).toLocaleString() : undefined}>{relativeTime(timestamp)}</time>
@@ -387,7 +408,7 @@ function RunRow({ job, onCancelJob }) {
   const title=jobDisplayTitle(job);
   const run=currentRun(job);
   const resolution=resolutionLabel(job);
-  return <article className="border-b border-border last:border-b-0"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="flex items-center justify-between gap-4 px-5 py-4 hover:bg-muted/35" aria-label={`Open task ${title}`}><div className="min-w-0"><p className="break-words text-sm font-medium" title={title}>{title}</p><p className="mt-1 text-xs text-muted-foreground">{job.repository} · {friendlyName(run?.command || job.command)}</p>{resolution && <p className="mt-1 text-xs text-success">{resolution}</p>}{attemptBadges(job)}</div><div className="flex shrink-0 flex-col items-end gap-1"><State value={job.state} /><time className="text-xs text-muted-foreground" dateTime={job.created_at}>{relativeTime(job.created_at)}</time>{canCancelJob(job) && <Button size="sm" variant="outline" aria-label={`Cancel task ${title}`} onClick={() => onCancelJob(job)}>Cancel</Button>}</div></a></article>;
+  return <article className="border-b border-border last:border-b-0"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="flex items-center justify-between gap-4 px-5 py-4 hover:bg-muted/35" aria-label={`Open task ${title}`}><div className="min-w-0"><p className="break-words text-sm font-medium" title={title}>{title}</p><p className="mt-1 text-xs text-muted-foreground">{job.repository} · {friendlyName(run?.command || job.command)}</p><StageStrip stage={job.stage} />{resolution && <p className="mt-1 text-xs text-success">{resolution}</p>}{attemptBadges(job)}</div><div className="flex shrink-0 flex-col items-end gap-1"><State value={job.state} /><time className="text-xs text-muted-foreground" dateTime={job.created_at}>{relativeTime(job.created_at)}</time>{canCancelJob(job) && <Button size="sm" variant="outline" aria-label={`Cancel task ${title}`} onClick={() => onCancelJob(job)}>Cancel</Button>}</div></a></article>;
 }
 
 function EmptyRuns({ filtered, openComposer }) {

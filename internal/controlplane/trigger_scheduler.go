@@ -108,11 +108,20 @@ func (s *Server) admitIssue(ctx context.Context, trigger config.ResolvedTrigger,
 	if subject == "" {
 		subject = issue.Key
 	}
+	// The card's job type comes from a Plane label (e.g. type:config) or the
+	// project default, resolved once here so a later config change does not
+	// move an existing card.
+	jobType := ""
+	if workflowConfig, configErr := s.store.ProjectWorkflowConfig(ctx, trigger.Repository); configErr == nil {
+		if resolved, resolveErr := ResolveJobType(workflowConfig, issue.Labels, ""); resolveErr == nil {
+			jobType = resolved.Name
+		}
+	}
 	admission := TriggerAdmission{
 		Identity: trigger.Identity, Family: trigger.Family, ConfigSignature: trigger.Signature,
 		ConfigGeneration: generation, OccurrenceKey: subject, Subject: subject, Title: title, ScheduledAt: s.now().UTC(),
 		Prompt: prompt, Repository: trigger.Repository, SelectionName: trigger.SelectionName,
-		Command: command, Task: &task, IssueKey: issue.Key,
+		Command: command, Task: &task, IssueKey: issue.Key, JobType: jobType,
 	}
 	jobID, state, found, err := s.store.ActiveTriggerJob(ctx, subject, issue.Key)
 	if err != nil {

@@ -46,7 +46,9 @@ type Store struct {
 type Job struct {
 	Task             *protocol.Task    `json:"task,omitempty"`
 	Workflow         *WorkflowProgress `json:"workflow,omitempty"`
+	Stage            *StageProgress    `json:"stage,omitempty"`
 	Metadata         *JobMetadata      `json:"metadata,omitempty"`
+	JobType          string            `json:"job_type,omitempty"`
 	ID               string            `json:"id"`
 	Title            string            `json:"title,omitempty"`
 	Prompt           string            `json:"prompt"`
@@ -143,6 +145,7 @@ type TriggerAdmission struct {
 	RequestActor      string
 	RequestLabel      string
 	IssueKey          string
+	JobType           string
 }
 
 type TriggerStatus struct {
@@ -184,6 +187,7 @@ type RunOutput struct {
 type CreateJobOptions struct {
 	Title    string
 	Project  string
+	JobType  string
 	IssueKey string
 }
 
@@ -216,7 +220,7 @@ func OpenStore(path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) initialize(ctx context.Context) error {
-	const schemaVersion = 8
+	const schemaVersion = 9
 	var version int
 	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		return fmt.Errorf("read database schema version: %w", err)
@@ -334,7 +338,7 @@ END;`
 			return fmt.Errorf("upgrade database schema to version 8: %w", err)
 		}
 	}
-	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+jobMetadataSchema+"PRAGMA user_version=8;")
+	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+jobMetadataSchema+projectWorkflowSchema+"PRAGMA user_version=9;")
 	return err
 }
 
@@ -471,8 +475,8 @@ func (s *Store) CreateJobWithOptions(ctx context.Context, prompt, repository, na
 	if _, err := tx.ExecContext(ctx, `INSERT INTO jobs(id,title,prompt,repository,command,issue_key,state,created_at,updated_at) VALUES(?,?,?,?,?,?,'queued',?,?)`, jobID, options.Title, prompt, repository, name, options.IssueKey, now, now); err != nil {
 		return "", fmt.Errorf("insert job: %w", err)
 	}
-	if options.Project != "" {
-		if err := saveJobMetadata(ctx, tx, jobID, map[string]any{"project": options.Project}); err != nil {
+	if options.Project != "" || options.JobType != "" {
+		if err := saveJobMetadata(ctx, tx, jobID, map[string]any{"project": options.Project, "job_type": options.JobType}); err != nil {
 			return "", fmt.Errorf("insert job metadata: %w", err)
 		}
 	}
@@ -723,6 +727,11 @@ WHERE github_trigger_requests.state='pending'`, admission.Identity, admission.Oc
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET title=? WHERE id=?`, admission.Title, jobID); err != nil {
 		return "", false, fmt.Errorf("insert triggered job title: %w", err)
+	}
+	if admission.JobType != "" {
+		if err := saveJobMetadata(ctx, tx, jobID, map[string]any{"job_type": admission.JobType}); err != nil {
+			return "", false, fmt.Errorf("insert triggered job metadata: %w", err)
+		}
 	}
 	previous, err := s.linkPriorAttempt(ctx, tx, jobID, admission.Subject, admission.Repository)
 	if err != nil {
@@ -1249,6 +1258,7 @@ func (s *Store) Complete(ctx context.Context, runID string, completion protocol.
 		return tx.Commit()
 	}
 	if completion.State == "succeeded" {
+		recordStageMetadata(ctx, tx, jobID, completion.Result)
 		if _, err := tx.ExecContext(ctx, `UPDATE jobs SET state='succeeded',updated_at=? WHERE id=?`, now, jobID); err != nil {
 			return err
 		}
@@ -1522,6 +1532,9 @@ FROM jobs j LEFT JOIN runs r ON r.job_id=j.id LEFT JOIN workers w ON w.instance_
 	}
 	if err := loadJobStateHistory(ctx, s.db, jobs); err != nil {
 		return nil, fmt.Errorf("read job state history: %w", err)
+	}
+	if err := s.loadJobStages(ctx, jobs); err != nil {
+		return nil, fmt.Errorf("derive job stages: %w", err)
 	}
 	return jobs, nil
 }

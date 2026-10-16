@@ -7,6 +7,7 @@ Start with [your first task workflow](task-guide.md) to run a task, review its f
 - [MCP server](mcp.md)
 - [Accepted task, stage, and artifact model](task-artifact-model.md)
 - [Current workflow configuration](workflows.md)
+- [Configurable workflow stages](workflow-stages.md)
 - [Workflow roadmap: scaling AI engineering](workflow-roadmap.md)
 - [Architecture](../ARCHITECTURE.md)
 - [VM deployment](vm-deployment.md)

@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 )
 
 // The Model Context Protocol endpoint exposes the documented API as tools
@@ -59,6 +60,7 @@ type mcpTool struct {
 // write-scope token. Everything else is read scope.
 var mcpWriteTools = map[string]bool{
 	"queue_job": true, "cancel_job": true, "requeue_job": true, "set_setting": true,
+	"workflows_put": true, "job_types_put": true, "job_types_delete": true,
 }
 
 func mcpSchema(properties map[string]any, required ...string) map[string]any {
@@ -80,7 +82,7 @@ var mcpToolList = []mcpTool{
 		"source_url": map[string]any{"type": "string"}, "workflow": map[string]any{"type": "string"},
 		"command": map[string]any{"type": "string"}, "prompt": map[string]any{"type": "string"},
 		"repository": map[string]any{"type": "string"}, "model": map[string]any{"type": "string"},
-		"project": map[string]any{"type": "string"},
+		"project": map[string]any{"type": "string"}, "job_type": map[string]any{"type": "string"},
 	}, "repository")},
 	{Name: "cancel_job", Description: "Cancel a job and its latest run.", InputSchema: mcpSchema(map[string]any{"job_id": map[string]any{"type": "string"}}, "job_id")},
 	{Name: "requeue_job", Description: "Requeue (retry) a failed, blocked, interrupted or cancelled job. Set previous_process_stopped=true to confirm the prior process is stopped.", InputSchema: mcpSchema(map[string]any{
@@ -90,6 +92,17 @@ var mcpToolList = []mcpTool{
 	{Name: "set_setting", Description: "Write one settings key/value pair.", InputSchema: mcpSchema(map[string]any{
 		"key": map[string]any{"type": "string"}, "value": map[string]any{"type": "string"},
 	}, "key", "value")},
+	{Name: "workflows_get", Description: "Read a project's workflow config: default job type, label mappings and job types with their ordered stages.", InputSchema: mcpSchema(map[string]any{"project": map[string]any{"type": "string", "description": "Repository name or owner/name"}}, "project")},
+	{Name: "workflows_put", Description: "Replace a project's workflow config (default_type, label_mappings, types). Validated and audit-logged.", InputSchema: mcpSchema(map[string]any{
+		"project": map[string]any{"type": "string"}, "config": map[string]any{"type": "object"},
+	}, "project", "config")},
+	{Name: "job_types_list", Description: "List a project's job types and their stages.", InputSchema: mcpSchema(map[string]any{"project": map[string]any{"type": "string"}}, "project")},
+	{Name: "job_types_put", Description: "Add or replace one job type (name and ordered stages) on a project.", InputSchema: mcpSchema(map[string]any{
+		"project": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"}, "stages": map[string]any{"type": "array"},
+	}, "project", "name", "stages")},
+	{Name: "job_types_delete", Description: "Delete one job type from a project.", InputSchema: mcpSchema(map[string]any{
+		"project": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"},
+	}, "project", "name")},
 }
 
 // handleMCP serves the streamable HTTP MCP transport.
@@ -287,6 +300,109 @@ func (s *Server) invokeMCPTool(ctx context.Context, identity TokenIdentity, name
 			log.Printf("audit settings.write: %v", err)
 		}
 		return map[string]string{"key": input.Key, "value": input.Value}, nil
+	case "workflows_get":
+		var input struct {
+			Project string `json:"project"`
+		}
+		if err := args(&input); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(input.Project) == "" {
+			return nil, errors.New("project is required")
+		}
+		key := s.resolveReviewProject(input.Project)
+		config, err := s.store.ProjectWorkflowConfig(ctx, key)
+		if err != nil {
+			return nil, err
+		}
+		return workflowConfigResponse{Project: key, Config: config}, nil
+	case "workflows_put":
+		var input struct {
+			Project string         `json:"project"`
+			Config  WorkflowConfig `json:"config"`
+		}
+		if err := args(&input); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(input.Project) == "" {
+			return nil, errors.New("project is required")
+		}
+		key := s.resolveReviewProject(input.Project)
+		saved, err := s.store.SaveProjectWorkflowConfig(ctx, key, input.Config)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.store.RecordAudit(ctx, identity, "workflows.write", key); err != nil {
+			log.Printf("audit workflows.write: %v", err)
+		}
+		return workflowConfigResponse{Project: key, Config: saved}, nil
+	case "job_types_list":
+		var input struct {
+			Project string `json:"project"`
+		}
+		if err := args(&input); err != nil {
+			return nil, err
+		}
+		key := s.resolveReviewProject(input.Project)
+		config, err := s.store.ProjectWorkflowConfig(ctx, key)
+		if err != nil {
+			return nil, err
+		}
+		return jobTypesResponse{Project: key, JobTypes: config.Types, DefaultType: config.DefaultType}, nil
+	case "job_types_put":
+		var input struct {
+			Project string            `json:"project"`
+			Name    string            `json:"name"`
+			Stages  []StageDefinition `json:"stages"`
+		}
+		if err := args(&input); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(input.Project) == "" || strings.TrimSpace(input.Name) == "" {
+			return nil, errors.New("project and name are required")
+		}
+		key := s.resolveReviewProject(input.Project)
+		config, err := s.store.ProjectWorkflowConfig(ctx, key)
+		if err != nil {
+			return nil, err
+		}
+		updated := replaceJobType(config, JobTypeDefinition{Name: strings.TrimSpace(input.Name), Stages: input.Stages})
+		saved, err := s.store.SaveProjectWorkflowConfig(ctx, key, updated)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.store.RecordAudit(ctx, identity, "job_types.write", key+"/"+input.Name); err != nil {
+			log.Printf("audit job_types.write: %v", err)
+		}
+		return jobTypesResponse{Project: key, JobTypes: saved.Types, DefaultType: saved.DefaultType}, nil
+	case "job_types_delete":
+		var input struct {
+			Project string `json:"project"`
+			Name    string `json:"name"`
+		}
+		if err := args(&input); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(input.Project) == "" || strings.TrimSpace(input.Name) == "" {
+			return nil, errors.New("project and name are required")
+		}
+		key := s.resolveReviewProject(input.Project)
+		config, err := s.store.ProjectWorkflowConfig(ctx, key)
+		if err != nil {
+			return nil, err
+		}
+		updated, err := removeJobType(config, input.Name)
+		if err != nil {
+			return nil, err
+		}
+		saved, err := s.store.SaveProjectWorkflowConfig(ctx, key, updated)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.store.RecordAudit(ctx, identity, "job_types.delete", key+"/"+input.Name); err != nil {
+			log.Printf("audit job_types.delete: %v", err)
+		}
+		return jobTypesResponse{Project: key, JobTypes: saved.Types, DefaultType: saved.DefaultType}, nil
 	case "queue_job":
 		var input submitRequest
 		if err := args(&input); err != nil {

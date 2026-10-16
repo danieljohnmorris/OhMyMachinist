@@ -11,6 +11,13 @@ import {
   saveReviewProfileSetting,
 } from "@/review-settings";
 import { createToken, loadTokens, revokeToken } from "@/api-tokens";
+import {
+  loadWorkflow,
+  saveWorkflow,
+  sessionOptions,
+  stageKindOptions,
+  workflowFromPayload,
+} from "@/workflow-settings";
 
 // Settings: per-project review profile for the built-in PR review (MACH-32).
 // The review runs from a resolved profile: repo .machinist/review.yaml at the
@@ -211,8 +218,212 @@ export function SettingsPage({ repositories = [], csrfToken }) {
       </div>}
       {!loaded && <QuietState title={project ? "Loading review profile" : "No repositories yet"} description={project ? "Fetching the resolved profile for this project." : "Register a worker repository to edit its review profile."} role="status" />}
     </Card>
+    <WorkflowsCard project={project} csrfToken={csrfToken} />
     <TokensCard csrfToken={csrfToken} />
   </div>;
+}
+
+// WorkflowsCard edits a project's configurable workflow stages: job types, each
+// type's ordered stages (agent, model, session mode, human approval, review
+// profile), the default type and the Plane label mapping. The same config is
+// readable and writable through the HTTP API and MCP.
+function WorkflowsCard({ project, csrfToken }) {
+  const [workflow, setWorkflow] = useState(() => workflowFromPayload(null));
+  const [selected, setSelected] = useState("");
+  const [loaded, setLoaded] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const loadSequence = useRef(0);
+
+  useEffect(() => {
+    if (!project) {
+      setLoaded(false);
+      return undefined;
+    }
+    const sequence = ++loadSequence.current;
+    const controller = new AbortController();
+    setLoaded(false);
+    setError("");
+    setNotice("");
+    loadWorkflow(project, controller.signal)
+      .then((result) => {
+        if (loadSequence.current !== sequence) return;
+        setWorkflow(result);
+        setSelected(result.jobTypes[0]?.name || "");
+        setLoaded(true);
+      })
+      .catch((loadError) => {
+        if (loadError.name === "AbortError" || loadSequence.current !== sequence) return;
+        setError(loadError.message);
+        setLoaded(true);
+      });
+    return () => controller.abort();
+  }, [project]);
+
+  const selectedType = workflow.jobTypes.find((jobType) => jobType.name === selected) || null;
+
+  const updateType = (name, mutate) => {
+    setWorkflow((current) => ({
+      ...current,
+      jobTypes: current.jobTypes.map((jobType) => (jobType.name === name ? mutate(jobType) : jobType)),
+    }));
+  };
+
+  const updateStage = (index, mutate) => {
+    if (!selectedType) return;
+    updateType(selectedType.name, (jobType) => ({
+      ...jobType,
+      stages: jobType.stages.map((stage, stageIndex) => (stageIndex === index ? mutate(stage) : stage)),
+    }));
+  };
+
+  const moveStage = (index, delta) => {
+    if (!selectedType) return;
+    updateType(selectedType.name, (jobType) => {
+      const stages = [...jobType.stages];
+      const target = index + delta;
+      if (target < 0 || target >= stages.length) return jobType;
+      [stages[index], stages[target]] = [stages[target], stages[index]];
+      return { ...jobType, stages };
+    });
+  };
+
+  const addStage = () => {
+    if (!selectedType) return;
+    updateType(selectedType.name, (jobType) => ({
+      ...jobType,
+      stages: [...jobType.stages, { id: "coding", name: "Coding", kind: "coding", agent: "", model: "", session: "continue", humanApproval: false, reviewProfile: "" }],
+    }));
+  };
+
+  const removeStage = (index) => {
+    if (!selectedType) return;
+    updateType(selectedType.name, (jobType) => ({ ...jobType, stages: jobType.stages.filter((_, stageIndex) => stageIndex !== index) }));
+  };
+
+  const addType = () => {
+    let index = workflow.jobTypes.length + 1;
+    let name = `type_${index}`;
+    while (workflow.jobTypes.some((jobType) => jobType.name === name)) {
+      index += 1;
+      name = `type_${index}`;
+    }
+    setWorkflow((current) => ({ ...current, jobTypes: [...current.jobTypes, { name, stages: [{ id: "queued", name: "Queued", kind: "queued", agent: "", model: "", session: "continue", humanApproval: false, reviewProfile: "" }, { id: "finished", name: "Finished", kind: "finished", agent: "", model: "", session: "continue", humanApproval: false, reviewProfile: "" }] }] }));
+    setSelected(name);
+  };
+
+  const renameType = (name, next) => {
+    setWorkflow((current) => ({
+      ...current,
+      defaultType: current.defaultType === name ? next : current.defaultType,
+      jobTypes: current.jobTypes.map((jobType) => (jobType.name === name ? { ...jobType, name: next } : jobType)),
+      labelMappings: current.labelMappings.map((mapping) => (mapping.type === name ? { ...mapping, type: next } : mapping)),
+    }));
+    setSelected(next);
+  };
+
+  const removeType = (name) => {
+    setWorkflow((current) => {
+      const jobTypes = current.jobTypes.filter((jobType) => jobType.name !== name);
+      const defaultType = current.defaultType === name ? jobTypes[0]?.name || "" : current.defaultType;
+      return { ...current, jobTypes, defaultType, labelMappings: current.labelMappings.filter((mapping) => mapping.type !== name) };
+    });
+    setSelected((current) => (current === name ? workflow.jobTypes.find((jobType) => jobType.name !== name)?.name || "" : current));
+  };
+
+  const save = async () => {
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const saved = await saveWorkflow(project, workflow, csrfToken);
+      setWorkflow(saved);
+      setSelected((current) => (saved.jobTypes.some((jobType) => jobType.name === current) ? current : saved.jobTypes[0]?.name || ""));
+      setNotice("Saved. New cards for this project use this configuration.");
+    } catch (saveError) {
+      setError(saveError.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return <Card className="p-4 sm:p-5">
+    <div className="space-y-1">
+      <h2 className="font-medium">Workflow stages</h2>
+      <p className="text-sm text-muted-foreground">Job types and their ordered stages for this project. Each card picks a type from a Plane label (e.g. type:config) or the default below. Stages set the agent, model and session mode; the built-in review runs automatically and UAT waits for a human before a merged pull request or a Done ticket finishes the card.</p>
+    </div>
+    {error && <div role="alert" className="mt-3 whitespace-pre-wrap rounded-md border border-danger/35 bg-danger/10 px-3 py-2 text-sm text-danger">{error}</div>}
+    {notice && <div role="status" className="mt-3 rounded-md border border-success/35 bg-success/10 px-3 py-2 text-sm text-success">{notice}</div>}
+    {!loaded && <QuietState title={project ? "Loading workflow stages" : "No repositories yet"} description={project ? "Fetching this project's job types." : "Register a worker repository to edit its workflow."} role="status" />}
+    {loaded && <div className="mt-4 space-y-4">
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="flex flex-col gap-1">
+          <span className="text-sm font-medium">Default job type</span>
+          <select className="field-control w-full max-w-xs" value={workflow.defaultType} onChange={(event) => setWorkflow((current) => ({ ...current, defaultType: event.target.value }))} aria-label="Default job type">
+            {workflow.jobTypes.map((jobType) => <option key={jobType.name} value={jobType.name}>{jobType.name}</option>)}
+          </select>
+        </label>
+        <Button variant="outline" onClick={addType} disabled={busy}>Add job type</Button>
+      </div>
+
+      <div className="flex flex-wrap gap-2" role="tablist" aria-label="Job types">
+        {workflow.jobTypes.map((jobType) => <Button key={jobType.name} size="sm" variant={jobType.name === selected ? "default" : "outline"} aria-pressed={jobType.name === selected} onClick={() => setSelected(jobType.name)}>{jobType.name}</Button>)}
+      </div>
+
+      {selectedType && <div className="space-y-3 rounded-md border p-3">
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="flex flex-col gap-1">
+            <span className="text-sm font-medium">Job type name</span>
+            <input className="field-control w-56" value={selectedType.name} onChange={(event) => renameType(selectedType.name, event.target.value)} aria-label="Job type name" />
+          </label>
+          <Button variant="outline" disabled={busy || workflow.jobTypes.length < 2} onClick={() => removeType(selectedType.name)}>Delete job type</Button>
+        </div>
+
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-sm font-medium">Stages</span>
+            <Button size="sm" variant="outline" onClick={addStage} disabled={busy}>Add stage</Button>
+          </div>
+          {selectedType.stages.map((stage, index) => <div key={index} className="grid gap-2 rounded-md border p-2 sm:grid-cols-2 lg:grid-cols-4">
+            <label className="flex flex-col gap-1"><span className="text-xs text-muted-foreground">Name</span><input className="field-control" value={stage.name} onChange={(event) => updateStage(index, (current) => ({ ...current, name: event.target.value }))} aria-label={`Stage ${index + 1} name`} /></label>
+            <label className="flex flex-col gap-1"><span className="text-xs text-muted-foreground">Kind</span><select className="field-control" value={stage.kind} onChange={(event) => updateStage(index, (current) => ({ ...current, kind: event.target.value }))} aria-label={`Stage ${index + 1} kind`}>{stageKindOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+            <label className="flex flex-col gap-1"><span className="text-xs text-muted-foreground">Agent</span><input className="field-control" value={stage.agent} onChange={(event) => updateStage(index, (current) => ({ ...current, agent: event.target.value }))} placeholder="Project default" aria-label={`Stage ${index + 1} agent`} /></label>
+            <label className="flex flex-col gap-1"><span className="text-xs text-muted-foreground">Model</span><input className="field-control" value={stage.model} onChange={(event) => updateStage(index, (current) => ({ ...current, model: event.target.value }))} placeholder="Project default" aria-label={`Stage ${index + 1} model`} /></label>
+            <label className="flex flex-col gap-1"><span className="text-xs text-muted-foreground">Session</span><select className="field-control" value={stage.session || "continue"} onChange={(event) => updateStage(index, (current) => ({ ...current, session: event.target.value }))} aria-label={`Stage ${index + 1} session`}>{sessionOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+            <label className="flex flex-col gap-1"><span className="text-xs text-muted-foreground">Review profile</span><input className="field-control" value={stage.reviewProfile} onChange={(event) => updateStage(index, (current) => ({ ...current, reviewProfile: event.target.value }))} placeholder="Default" aria-label={`Stage ${index + 1} review profile`} /></label>
+            <label className="flex items-center gap-2 pt-5 text-sm"><input type="checkbox" checked={stage.humanApproval} onChange={(event) => updateStage(index, (current) => ({ ...current, humanApproval: event.target.checked }))} aria-label={`Stage ${index + 1} needs human approval`} />Human approval</label>
+            <div className="flex items-end gap-1">
+              <Button size="sm" variant="ghost" disabled={index === 0} aria-label={`Move stage ${index + 1} earlier`} onClick={() => moveStage(index, -1)}>↑</Button>
+              <Button size="sm" variant="ghost" disabled={index === selectedType.stages.length - 1} aria-label={`Move stage ${index + 1} later`} onClick={() => moveStage(index, 1)}>↓</Button>
+              <Button size="sm" variant="outline" disabled={selectedType.stages.length < 2} aria-label={`Remove stage ${index + 1}`} onClick={() => removeStage(index)}>Remove</Button>
+            </div>
+          </div>)}
+        </div>
+      </div>}
+
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-medium">Plane label mapping</span>
+          <Button size="sm" variant="outline" onClick={() => setWorkflow((current) => ({ ...current, labelMappings: [...current.labelMappings, { label: "", type: current.defaultType }] }))} disabled={busy}>Add mapping</Button>
+        </div>
+        {workflow.labelMappings.map((mapping, index) => <div key={index} className="flex flex-wrap items-center gap-2">
+          <input className="field-control w-56" value={mapping.label} placeholder="type:config" onChange={(event) => setWorkflow((current) => ({ ...current, labelMappings: current.labelMappings.map((item, itemIndex) => (itemIndex === index ? { ...item, label: event.target.value } : item)) }))} aria-label={`Label mapping ${index + 1} label`} />
+          <span aria-hidden="true">→</span>
+          <select className="field-control w-56" value={mapping.type} onChange={(event) => setWorkflow((current) => ({ ...current, labelMappings: current.labelMappings.map((item, itemIndex) => (itemIndex === index ? { ...item, type: event.target.value } : item)) }))} aria-label={`Label mapping ${index + 1} job type`}>
+            {workflow.jobTypes.map((jobType) => <option key={jobType.name} value={jobType.name}>{jobType.name}</option>)}
+          </select>
+          <Button size="sm" variant="outline" onClick={() => setWorkflow((current) => ({ ...current, labelMappings: current.labelMappings.filter((_, itemIndex) => itemIndex !== index) }))}>Remove</Button>
+        </div>)}
+        {!workflow.labelMappings.length && <p className="text-xs text-muted-foreground">No mappings. Add one to route e.g. type:config cards to a non-standard job type.</p>}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-3">
+        <Button disabled={busy || !project} onClick={save}>Save workflow</Button>
+        <span className="text-xs text-muted-foreground">Validated before saving and recorded in the audit log.</span>
+      </div>
+    </div>}
+  </Card>;
 }
 
 // TokensCard manages scoped API tokens: the machine clients (and MCP tools)

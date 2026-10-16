@@ -13,6 +13,27 @@ type StepResult struct {
 	Outcome          string         `json:"outcome"`
 	Summary          string         `json:"summary"`
 	Metadata         map[string]any `json:"metadata,omitempty"`
+	// Stage, ReviewRound and JobType let an executor report the workflow stage
+	// it reached (MACH-43); the control plane records them as job metadata.
+	Stage       string `json:"stage,omitempty"`
+	ReviewRound int    `json:"review_round,omitempty"`
+	JobType     string `json:"job_type,omitempty"`
+}
+
+// StageMetadata returns the stage fields an executor reported, ready to merge
+// into job metadata. It is empty when the result carries no stage information.
+func (r StepResult) StageMetadata() map[string]any {
+	metadata := map[string]any{}
+	if r.JobType != "" {
+		metadata["job_type"] = r.JobType
+	}
+	if r.Stage != "" {
+		metadata["stage"] = r.Stage
+	}
+	if r.ReviewRound > 0 {
+		metadata["review_round"] = r.ReviewRound
+	}
+	return metadata
 }
 
 func ParseStepResult(body []byte) (*StepResult, error) {

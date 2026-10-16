@@ -38,6 +38,7 @@ It keeps the upstream control plane, worker model and executors. Everything belo
 - Retries inject the previous attempt's transcript into the next coder prompt
 - Job timeouts with failure alerts
 - Lane checkouts are fetched fresh before each run
+- Configurable workflow stages: per-project job types with ordered stages, a stage strip on every card, and a separate UAT stage so a job is only Finished once the PR merges or the Plane ticket is Done
 
 **Review**
 
