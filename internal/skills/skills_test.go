@@ -454,11 +454,20 @@ reviewers:
   - name: docs
     prompt_from: "docs-reviewer#How to review"
 `
-	references := ProfileReferences(body)
+	references, err := ProfileReferences(body)
+	if err != nil {
+		t.Fatalf("ProfileReferences: %v", err)
+	}
 	for _, want := range []string{"feature-dev:code-reviewer", "rust-review", "docs-reviewer"} {
 		if !contains(references, want) {
 			t.Fatalf("ProfileReferences = %#v, missing %q", references, want)
 		}
+	}
+	// A body that cannot be parsed is an error, never a silently empty
+	// reference set, so the uninstall guard can refuse to remove a skill
+	// that an unreadable profile may still use.
+	if _, err := ProfileReferences("reviewers: [unterminated"); err == nil {
+		t.Fatal("ProfileReferences parsed a malformed body without error")
 	}
 }
 

@@ -139,7 +139,9 @@ func (s *Store) AuthenticateToken(ctx context.Context, plaintext string) (TokenI
 
 // RecordAudit writes one audit entry naming the token behind a change.
 // Audit writes are best effort for advisory callers: a failed write is logged
-// by the scheduler error hook, never fails the change itself.
+// by the scheduler error hook, never fails the change itself. Skills changes
+// are the exception — they report a failed write to the caller so a change
+// never silently succeeds without its audit entry.
 func (s *Store) RecordAudit(ctx context.Context, identity TokenIdentity, action, detail string) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO audit_log(at,token_id,token_name,action,detail) VALUES(?,?,?,?,?)`,

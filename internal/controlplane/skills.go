@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -108,8 +109,15 @@ func settingReferencesSkill(value []byte, key string) bool {
 }
 
 // bodyReferencesSkill reports whether a review profile body names the skill key.
+// A body that cannot be parsed references nothing here so the used-by listing
+// stays readable; the uninstall guard surfaces profile parse errors through
+// review.SkillReferenced instead.
 func bodyReferencesSkill(body, key string) bool {
-	for _, reference := range skills.ProfileReferences(body) {
+	references, err := skills.ProfileReferences(body)
+	if err != nil {
+		return false
+	}
+	for _, reference := range references {
 		base, _ := skills.SplitName(reference)
 		if referenceKey, err := skills.Key(base); err == nil && referenceKey == key {
 			return true
@@ -238,12 +246,19 @@ func (s *Server) uninstallSkill(name string, force bool) error {
 	return library.Uninstall(name, skills.UninstallOptions{Referenced: referenced, Force: force})
 }
 
+// recordSkillChangeAudit writes one audit entry for a skills change made over
+// the HTTP API, after the change has been applied. Unlike recordAudit, a
+// failed write is returned rather than logged: the response reports the change
+// was made without its audit entry instead of silently succeeding.
+func (s *Server) recordSkillChangeAudit(request *http.Request, action, detail string) error {
+	return s.store.RecordAudit(request.Context(), identityFrom(request), action, detail)
+}
+
 // recordSkillAudit writes one audit entry for a skills change made over MCP,
-// where there is no HTTP request to read the principal from.
-func (s *Server) recordSkillAudit(ctx context.Context, identity TokenIdentity, action, detail string) {
-	if err := s.store.RecordAudit(ctx, identity, action, detail); err != nil {
-		log.Printf("audit %s: %v", action, err)
-	}
+// where there is no HTTP request to read the principal from. A failed write is
+// returned so the tool answers with an error instead of a silent success.
+func (s *Server) recordSkillAudit(ctx context.Context, identity TokenIdentity, action, detail string) error {
+	return s.store.RecordAudit(ctx, identity, action, detail)
 }
 
 // writeSkillError maps a library error onto an HTTP response: a skill missing
@@ -328,7 +343,11 @@ func (s *Server) installSkillHandler(response http.ResponseWriter, request *http
 		writeSkillError(response, err, http.StatusBadRequest)
 		return
 	}
-	s.recordAudit(request, "skills.install", result.Name)
+	if err := s.recordSkillChangeAudit(request, "skills.install", result.Name); err != nil {
+		writeError(response, http.StatusInternalServerError,
+			fmt.Errorf("installed skill %q but could not write the audit entry: %w", result.Name, err))
+		return
+	}
 	writeJSON(response, http.StatusCreated, result)
 }
 
@@ -363,7 +382,11 @@ func (s *Server) uploadSkillHandler(response http.ResponseWriter, request *http.
 		writeSkillError(response, err, http.StatusBadRequest)
 		return
 	}
-	s.recordAudit(request, "skills.upload", result.Name)
+	if err := s.recordSkillChangeAudit(request, "skills.upload", result.Name); err != nil {
+		writeError(response, http.StatusInternalServerError,
+			fmt.Errorf("installed skill %q but could not write the audit entry: %w", result.Name, err))
+		return
+	}
 	writeJSON(response, http.StatusCreated, result)
 }
 
@@ -389,7 +412,11 @@ func (s *Server) updateSkillHandler(response http.ResponseWriter, request *http.
 		writeSkillError(response, err, http.StatusBadRequest)
 		return
 	}
-	s.recordAudit(request, "skills.update", name)
+	if err := s.recordSkillChangeAudit(request, "skills.update", name); err != nil {
+		writeError(response, http.StatusInternalServerError,
+			fmt.Errorf("updated skill %q but could not write the audit entry: %w", name, err))
+		return
+	}
 	writeJSON(response, http.StatusOK, result)
 }
 
@@ -418,7 +445,11 @@ func (s *Server) pinSkillHandler(response http.ResponseWriter, request *http.Req
 		writeSkillError(response, err, http.StatusBadRequest)
 		return
 	}
-	s.recordAudit(request, "skills.pin", name+" "+version)
+	if err := s.recordSkillChangeAudit(request, "skills.pin", name+" "+version); err != nil {
+		writeError(response, http.StatusInternalServerError,
+			fmt.Errorf("pinned skill %q but could not write the audit entry: %w", name, err))
+		return
+	}
 	view, err := s.getSkill(request.Context(), name)
 	if err != nil {
 		writeSkillError(response, err, http.StatusInternalServerError)
@@ -439,6 +470,10 @@ func (s *Server) uninstallSkillHandler(response http.ResponseWriter, request *ht
 		writeSkillError(response, err, http.StatusInternalServerError)
 		return
 	}
-	s.recordAudit(request, "skills.uninstall", name)
+	if err := s.recordSkillChangeAudit(request, "skills.uninstall", name); err != nil {
+		writeError(response, http.StatusInternalServerError,
+			fmt.Errorf("removed skill %q but could not write the audit entry: %w", name, err))
+		return
+	}
 	response.WriteHeader(http.StatusNoContent)
 }

@@ -477,7 +477,9 @@ func (s *Server) invokeMCPTool(ctx context.Context, identity TokenIdentity, name
 		if err != nil {
 			return nil, err
 		}
-		s.recordSkillAudit(ctx, identity, "skills.install", result.Name)
+		if err := s.recordSkillAudit(ctx, identity, "skills.install", result.Name); err != nil {
+			return nil, fmt.Errorf("installed skill %q but could not write the audit entry: %w", result.Name, err)
+		}
 		return result, nil
 	case "update_skill":
 		var input struct {
@@ -494,7 +496,9 @@ func (s *Server) invokeMCPTool(ctx context.Context, identity TokenIdentity, name
 		if err != nil {
 			return nil, err
 		}
-		s.recordSkillAudit(ctx, identity, "skills.update", result.Name)
+		if err := s.recordSkillAudit(ctx, identity, "skills.update", input.Name); err != nil {
+			return nil, fmt.Errorf("updated skill %q but could not write the audit entry: %w", input.Name, err)
+		}
 		return result, nil
 	case "pin_skill":
 		var input struct {
@@ -513,7 +517,9 @@ func (s *Server) invokeMCPTool(ctx context.Context, identity TokenIdentity, name
 		if err := s.pinSkill(input.Name, input.Version); err != nil {
 			return nil, err
 		}
-		s.recordSkillAudit(ctx, identity, "skills.pin", input.Name+" "+input.Version)
+		if err := s.recordSkillAudit(ctx, identity, "skills.pin", input.Name+" "+input.Version); err != nil {
+			return nil, fmt.Errorf("pinned skill %q but could not write the audit entry: %w", input.Name, err)
+		}
 		view, err := s.getSkill(ctx, input.Name)
 		if err != nil {
 			return nil, err
@@ -533,7 +539,9 @@ func (s *Server) invokeMCPTool(ctx context.Context, identity TokenIdentity, name
 		if err := s.uninstallSkill(input.Name, input.Force); err != nil {
 			return nil, err
 		}
-		s.recordSkillAudit(ctx, identity, "skills.uninstall", input.Name)
+		if err := s.recordSkillAudit(ctx, identity, "skills.uninstall", input.Name); err != nil {
+			return nil, fmt.Errorf("removed skill %q but could not write the audit entry: %w", input.Name, err)
+		}
 		return map[string]string{"status": "removed", "name": input.Name}, nil
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", name)

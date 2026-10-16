@@ -721,3 +721,61 @@ func mcpText(payload map[string]any) string {
 	text, _ := item["text"].(string)
 	return text
 }
+
+// breakAuditLog removes the audit_log table so every audit write fails while
+// token authentication and the filesystem skills library keep working.
+func breakAuditLog(t *testing.T, server *Server) {
+	t.Helper()
+	if _, err := server.store.db.Exec(`DROP TABLE audit_log`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSkillsAPIAuditWriteFailure covers a skills change whose audit entry
+// cannot be written: the API answers with an error that names the audit
+// failure instead of silently succeeding without the record.
+func TestSkillsAPIAuditWriteFailure(t *testing.T) {
+	server, webServer, _, writeSecret := newSkillsTestServer(t)
+	defer webServer.Close()
+	installed := decode[skills.InstallResult](t, authRequest(t, http.MethodPost, webServer.URL+"/api/v1/skills", writeSecret, map[string]any{"source": writeSkillSource(t, testSkillMarkdown)}))
+	breakAuditLog(t, server)
+
+	// An install that cannot be audited is reported as failed.
+	response := authRequest(t, http.MethodPost, webServer.URL+"/api/v1/skills", writeSecret, map[string]any{"source": writeSkillSource(t, "---\nname: unaudited-skill\ndescription: Unused\n---\n\nBody.\n")})
+	if response.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("unauditable install status = %d, want 500", response.StatusCode)
+	}
+	if body := decode[map[string]string](t, response)["error"]; !strings.Contains(body, "audit") {
+		t.Fatalf("unauditable install error = %q", body)
+	}
+
+	// An uninstall too: the removal happened, and the response says the
+	// audit entry could not be written rather than returning 204.
+	response = authRequest(t, http.MethodDelete, webServer.URL+"/api/v1/skills/"+installed.Name+"?force=true", writeSecret, nil)
+	if response.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("unauditable uninstall status = %d, want 500", response.StatusCode)
+	}
+	if body := decode[map[string]string](t, response)["error"]; !strings.Contains(body, "audit") {
+		t.Fatalf("unauditable uninstall error = %q", body)
+	}
+}
+
+// TestMCPSkillsAuditWriteFailure checks that an uninstall whose audit entry
+// cannot be written answers with a tool error naming the audit failure.
+func TestMCPSkillsAuditWriteFailure(t *testing.T) {
+	server, webServer, _, writeSecret := newSkillsTestServer(t)
+	defer webServer.Close()
+	endpoint := webServer.URL + "/mcp"
+	if text := mcpCallTool(t, endpoint, writeSecret, "install_skill", map[string]any{"source": writeSkillSource(t, testSkillMarkdown)}, 1); !strings.Contains(text, "feature-dev:code-reviewer") {
+		t.Fatalf("install_skill = %s", text)
+	}
+	breakAuditLog(t, server)
+
+	payload := mcpCall(t, endpoint, writeSecret, "tools/call", map[string]any{"name": "uninstall_skill", "arguments": map[string]any{"name": "feature-dev:code-reviewer", "force": true}}, 2)
+	if payload["result"].(map[string]any)["isError"] != true {
+		t.Fatalf("unauditable uninstall_skill payload = %#v", payload)
+	}
+	if text := mcpText(payload); !strings.Contains(text, "audit") {
+		t.Fatalf("unauditable uninstall_skill text = %q", text)
+	}
+}
