@@ -55,6 +55,16 @@ class ExcludeTests(unittest.TestCase):
             )
 
 
+    def test_unparsed_header_fails_closed(self) -> None:
+        header = 'diff --git a/renamed "b/weird/na me".lock\n'
+        self.assertEqual(diff_budget.diff_path(header), "")
+        diff = header + "--- a/renamed\n+++ b/weird/na me\".lock\n+oops\n"
+        plan = diff_budget.plan_diff(diff, ["*.lock"])
+        self.assertEqual(plan.kept, [])
+        self.assertEqual(plan.excluded, ["<unparsed diff header>"])
+        self.assertEqual(plan.chunks[0].text, "")
+
+
 class PlanTests(unittest.TestCase):
     def test_full_mode_when_the_filtered_diff_fits(self) -> None:
         diff = _file_diff("web/dist/app.js", 5000) + _file_diff("src/app.py", 20)

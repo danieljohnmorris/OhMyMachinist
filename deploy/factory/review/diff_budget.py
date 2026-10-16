@@ -298,8 +298,10 @@ def plan_diff(
     kept: list[DiffFile] = []
     excluded_paths: list[str] = []
     for file in files:
-        if file.path and path_excluded(file.path, exclude_globs):
-            excluded_paths.append(file.path)
+        if not file.path or path_excluded(file.path, exclude_globs):
+            # An unparseable ``diff --git`` header leaves ``path`` empty; fail
+            # closed rather than silently bypassing the exclude globs.
+            excluded_paths.append(file.path or "<unparsed diff header>")
         else:
             kept.append(file)
     excluded = sorted(dict.fromkeys(excluded_paths))
