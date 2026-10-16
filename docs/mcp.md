@@ -41,6 +41,11 @@ scope.
 | `get_board` | read | — | Full board state: jobs, workers, triggers. |
 | `list_review_profiles` | read | — | Stored review profiles. |
 | `get_settings` | read | — | All settings key/value pairs. |
+| `get_factory` | read | — | Factory controls: dispatch state, job cap and one slot per lane. |
+| `start_factory` | write | — | Resume dispatch. |
+| `stop_factory` | write | `mode?`, `reason?` | Stop dispatching new jobs; `mode` is `drain` (default) or `cancel`. |
+| `set_job_cap` | write | `value` | Set how many jobs run at once; clamped to the enabled connected lanes. |
+| `set_lane_enabled` | write | `lane`, `enabled` | Enable or disable one lane by name. A disabled lane gets no new jobs. |
 | `get_setting` | read | `key` | One setting; errors if missing. |
 | `queue_job` | write | `repository` (required), `command?`, `workflow?`, `title?`, `spec?`, `source_url?`, `prompt?`, `model?`, `project?` | Queue a job; returns the job id. |
 | `cancel_job` | write | `job_id` | Cancel the job and its latest run, or a queued job that has no runs yet. |

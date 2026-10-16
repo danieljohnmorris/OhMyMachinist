@@ -72,6 +72,10 @@ func newRootCommand(options *commandOptions) *cobra.Command {
 	root.AddCommand(newUpdateCommand(options))
 	root.AddCommand(newReviewCommand(options))
 	root.AddCommand(newSkillsCommand(options))
+	root.AddCommand(newPauseCommand(options))
+	root.AddCommand(newResumeCommand(options))
+	root.AddCommand(newJobCapCommand(options))
+	root.AddCommand(newLaneCommand(options))
 
 	worker := &cobra.Command{Use: "worker", Short: "Run or connect a Machinist Worker"}
 	worker.AddCommand(newRunCommand(options))

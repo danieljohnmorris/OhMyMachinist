@@ -45,6 +45,7 @@ All requests and responses are `application/json`. Errors are
 | GET | `/api/v1/jobs/{id}/artifacts` | Artifact files for a job. |
 | GET | `/api/v1/artifacts/{id}/content` | Artifact content. |
 | GET | `/api/v1/settings` | All stored settings key/value pairs. |
+| GET | `/api/v1/factory` | Factory controls: dispatch state (running, paused, draining), the effective job cap and one slot per lane. |
 | GET | `/api/v1/audit-log?limit=100` | Recent audit entries, newest first. |
 | GET | `/api/v1/review-profiles` | Stored review profiles. |
 | GET | `/api/v1/review-profile?project=X` | Resolved review profile for a project. |
@@ -72,7 +73,11 @@ they reach the log.
 | POST | `/api/v1/jobs` | Queue a job. Body: `repository` plus either `command` or `workflow`; optional `title`, `spec`, `source_url`, `prompt`, `model`, `project`. Returns `{"id": "job_…"}`. |
 | POST | `/api/v1/jobs/{id}/{action}` | Workflow actions: `cancel`, `retry` (requeue), `approve`, `request_changes`. Body may carry `run_id`, `feedback`, `previous_process_stopped`. |
 | DELETE | `/api/v1/jobs/{id}` | Delete a terminal job. |
-| PUT | `/api/v1/settings/{key}` | Write one setting. Body: `{"value": "…"}`. |
+| PUT | `/api/v1/settings/{key}` | Write one setting. Body: `{"value": "…"}`. The reserved `factory.*` keys are refused; use the factory endpoints below. |
+| POST | `/api/v1/factory/stop` | Stop dispatching new jobs. Body: `{"mode": "drain"|"cancel", "reason": "…"}`. `drain` lets the running job finish; `cancel` stops it now. Workers stay connected. |
+| POST | `/api/v1/factory/start` | Resume dispatch. |
+| PUT | `/api/v1/factory/max-concurrent-jobs` | Set how many jobs run at once. Body: `{"value": 2}`. Clamped to the enabled connected lanes. |
+| PUT | `/api/v1/factory/lanes/{name}` | Enable or disable one lane. Body: `{"enabled": false}`. A disabled lane stays connected but gets no new jobs. |
 | GET | `/api/v1/tokens` | List tokens (write scope; browsers read with the CSRF header). |
 | POST | `/api/v1/tokens` | Create a token. Body: `{"name": "…", "scope": "read"|"write"}`. Response carries the one-time `secret`. |
 | DELETE | `/api/v1/tokens/{id}` | Revoke a token. |
@@ -84,6 +89,32 @@ they reach the log.
 | POST | `/api/v1/skills/{name}/update` | Re-resolve the recorded source and add the new version. Body: `{"activate": true}` (optional). |
 | POST | `/api/v1/skills/{name}/pin` | Set the active version. Body: `{"version": "…"}`. Returns the updated skill. |
 | DELETE | `/api/v1/skills/{name}` | Remove a skill and every installed version. Add `?force=true` to remove a skill a shipped review profile still references. |
+
+### Factory controls (write scope to change)
+
+One panel's worth of operations, also exposed as MCP tools and the CLI
+(`machinist pause`, `machinist resume`, `machinist job-cap`, `machinist lane`).
+Every change is written to the audit log with who, when, the old and new value
+and the reason.
+
+- **Start/Stop.** `POST /api/v1/factory/stop` stops dispatching new jobs;
+  `mode` chooses `drain` (the running job finishes) or `cancel` (the running job
+  is stopped now). Workers stay connected while stopped, so `POST
+  /api/v1/factory/start` resumes without reconnecting anything. The stopped
+  state (with reason, who stopped it and when) is persisted, so it survives a
+  control-plane restart.
+- **Jobs at once.** `PUT /api/v1/factory/max-concurrent-jobs` applies live,
+  without a restart, and clamps to the number of ready (connected and enabled)
+  lanes.
+- **Lanes.** `PUT /api/v1/factory/lanes/{name}` enables or disables one lane by
+  worker name. A disabled lane stays connected but receives no new jobs.
+
+`GET /api/v1/factory` reports the state, the effective cap, the ready/enabled
+lane counts and one slot per lane (`busy` with its job, `idle`, `offline` or
+`disabled`, plus the lane's repository checkouts). The same object is served as
+`factory` on the open `GET /api/v1/status` so the web UI can render it without a
+token. `server.max_concurrent_jobs` is the default cap used until the setting is
+changed.
 
 ### Worker endpoints (worker token)
 

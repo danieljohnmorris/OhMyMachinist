@@ -63,6 +63,7 @@ type mcpTool struct {
 var mcpWriteTools = map[string]bool{
 	"queue_job": true, "cancel_job": true, "requeue_job": true, "set_setting": true,
 	"install_skill": true, "update_skill": true, "pin_skill": true, "uninstall_skill": true,
+	"start_factory": true, "stop_factory": true, "set_job_cap": true, "set_lane_enabled": true,
 }
 
 func mcpSchema(properties map[string]any, required ...string) map[string]any {
@@ -79,6 +80,15 @@ var mcpToolList = []mcpTool{
 	{Name: "get_board", Description: "Get the full board state: jobs, workers and triggers.", InputSchema: mcpSchema(map[string]any{})},
 	{Name: "list_review_profiles", Description: "List stored review profiles with their YAML bodies.", InputSchema: mcpSchema(map[string]any{})},
 	{Name: "get_settings", Description: "Read all stored settings key/value pairs.", InputSchema: mcpSchema(map[string]any{})},
+	{Name: "get_factory", Description: "Read the factory controls: dispatch state (running, paused or draining), the job cap and one slot per lane.", InputSchema: mcpSchema(map[string]any{})},
+	{Name: "start_factory", Description: "Resume dispatch after a pause or drain.", InputSchema: mcpSchema(map[string]any{})},
+	{Name: "stop_factory", Description: "Stop dispatching new jobs. mode=drain lets the running job finish; mode=cancel stops it now.", InputSchema: mcpSchema(map[string]any{
+		"mode": map[string]any{"type": "string", "enum": []string{"drain", "cancel"}}, "reason": map[string]any{"type": "string"},
+	})},
+	{Name: "set_job_cap", Description: "Set how many jobs run at once. The value is clamped to the number of enabled connected lanes.", InputSchema: mcpSchema(map[string]any{"value": map[string]any{"type": "integer"}}, "value")},
+	{Name: "set_lane_enabled", Description: "Enable or disable one lane by name. A disabled lane stays connected but gets no new jobs.", InputSchema: mcpSchema(map[string]any{
+		"lane": map[string]any{"type": "string"}, "enabled": map[string]any{"type": "boolean"},
+	}, "lane", "enabled")},
 	{Name: "queue_job", Description: "Queue a job. Either command (single command) or workflow (task workflow) plus repository is required.", InputSchema: mcpSchema(map[string]any{
 		"title": map[string]any{"type": "string"}, "spec": map[string]any{"type": "string"},
 		"source_url": map[string]any{"type": "string"}, "workflow": map[string]any{"type": "string"},
@@ -285,6 +295,72 @@ func (s *Server) invokeMCPTool(ctx context.Context, identity TokenIdentity, name
 			return nil, fmt.Errorf("setting %q not found", input.Key)
 		}
 		return map[string]string{"key": input.Key, "value": value}, nil
+	case "get_factory":
+		return s.store.FactoryStatus(ctx, s.maxConcurrentJobs)
+	case "start_factory":
+		if err := s.store.ResumeFactory(ctx); err != nil {
+			return nil, err
+		}
+		s.recordFactoryAudit(ctx, identity, "factory.start", "resumed dispatch")
+		return s.store.FactoryStatus(ctx, s.maxConcurrentJobs)
+	case "stop_factory":
+		var input struct {
+			Mode   string `json:"mode"`
+			Reason string `json:"reason"`
+		}
+		if err := args(&input); err != nil {
+			return nil, err
+		}
+		mode := input.Mode
+		if mode == "" {
+			mode = "drain"
+		}
+		if mode != "drain" && mode != "cancel" {
+			return nil, errors.New(`mode must be "drain" or "cancel"`)
+		}
+		if err := s.store.PauseFactory(ctx, identity.Name, input.Reason, mode); err != nil {
+			return nil, err
+		}
+		action := "factory.drain"
+		if mode == "cancel" {
+			action = "factory.pause"
+		}
+		s.recordFactoryAudit(ctx, identity, action, fmt.Sprintf("mode=%s reason=%s", mode, input.Reason))
+		return s.store.FactoryStatus(ctx, s.maxConcurrentJobs)
+	case "set_job_cap":
+		var input struct {
+			Value int `json:"value"`
+		}
+		if err := args(&input); err != nil {
+			return nil, err
+		}
+		before, err := s.store.FactoryStatus(ctx, s.maxConcurrentJobs)
+		if err != nil {
+			return nil, err
+		}
+		clamped, err := s.store.SetFactoryJobCap(ctx, input.Value)
+		if err != nil {
+			return nil, err
+		}
+		s.recordFactoryAudit(ctx, identity, "factory.job_cap", fmt.Sprintf("old=%d new=%d requested=%d", before.MaxConcurrentJobs, clamped, input.Value))
+		return s.store.FactoryStatus(ctx, s.maxConcurrentJobs)
+	case "set_lane_enabled":
+		var input struct {
+			Lane    string `json:"lane"`
+			Enabled bool   `json:"enabled"`
+		}
+		if err := args(&input); err != nil {
+			return nil, err
+		}
+		if err := s.store.SetLaneEnabled(ctx, input.Lane, input.Enabled); err != nil {
+			return nil, err
+		}
+		action, value := "factory.lane_disable", "disabled"
+		if input.Enabled {
+			action, value = "factory.lane_enable", "enabled"
+		}
+		s.recordFactoryAudit(ctx, identity, action, fmt.Sprintf("lane=%s new=%s", input.Lane, value))
+		return s.store.FactoryStatus(ctx, s.maxConcurrentJobs)
 	case "set_setting":
 		var input struct {
 			Key   string `json:"key"`
