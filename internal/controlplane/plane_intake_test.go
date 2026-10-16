@@ -436,6 +436,64 @@ func TestPlaneIntakeStateSyncNeverTouchesDoneTickets(t *testing.T) {
 	}
 }
 
+// MACH-69: a plain failure still adds the Plane failed label, but an
+// llm_unavailable failure must not — it is an outage, not a code failure.
+func TestPlaneIntakeSkipsFailedLabelForLLMUnavailable(t *testing.T) {
+	seedFailedSyncJob := func(t *testing.T, intake *PlaneIntake, store *Store, issueID, key string, classify bool) string {
+		t.Helper()
+		jobID, err := store.CreatePlaneJob(t.Context(), PlaneAdmission{
+			Prompt: "p", Title: key + ": Fix", Repository: "OhMyMachinist",
+			Command: testAgent("build-pr", "p"), IssueKey: key, Subject: "https://plane/ws/browse/" + key + "/",
+			Source: "webhook:d1", SpecHash: "hash-" + key,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.db.Exec(`INSERT INTO plane_intake(issue_id,spec_hash,key,project_id,job_id,source,delivery_id,updated_at) VALUES(?,?,'?','p1',?,'webhook:d1','d1',?)`, issueID, "hash-"+key, jobID, "2026-10-11T00:00:00Z"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.db.Exec(`UPDATE runs SET state='failed',started_at='2026-10-11T00:00:00Z',completed_at='2026-10-11T00:05:00Z',exit_code=1,error='command exited with status 1' WHERE job_id=?`, jobID); err != nil {
+			t.Fatal(err)
+		}
+		if classify {
+			if err := store.SaveErrorClassMetadata(t.Context(), jobID, ErrorClassRecord{Class: ErrorClassLLMUnavailable, Reason: "omp auto_retry_end failed: Unable to connect"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return jobID
+	}
+
+	t.Run("plain failure adds the failed label", func(t *testing.T) {
+		intake, store, fixture := newIntakeFixture(t, false)
+		seedFailedSyncJob(t, intake, store, "i1", "MACH-9", false)
+		if err := intake.Sync(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		var patched bool
+		for _, request := range fixture.writes() {
+			if request.Method == http.MethodPatch && strings.Contains(request.Body, "lbl-failed") {
+				patched = true
+			}
+		}
+		if !patched {
+			t.Fatalf("failed label not applied to a plain failure: %#v", fixture.writes())
+		}
+	})
+
+	t.Run("llm_unavailable failure does not add the failed label", func(t *testing.T) {
+		intake, store, fixture := newIntakeFixture(t, false)
+		seedFailedSyncJob(t, intake, store, "i1", "MACH-9", true)
+		if err := intake.Sync(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		for _, request := range fixture.writes() {
+			if request.Method == http.MethodPatch && strings.Contains(request.Body, "lbl-failed") {
+				t.Fatalf("failed label applied to an llm_unavailable failure: %#v", request)
+			}
+		}
+	})
+}
+
 func writeFile(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

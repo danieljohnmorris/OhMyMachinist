@@ -336,6 +336,15 @@ func (s *Server) HealRun(ctx context.Context, runID string) {
 		log.Printf("healing: read failure context for run %q: %v", runID, err)
 		return
 	}
+	// MACH-69: an unreachable model endpoint is not a code failure. Classify
+	// it before the retry budget is consulted — llm_unavailable must not
+	// consume the self-healing budget or set Needs attention.
+	if s.llmUnavailable.IsEnabled() {
+		if class, reason := classifyErrorClass(errorText, events); class == ErrorClassLLMUnavailable {
+			s.handleLLMUnavailable(ctx, job, run, reason)
+			return
+		}
+	}
 	failureText := strings.Join([]string{errorText, run.Summary, strings.Join(decodeEventTranscript(events), "\n")}, "\n")
 	if healLaneFailurePattern.MatchString(failureText) {
 		// The lane paused itself; a retry would meet the same broken checkout.
@@ -480,6 +489,17 @@ func (s *Server) healPendingRetries(ctx context.Context) error {
 // fresh queued run so a worker picks the retry up. The prior-attempt block is
 // regenerated so the new run carries the failed attempt's transcript.
 func (s *Store) HealRequeue(ctx context.Context, jobID, instruction string) error {
+	return s.requeueJob(ctx, jobID, instruction)
+}
+
+// requeueJobAsIs requeues a failed job with plain submit semantics: no added
+// instruction, the same prompt (MACH-69 llm_unavailable — the task was never
+// the problem).
+func (s *Store) requeueJobAsIs(ctx context.Context, jobID string) error {
+	return s.requeueJob(ctx, jobID, "")
+}
+
+func (s *Store) requeueJob(ctx context.Context, jobID, instruction string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -493,7 +513,9 @@ func (s *Store) HealRequeue(ctx context.Context, jobID, instruction string) erro
 	if state != "failed" {
 		return fmt.Errorf("job %s is %s, not failed", jobID, state)
 	}
-	prompt += "\n\n" + instruction
+	if instruction != "" {
+		prompt += "\n\n" + instruction
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET prompt=?,state='queued',updated_at=? WHERE id=?`, prompt, s.now().UTC().Format(time.RFC3339Nano), jobID); err != nil {
 		return fmt.Errorf("requeue job %s: %w", jobID, err)
 	}

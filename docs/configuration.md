@@ -99,6 +99,47 @@ alert. Relative paths resolve against the config file and `~` expands to the
 server user's home, like the artifact storage path. When `[alerts]` is absent,
 no files are written.
 
+## LLM-unavailable failures
+
+When a run fails because the model endpoint was unreachable, Machinist
+classifies it `llm_unavailable` instead of a generic failure (MACH-69). The
+signals are omp's `auto_retry_end` with a connection-type final error
+("Unable to connect", connection refused, DNS failure, reset/timeout, HTTP
+502/503/504 from the model endpoint), a shim or proxy connection refusal in
+the transcript corroborated by an `agent_end` with zero output tokens, and a
+plain connection error next to a zero-token `agent_end`. The class, reason,
+provider, model, endpoint and time are stored on the job and shown on the
+board card, the run page, the fail-alert payload (`error_class`) and a Plane
+comment that says "Run failed — LLM unavailable". An `llm_unavailable`
+failure does not consume the self-healing retry budget, does not add the
+Plane `failed` label and does not trigger review or fix-up flows.
+
+With an endpoint configured, the control plane probes it (`GET /v1/models`,
+plus an optional tiny completion) and requeues the job once automatically —
+plain submit semantics, the next attempt of the same ticket, with the usual
+dedupe (no requeue while another attempt of the ticket is queued or
+running). Healthy means the endpoint answers AND serves the expected model
+id: a model mismatch is always logged and, by default, blocks the requeue
+("port open" is not enough). When the endpoint stays down past `max_wait`,
+or the automatic requeue itself fails as `llm_unavailable` again, the job is
+alerted to the spool directory and left for a human. The lane-clean step
+runs before the requeued claim as usual.
+
+```toml
+[llm_unavailable]
+enabled = true                     # default; false disables the whole pass
+endpoint = "http://model-host.local:8000"
+model = "deepseek-v4.1-flash"
+probe_interval = "30s"             # default 30s
+max_wait = "60m"                   # default 60m
+auto_requeue = 1                   # default 1; negative disables requeue
+block_on_model_mismatch = true     # default true
+probe_completion = false           # default false
+```
+
+Without an `endpoint`, failures are still classified and alerted, but left
+for a human: there is nothing to probe, so there is no automatic requeue.
+
 ## Migration
 
 The `agents` table was renamed to `commands`. Move `[agents.NAME]` to `[commands.NAME]`

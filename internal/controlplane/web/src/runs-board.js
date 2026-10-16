@@ -156,6 +156,17 @@ export function collapseIssueAttempts(jobs) {
   });
 }
 
+// MACH-69: an llm_unavailable failure is shown as "LLM unavailable", not a
+// generic failed state, on the board card and the run page.
+export function isLLMUnavailable(job) {
+  return job?.metadata?.error_class?.class === "llm_unavailable";
+}
+
+export function errorClassLabel(job) {
+  if (!isLLMUnavailable(job)) return "";
+  return ["LLM unavailable", job.metadata.error_class.reason].filter(Boolean).join(" — ");
+}
+
 export function filterJobs(jobs, filter) {
   return jobs.filter((job) => {
     if (filter === "active") return activeStates.has(job.state);

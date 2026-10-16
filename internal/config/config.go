@@ -94,19 +94,20 @@ const (
 )
 
 type Config struct {
-	Storage      Storage             `toml:"storage"`
-	Workflows    map[string]Workflow `toml:"workflows"`
-	Server       Server              `toml:"server"`
-	Commands     map[string]Command  `toml:"commands"`
-	GitHub       GitHub              `toml:"github"`
-	IssueSources issues.Config       `toml:"issue_sources"`
-	Triggers     TriggerDefinitions  `toml:"triggers"`
-	Alerts       Alerts              `toml:"alerts"`
-	Review       Review              `toml:"review"`
-	Plane        Plane               `toml:"plane"`
-	Healing      Healing             `toml:"healing"`
-	Health       Health              `toml:"health"`
-	path         string
+	Storage        Storage             `toml:"storage"`
+	Workflows      map[string]Workflow `toml:"workflows"`
+	Server         Server              `toml:"server"`
+	Commands       map[string]Command  `toml:"commands"`
+	GitHub         GitHub              `toml:"github"`
+	IssueSources   issues.Config       `toml:"issue_sources"`
+	Triggers       TriggerDefinitions  `toml:"triggers"`
+	Alerts         Alerts              `toml:"alerts"`
+	Review         Review              `toml:"review"`
+	Plane          Plane               `toml:"plane"`
+	Healing        Healing             `toml:"healing"`
+	Health         Health              `toml:"health"`
+	LLMUnavailable LLMUnavailable      `toml:"llm_unavailable"`
+	path           string
 }
 
 // Review configures the built-in PR review. DefaultProfile names the library
@@ -227,6 +228,82 @@ func (h Health) RequestTimeout() (time.Duration, error) {
 		return 0, fmt.Errorf("health.timeout must be a positive duration: %w", err)
 	}
 	return parsed, nil
+}
+
+// LLMUnavailable configures the llm_unavailable failure class (MACH-69): when
+// a run fails because the model endpoint was unreachable, Machinist waits for
+// the endpoint to become healthy and requeues the job once automatically
+// instead of burning the self-healing retry budget on an outage.
+type LLMUnavailable struct {
+	// Enabled turns classification and the wait-and-requeue pass on. Nil
+	// means enabled; set false to disable entirely.
+	Enabled *bool `toml:"enabled"`
+	// Endpoint is the model endpoint base URL to probe (e.g. the GLM API
+	// base). The URL comes from config, never from the repo. Empty disables
+	// the health probe and the automatic requeue: failures are still
+	// classified as llm_unavailable and alerted, but left for a human.
+	Endpoint string `toml:"endpoint"`
+	// Model is the expected model id served at the endpoint. "Port open" is
+	// not enough: on 16 Oct the endpoint came back serving a different model.
+	Model string `toml:"model"`
+	// ProbeInterval is the probe cadence while waiting. Empty means 30s.
+	ProbeInterval string `toml:"probe_interval"`
+	// MaxWait bounds how long Machinist waits before giving the job to a
+	// human. Empty means 60m.
+	MaxWait string `toml:"max_wait"`
+	// AutoRequeue is how many automatic requeues are allowed per failure
+	// before alerting for a human. Zero means 1; a negative value disables
+	// the automatic requeue.
+	AutoRequeue int `toml:"auto_requeue"`
+	// BlockOnModelMismatch makes a model-id mismatch block the requeue (a
+	// mismatch is logged either way). Nil means blocked.
+	BlockOnModelMismatch *bool `toml:"block_on_model_mismatch"`
+	// ProbeCompletion adds a tiny completion request after the /v1/models
+	// check, proving the endpoint answers inference, not just listing.
+	ProbeCompletion bool `toml:"probe_completion"`
+}
+
+// Enabled reports whether the llm_unavailable pass runs. Nil is enabled.
+func (l LLMUnavailable) IsEnabled() bool {
+	return l.Enabled == nil || *l.Enabled
+}
+
+// Blocking reports whether a model-id mismatch blocks the requeue. Nil blocks.
+func (l LLMUnavailable) Blocking() bool {
+	return l.BlockOnModelMismatch == nil || *l.BlockOnModelMismatch
+}
+
+// ProbeInterval parses the probe cadence, defaulting to 30 seconds.
+func (l LLMUnavailable) ProbeEvery() (time.Duration, error) {
+	if l.ProbeInterval == "" {
+		return 30 * time.Second, nil
+	}
+	parsed, err := time.ParseDuration(l.ProbeInterval)
+	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf("llm_unavailable.probe_interval must be a positive duration: %w", err)
+	}
+	return parsed, nil
+}
+
+// MaxWaitDuration parses the maximum wait for a healthy endpoint, defaulting
+// to 60 minutes.
+func (l LLMUnavailable) MaxWaitDuration() (time.Duration, error) {
+	if l.MaxWait == "" {
+		return 60 * time.Minute, nil
+	}
+	parsed, err := time.ParseDuration(l.MaxWait)
+	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf("llm_unavailable.max_wait must be a positive duration: %w", err)
+	}
+	return parsed, nil
+}
+
+// AutoRequeueCount resolves the automatic requeue allowance: zero means 1.
+func (l LLMUnavailable) AutoRequeueCount() int {
+	if l.AutoRequeue == 0 {
+		return 1
+	}
+	return l.AutoRequeue
 }
 
 // ResolveAlerts expands the alert spool directory like other configured paths

@@ -60,6 +60,8 @@ type Server struct {
 	health               config.Health
 	healthChecker        *healthChecker
 	healingEvery         time.Duration
+	llmUnavailable       config.LLMUnavailable
+	llmProbeEvery        time.Duration
 	autoMergeEvery       time.Duration
 	deployRunner         shellRunner
 	planeIntake          *PlaneIntake
@@ -191,6 +193,7 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 		health:            definition.Health,
 		healthChecker:     &healthChecker{alerts: &failAlertWriter{directory: alertsDirectory}, timeout: 10 * time.Second, now: time.Now},
 		healingEvery:      30 * time.Second,
+		llmUnavailable:    definition.LLMUnavailable,
 		autoMergeEvery:    defaultAutoMergeEvery,
 		deployRunner:      bashRunner{},
 		maxConcurrentJobs: maxConcurrentJobs, workerToken: workerToken, csrfToken: csrfToken,
@@ -327,6 +330,15 @@ func (s *Server) runScheduler(ctx context.Context) error {
 	loop(s.schedulerEvery, true, s.store.CleanupArtifacts)
 	loop(s.resolutionEvery, false, s.reconcileTicketOutcomes)
 	loop(s.healingEvery, true, s.healPendingRetries)
+	if s.llmUnavailable.IsEnabled() && s.llmUnavailable.Endpoint != "" {
+		probeEvery, err := s.llmUnavailable.ProbeEvery()
+		if err != nil {
+			log.Printf("llm_unavailable: %v", err)
+			probeEvery = 30 * time.Second
+		}
+		s.llmProbeEvery = probeEvery
+		loop(s.llmProbeEvery, true, s.healLLMUnavailablePass)
+	}
 	if len(s.health.Endpoints) > 0 {
 		loop(healthCheckInterval(s.health), true, s.runHealthChecks)
 	}

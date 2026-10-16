@@ -11,7 +11,7 @@ import { Transcript } from "./transcript.jsx";
 import { taskPresentation } from "./task-presentation.js";
 import { linkifyText } from "./linkify.js";
 import { Markdown } from "./markdown.js";
-import { jobDisplayTitle, canCancelJob, resolutionLabel, supersededJob, ticketAttempts, attemptStart, attemptDurationMillis } from "./runs-board.js";
+import { jobDisplayTitle, canCancelJob, errorClassLabel, resolutionLabel, supersededJob, ticketAttempts, attemptStart, attemptDurationMillis } from "./runs-board.js";
 import { runSidebarLinks } from "./run-links.js";
 import { formatDurationMillis, formatTokenUsage } from "./run-metrics.js";
 import { activityRows } from "./run-activity.js";
@@ -147,6 +147,7 @@ export function TaskDetail({
                       job.metadata.healing.exhausted ? "Retry budget exhausted." : ""
                     }`.trim(),
                 ],
+                ["Error class", errorClassLabel(job)],
                 [
                   "Auto-merge",
                   job.metadata?.automerge &&
