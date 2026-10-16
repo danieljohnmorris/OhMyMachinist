@@ -218,7 +218,7 @@ func OpenStore(path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) initialize(ctx context.Context) error {
-	const schemaVersion = 11
+	const schemaVersion = 12
 	var version int
 	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		return fmt.Errorf("read database schema version: %w", err)
@@ -351,7 +351,12 @@ END;`
 			return fmt.Errorf("upgrade database schema to version 11: %w", err)
 		}
 	}
-	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+jobMetadataSchema+planeSchema+"PRAGMA user_version=11;")
+	if version < 12 {
+		if _, err := s.db.ExecContext(ctx, autoMergeSchema); err != nil {
+			return fmt.Errorf("upgrade database schema to version 12: %w", err)
+		}
+	}
+	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+jobMetadataSchema+planeSchema+autoMergeSchema+"PRAGMA user_version=12;")
 	return err
 }
 
@@ -1890,7 +1895,7 @@ const resolutionStates = `('succeeded','failed','timed_out','cancelled')`
 // MarkJobResolved moves one terminal job into the resolved state and records
 // how it was resolved.
 func (s *Store) MarkJobResolved(ctx context.Context, jobID, kind, detail string, resolvedAt time.Time) error {
-	if kind != "pr" && kind != "plane" {
+	if kind != "pr" && kind != "plane" && kind != "automerge" {
 		return fmt.Errorf("unknown resolution kind %q", kind)
 	}
 	if strings.TrimSpace(detail) == "" {
@@ -1914,7 +1919,7 @@ func (s *Store) ResolveTicketsForIssue(ctx context.Context, key, kind, detail st
 	if strings.TrimSpace(key) == "" {
 		return 0, errors.New("issue key is required")
 	}
-	if kind != "pr" && kind != "plane" {
+	if kind != "pr" && kind != "plane" && kind != "automerge" {
 		return 0, fmt.Errorf("unknown resolution kind %q", kind)
 	}
 	now := s.now().UTC()

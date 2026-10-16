@@ -337,6 +337,105 @@ type GitHubPullRequest struct {
 	} `json:"mergedBy"`
 }
 
+// PullRequestCheck is one entry of a pull request's status check rollup: a
+// check run (status+conclusion) or a legacy status context (state).
+type PullRequestCheck struct {
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+	State      string `json:"state"`
+}
+
+// PullRequestStatus is the merge readiness of one pull request, as returned
+// by `gh pr view`.
+type PullRequestStatus struct {
+	Number      int    `json:"number"`
+	State       string `json:"state"`
+	Mergeable   string `json:"mergeable"`
+	MergeState  string `json:"mergeStateStatus"`
+	HeadRefOid  string `json:"headRefOid"`
+	MergeCommit struct {
+		Oid string `json:"oid"`
+	} `json:"mergeCommit"`
+	Rollup []PullRequestCheck `json:"statusCheckRollup"`
+}
+
+// EvaluateChecks classifies a check rollup for the auto-merge gate: ok is
+// true when every check succeeded (or none exist), pending is true when any
+// check is still running, and failed names the first unsuccessful check.
+func EvaluateChecks(rollup []PullRequestCheck) (ok, pending bool, failed string) {
+	for _, check := range rollup {
+		switch strings.ToUpper(strings.TrimSpace(check.Conclusion)) {
+		case "SUCCESS", "SKIPPED", "NEUTRAL":
+			continue
+		case "FAILURE", "TIMED_OUT", "STARTUP_FAILURE", "CANCELLED", "ACTION_REQUIRED":
+			return false, false, check.Name
+		}
+		switch strings.ToUpper(strings.TrimSpace(check.State)) {
+		case "SUCCESS":
+			continue
+		case "FAILURE", "ERROR", "EXPECTED", "TIMED_OUT", "STARTUP_FAILURE":
+			return false, false, check.Name
+		}
+		switch strings.ToUpper(strings.TrimSpace(check.Status)) {
+		case "COMPLETED", "":
+			switch strings.ToUpper(strings.TrimSpace(check.Conclusion)) {
+			case "", "SUCCESS", "SKIPPED", "NEUTRAL":
+				continue
+			}
+		case "IN_PROGRESS", "QUEUED", "PENDING", "REQUESTED", "WAITING":
+			return false, true, ""
+		}
+		return false, false, check.Name
+	}
+	return true, false, ""
+}
+
+// PullRequestStatus reads one pull request's merge readiness and check rollup.
+func (g *GitHubCLI) PullRequestStatus(ctx context.Context, repository string, number int) (PullRequestStatus, error) {
+	args := []string{"pr", "view", strconv.Itoa(number), "--repo", repository,
+		"--json", "number,state,mergeable,mergeStateStatus,headRefOid,mergeCommit,statusCheckRollup"}
+	output, err := g.run(ctx, "view pull request", args)
+	if err != nil {
+		return PullRequestStatus{}, err
+	}
+	var status PullRequestStatus
+	if err := json.Unmarshal(output, &status); err != nil {
+		return PullRequestStatus{}, malformedGitHubOutput("view pull request", err, output)
+	}
+	return status, nil
+}
+
+// UpdatePullRequestBranch brings a pull request's branch up to date with its
+// base branch, so a behind branch is retried instead of rejected. GitHub
+// reports a conflicting branch through the merge state, never here.
+func (g *GitHubCLI) UpdatePullRequestBranch(ctx context.Context, repository string, number int) error {
+	_, err := g.run(ctx, "update pull request branch",
+		[]string{"pr", "update-branch", strconv.Itoa(number), "--repo", repository})
+	return err
+}
+
+// MergePullRequest merges one pull request with the policy's merge method and
+// returns the merge commit SHA. The SHA is read back through a second view
+// because `gh pr merge` prints nothing on success.
+func (g *GitHubCLI) MergePullRequest(ctx context.Context, repository string, number int, method string) (string, error) {
+	if method == "" {
+		method = "squash"
+	}
+	args := []string{"pr", "merge", strconv.Itoa(number), "--repo", repository, "--" + method}
+	if _, err := g.run(ctx, "merge pull request", args); err != nil {
+		return "", err
+	}
+	status, err := g.PullRequestStatus(ctx, repository, number)
+	if err != nil {
+		return "", err
+	}
+	if !strings.EqualFold(status.State, "merged") || status.MergeCommit.Oid == "" {
+		return "", fmt.Errorf("pull request #%d did not merge (state %s)", number, status.State)
+	}
+	return status.MergeCommit.Oid, nil
+}
+
 // MergedPullRequests lists recent merged pull requests for a repository. The
 // caller matches them against ticket keys, so a bounded recent window is
 // enough for reconciliation.

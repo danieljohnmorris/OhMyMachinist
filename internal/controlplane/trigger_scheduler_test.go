@@ -269,6 +269,18 @@ func (f *fakeGitHubTriggerClient) MergedPullRequests(context.Context, string, in
 	return nil, nil
 }
 
+func (f *fakeGitHubTriggerClient) PullRequestStatus(context.Context, string, int) (PullRequestStatus, error) {
+	return PullRequestStatus{}, nil
+}
+
+func (f *fakeGitHubTriggerClient) UpdatePullRequestBranch(context.Context, string, int) error {
+	return nil
+}
+
+func (f *fakeGitHubTriggerClient) MergePullRequest(context.Context, string, int, string) (string, error) {
+	return "", nil
+}
+
 func (f *fakeGitHubTriggerClient) SearchRequestedIssues(ctx context.Context, _ []string, label string, limit int) ([]GitHubCandidate, error) {
 	if f.searchStarted != nil {
 		select {

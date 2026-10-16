@@ -240,6 +240,7 @@ const PLANE_TOGGLE_FIELDS = [
 const PLANE_JSON_FIELDS = [
   ["plane.repositories", "Project to repository map (JSON)"],
   ["plane.supervisors", "Ticket supervisor map (JSON)"],
+  ["plane.merge_policies", "Per-project auto-merge + deploy policies (JSON: {\"MACH\": {\"auto_merge\": true, \"deploy_command\": \"…\", \"rollback_command\": \"…\", \"health_check\": {\"command\": \"…\" | \"url\": \"…\", \"status\": 200, \"expect\": \"…\"}}})"],
   ["plane.prompt_template", "Prompt template"],
 ];
 
