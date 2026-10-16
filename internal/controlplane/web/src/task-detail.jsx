@@ -383,6 +383,11 @@ export function TaskDetail({
                 {linkifyText(result.error)}
               </p>
             )}
+            {job.state === "cancelled" && (
+              <p className="text-sm text-muted-foreground" data-testid="cancel-detail">
+                {cancelDetail(latest)}
+              </p>
+            )}
             {result && job.task && (
               <Artifacts
                 key={result.id}
@@ -503,13 +508,21 @@ function RunActivity({ job }) {
 }
 
 function ExecutionDetails({ run }) {
+  // A run stopped before a worker ever claimed it has no start time or worker;
+  // say so instead of showing "Unavailable"/"Unassigned".
+  const neverStarted =
+    run.state === "cancelled" &&
+    (!run.started_at || run.started_at === "0001-01-01T00:00:00Z");
   return (
     <section
       aria-label="execution details"
       className="text-xs text-muted-foreground"
     >
       <dl className="mt-3 grid gap-3 sm:grid-cols-3">
-        <RunMetric label="Started" value={formatTimestamp(run.started_at)} />
+        <RunMetric
+          label="Started"
+          value={neverStarted ? "cancelled before start" : formatTimestamp(run.started_at)}
+        />
         <RunMetric
           label="Completed"
           value={formatTimestamp(run.completed_at)}
@@ -522,7 +535,10 @@ function ExecutionDetails({ run }) {
         />
         <RunMetric label="Run ID" value={run.id} mono />
         <RunMetric label="Executor" value={run.executor} />
-        <RunMetric label="Worker" value={run.worker_name || "Unassigned"} />
+        <RunMetric
+          label="Worker"
+          value={neverStarted ? "cancelled before start" : run.worker_name || "Unassigned"}
+        />
         <RunMetric
           label="Duration"
           value={
@@ -708,6 +724,15 @@ function TaskActions({ job, result, onAction }) {
       )}
     </div>
   );
+}
+
+// cancelDetail describes a cancelled attempt: who stopped it and, when the
+// operator gave one, why.
+function cancelDetail(run) {
+  const actor = run?.cancel_actor || "operator";
+  const reason = run?.cancel_reason || "";
+  const byActor = `Cancelled by ${actor}`;
+  return reason && reason !== "Cancelled by operator" ? `${byActor} · ${reason}` : byActor;
 }
 
 function resultTitle(job, result) {

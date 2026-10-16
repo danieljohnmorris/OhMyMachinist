@@ -90,6 +90,8 @@ type Run struct {
 	WorkerName     string             `json:"worker_name,omitempty"`
 	ExitCode       *int               `json:"exit_code,omitempty"`
 	Error          string             `json:"error,omitempty"`
+	CancelActor    string             `json:"cancel_actor,omitempty"`
+	CancelReason   string             `json:"cancel_reason,omitempty"`
 	StartedAt      time.Time          `json:"started_at,omitempty"`
 	CompletedAt    time.Time          `json:"completed_at,omitempty"`
 	DurationMillis *int64             `json:"duration_millis,omitempty"`
@@ -216,7 +218,7 @@ func OpenStore(path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) initialize(ctx context.Context) error {
-	const schemaVersion = 8
+	const schemaVersion = 9
 	var version int
 	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		return fmt.Errorf("read database schema version: %w", err)
@@ -253,7 +255,7 @@ CREATE TABLE IF NOT EXISTS runs (
  id TEXT PRIMARY KEY, job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id), command TEXT NOT NULL, command_hash TEXT NOT NULL,
  executor TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', repository TEXT NOT NULL, rendered_prompt TEXT NOT NULL,
  timeout_ms INTEGER NOT NULL, state TEXT NOT NULL, worker_instance TEXT, worker_name TEXT NOT NULL DEFAULT '',
- lease_token TEXT, lease_expires_at INTEGER, exit_code INTEGER, error TEXT, result TEXT, events TEXT,
+ lease_token TEXT, lease_expires_at INTEGER, exit_code INTEGER, error TEXT, cancel_actor TEXT NOT NULL DEFAULT '', cancel_reason TEXT NOT NULL DEFAULT '', result TEXT, events TEXT,
  started_at TEXT, completed_at TEXT, duration_millis INTEGER, token_usage INTEGER);
 CREATE INDEX IF NOT EXISTS runs_dispatch ON runs(state, job_id);
 CREATE TABLE IF NOT EXISTS workers (instance_id TEXT PRIMARY KEY, name TEXT NOT NULL, last_seen_at TEXT NOT NULL);
@@ -334,7 +336,12 @@ END;`
 			return fmt.Errorf("upgrade database schema to version 8: %w", err)
 		}
 	}
-	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+jobMetadataSchema+"PRAGMA user_version=8;")
+	if version < 9 {
+		if err := s.addRunCancelColumns(ctx); err != nil {
+			return fmt.Errorf("upgrade database schema to version 9: %w", err)
+		}
+	}
+	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+jobMetadataSchema+"PRAGMA user_version=9;")
 	return err
 }
 
@@ -356,6 +363,28 @@ func (s *Store) addJobResolution(ctx context.Context) error {
 			continue
 		}
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN `+column); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// addRunCancelColumns records who cancelled a run and why, so the run page can
+// show the cancellation actor and reason beside the attempt's status.
+func (s *Store) addRunCancelColumns(ctx context.Context) error {
+	for _, column := range []string{
+		"cancel_actor TEXT NOT NULL DEFAULT ''",
+		"cancel_reason TEXT NOT NULL DEFAULT ''",
+	} {
+		name, _, _ := strings.Cut(column, " ")
+		var present int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name=?`, name).Scan(&present); err != nil {
+			return err
+		}
+		if present > 0 {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE runs ADD COLUMN `+column); err != nil {
 			return err
 		}
 	}
@@ -1219,9 +1248,15 @@ func (s *Store) Complete(ctx context.Context, runID string, completion protocol.
 		return ErrLeaseConflict
 	}
 	if terminalRunState(state) {
+		if err := keepRunTranscript(ctx, tx, runID, completion); err != nil {
+			return err
+		}
 		return tx.Commit()
 	}
 	if state != "running" {
+		if err := keepRunTranscript(ctx, tx, runID, completion); err != nil {
+			return err
+		}
 		return ErrRunState
 	}
 	if !leaseExpiresAt.Valid || leaseExpiresAt.Int64 <= s.now().UTC().UnixNano() {
@@ -1273,6 +1308,22 @@ func (s *Store) Complete(ctx context.Context, runID string, completion protocol.
 		}
 	}
 	return tx.Commit()
+}
+
+// keepRunTranscript stores a finished worker's event log on a run that was
+// already stopped (cancelled, killed, timed out, or an expired lease), so the
+// transcript survives cancellation instead of truncating at the last streamed
+// chunk. It only grows the stored log and never touches the run's outcome, so a
+// late completion cannot revive a stopped attempt.
+func keepRunTranscript(ctx context.Context, tx *sql.Tx, runID string, completion protocol.Completion) error {
+	if len(completion.Events) == 0 {
+		return nil
+	}
+	events := string(completion.Events)
+	if _, err := tx.ExecContext(ctx, `UPDATE runs SET events=? WHERE id=? AND LENGTH(COALESCE(events,''))<LENGTH(?)`, events, runID, events); err != nil {
+		return fmt.Errorf("keep run transcript: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) Heartbeat(ctx context.Context, runID string, heartbeat protocol.Heartbeat) error {
@@ -1337,6 +1388,23 @@ func (s *Store) DeleteJob(ctx context.Context, jobID string) error {
 		return fmt.Errorf("delete job: %w", err)
 	}
 	return tx.Commit()
+}
+
+// leaseStartupGrace is how long a still-running job keeps its lease after the
+// control plane starts, so a restart does not reclaim or interrupt work whose
+// worker is about to heartbeat again.
+const leaseStartupGrace = 2 * leaseDuration
+
+// GraceRunningLeases extends every running run's lease at startup so a
+// control-plane restart does not reclaim or interrupt jobs whose workers are
+// still executing. A worker that never returns lets the lease lapse and the
+// normal reclaim pass handles it.
+func (s *Store) GraceRunningLeases(ctx context.Context) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE runs SET lease_expires_at=? WHERE state='running'`, s.now().UTC().Add(leaseStartupGrace).UnixNano())
+	if err != nil {
+		return 0, fmt.Errorf("grace running leases: %w", err)
+	}
+	return res.RowsAffected()
 }
 
 func (s *Store) ReclaimExpiredLeases(ctx context.Context) (int64, error) {
@@ -1461,7 +1529,7 @@ func (s *Store) RunOutput(ctx context.Context, runID string) (RunOutput, error) 
 // jobID restricts the result to that job.
 func (s *Store) listJobs(ctx context.Context, jobID string) ([]Job, error) {
 	query := `SELECT j.id,j.title,j.prompt,j.repository,j.github_issue_title,j.command,j.trigger_identity,j.occurrence_key,j.trigger_subject,j.state,j.previous_job_id,j.attempt,COALESCE(j.superseded_by,''),j.issue_key,j.resolution_kind,j.resolution_detail,COALESCE(j.resolved_at,''),j.created_at,j.updated_at,
-COALESCE(r.id,''),COALESCE(r.command,''),COALESCE(r.executor,''),COALESCE(r.model,''),COALESCE(r.state,''),COALESCE(NULLIF(r.worker_name,''),w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,''),r.duration_millis,r.token_usage,a.step,COALESCE(a.outcome,''),COALESCE(NULLIF(a.summary,''),CASE WHEN json_valid(r.result) THEN json_extract(r.result,'$.final_message') END,'')
+COALESCE(r.id,''),COALESCE(r.command,''),COALESCE(r.executor,''),COALESCE(r.model,''),COALESCE(r.state,''),COALESCE(NULLIF(r.worker_name,''),w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.cancel_actor,''),COALESCE(r.cancel_reason,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,''),r.duration_millis,r.token_usage,a.step,COALESCE(a.outcome,''),COALESCE(NULLIF(a.summary,''),CASE WHEN json_valid(r.result) THEN json_extract(r.result,'$.final_message') END,'')
 FROM jobs j LEFT JOIN runs r ON r.job_id=j.id LEFT JOIN workers w ON w.instance_id=r.worker_instance LEFT JOIN workflow_attempts a ON a.run_id=r.id`
 	args := []any{}
 	if jobID != "" {
@@ -1481,7 +1549,7 @@ FROM jobs j LEFT JOIN runs r ON r.job_id=j.id LEFT JOIN workers w ON w.instance_
 		var created, updated, started, completed string
 		var resolutionKind, resolutionDetail, resolvedAt string
 		if err := rows.Scan(&job.ID, &job.Title, &job.Prompt, &job.Repository, &job.GitHubIssueTitle, &job.Command, &job.TriggerID, &job.OccurrenceKey, &job.TriggerSubject, &job.State, &job.PreviousJobID, &job.Attempt, &job.SupersededBy, &job.IssueKey, &resolutionKind, &resolutionDetail, &resolvedAt, &created, &updated,
-			&run.ID, &run.Command, &run.Executor, &run.Model, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &started, &completed, &run.DurationMillis, &run.TokenUsage, &run.Step, &run.Outcome, &run.Summary); err != nil {
+			&run.ID, &run.Command, &run.Executor, &run.Model, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &run.CancelActor, &run.CancelReason, &started, &completed, &run.DurationMillis, &run.TokenUsage, &run.Step, &run.Outcome, &run.Summary); err != nil {
 			return nil, err
 		}
 		job.ResolutionKind = resolutionKind
@@ -1549,9 +1617,9 @@ func (s *Store) GetJob(ctx context.Context, jobID string) (Job, error) {
 func (s *Store) GetRun(ctx context.Context, runID string) (Run, error) {
 	var run Run
 	var started, completed string
-	err := s.db.QueryRowContext(ctx, `SELECT r.id,r.command,r.executor,r.model,r.state,COALESCE(NULLIF(r.worker_name,''),w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,''),r.duration_millis,r.token_usage,a.step,COALESCE(a.outcome,''),COALESCE(NULLIF(a.summary,''),CASE WHEN json_valid(r.result) THEN json_extract(r.result,'$.final_message') END,'')
+	err := s.db.QueryRowContext(ctx, `SELECT r.id,r.command,r.executor,r.model,r.state,COALESCE(NULLIF(r.worker_name,''),w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.cancel_actor,''),COALESCE(r.cancel_reason,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,''),r.duration_millis,r.token_usage,a.step,COALESCE(a.outcome,''),COALESCE(NULLIF(a.summary,''),CASE WHEN json_valid(r.result) THEN json_extract(r.result,'$.final_message') END,'')
 FROM runs r LEFT JOIN workers w ON w.instance_id=r.worker_instance LEFT JOIN workflow_attempts a ON a.run_id=r.id WHERE r.id=?`, runID).
-		Scan(&run.ID, &run.Command, &run.Executor, &run.Model, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &started, &completed, &run.DurationMillis, &run.TokenUsage, &run.Step, &run.Outcome, &run.Summary)
+		Scan(&run.ID, &run.Command, &run.Executor, &run.Model, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &run.CancelActor, &run.CancelReason, &started, &completed, &run.DurationMillis, &run.TokenUsage, &run.Step, &run.Outcome, &run.Summary)
 	if err != nil {
 		return Run{}, err
 	}

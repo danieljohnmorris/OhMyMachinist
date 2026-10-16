@@ -58,8 +58,10 @@ test("attempt picker smoke", async (context) => {
 
   const picker = document.querySelector('#attempt-picker');
   assert.ok(picker, "attempt picker renders");
-  // Older job URL defaults the picker to that attempt; tab param preserved.
-  assert.equal(picker.value, "job_older");
+  // The task URL identifies its latest attempt: opening an older attempt
+  // lands on the latest, and the picker defaults to it. The tab param stays.
+  await eventually(() => assert.equal(document.querySelector('#attempt-picker').value, "job_newer"));
+  assert.match(dom.window.location.hash, /#\/runs\/job_newer/);
   assert.match(dom.window.location.hash, /tab=activity/);
   const labels = [...picker.options].map((option) => option.textContent);
   assert.equal(labels.length, 2);
@@ -70,22 +72,22 @@ test("attempt picker smoke", async (context) => {
   assert.match(labels[1], /running/);
   assert.match(labels[1], /elapsed|\.| /);
 
-  // Header shows the selected attempt's state; switch to the newer attempt.
+  // Header shows the latest attempt; switch to the older attempt explicitly.
   const header = document.querySelector("header");
-  assert.match(header.textContent, /failed/);
-  picker.value = "job_newer";
+  assert.match(header.textContent, /running/);
+  picker.value = "job_older";
   picker.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
-  await eventually(() => assert.match(dom.window.location.hash, /attempt=job_newer/));
+  await eventually(() => assert.match(dom.window.location.hash, /attempt=job_older/));
   assert.match(dom.window.location.hash, /tab=activity/, "tab param kept");
-  await eventually(() => assert.match(document.querySelector("header").textContent, /running/), "header status follows the attempt");
-  assert.equal(document.querySelector('#attempt-picker').value, "job_newer");
+  await eventually(() => assert.match(document.querySelector("header").textContent, /failed/), "header status follows the attempt");
+  assert.equal(document.querySelector('#attempt-picker').value, "job_older");
 
-  // Switching back to the URL's job drops the attempt param.
+  // Switching back to the latest attempt drops the attempt param.
   const pickerAgain = document.querySelector('#attempt-picker');
-  pickerAgain.value = "job_older";
+  pickerAgain.value = "job_newer";
   pickerAgain.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
   await eventually(() => assert.doesNotMatch(dom.window.location.hash, /attempt=/));
-  await eventually(() => assert.match(document.querySelector("header").textContent, /failed/));
+  await eventually(() => assert.match(document.querySelector("header").textContent, /running/));
 });
 
 function eventually(assertion) {

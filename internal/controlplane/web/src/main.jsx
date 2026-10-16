@@ -13,7 +13,7 @@ import { Card } from "@/components/ui/card";
 import { PageHeading } from "@/components/ui/page-heading";
 import { cn } from "@/lib/utils";
 import { routeFromHash } from "@/routes";
-import { attemptTime, boardCardTimestamp, boardColumns, boardDateFilters, boardFiltersFromHash, boardHash, canCancelJob, collapseIssueAttempts, collapseJobsByTicket, currentRun, filterBoardJobs, filterJobsByDate, groupEntriesByBoardColumn, groupJobsByBoardColumn, jobCounts, jobDisplayTitle, resolutionLabel } from "@/runs-board";
+import { attemptTime, boardCardTimestamp, boardColumns, boardDateFilters, boardFiltersFromHash, boardHash, canCancelJob, collapseIssueAttempts, collapseJobsByTicket, currentRun, filterBoardJobs, filterJobsByDate, groupEntriesByBoardColumn, groupJobsByBoardColumn, jobCounts, jobDisplayTitle, resolutionLabel, ticketAttempts } from "@/runs-board";
 import { groupEntriesByProject, groupJobsByProject } from "@/project";
 import { concurrencyLabel } from "@/concurrency";
 import { createStatusLoader } from "@/status-loader";
@@ -121,6 +121,18 @@ function App() {
   const attemptJob = route.attempt ? status.jobs.find((job) => job.id === route.attempt) : undefined;
   const displayJob = attemptJob || selectedJob;
 
+  // A task is addressed by its latest attempt; older attempts are selected
+  // explicitly with ?attempt=<jobID>. A stale link to a superseded attempt
+  // therefore lands on the latest, and the picker defaults to it.
+  useEffect(() => {
+    if (!selectedJob || route.attempt) return;
+    const latest = ticketAttempts(status.jobs, selectedJob).at(-1);
+    if (latest && latest.id !== route.jobID) {
+      window.history.replaceState(null, "", taskHash(latest.id, route.tab, ""));
+      setRoute((current) => ({ ...current, jobID: latest.id }));
+    }
+  }, [route.jobID, route.attempt, route.tab, status.jobs]);
+
   async function submit(event) {
     event.preventDefault();
     setSubmitting(true);
@@ -164,7 +176,9 @@ function App() {
     setTaskActionError("");
     try {
       const response = await fetch(`/api/v1/jobs/${encodeURIComponent(job.id)}/cancel`, {
-        method: "POST", headers: { "X-Machinist-CSRF": status.csrf_token },
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Machinist-CSRF": status.csrf_token },
+        body: JSON.stringify({}),
       });
       if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.error || "Unable to cancel job"); }
       await statusLoader.current.refresh();
