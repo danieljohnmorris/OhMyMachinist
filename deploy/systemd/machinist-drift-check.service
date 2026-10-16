@@ -1,0 +1,11 @@
+[Unit]
+Description=Machinist drift check: diff installed files against the repo at the deployed SHA
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Environment=HOME=/home/machinist
+# The overlay and the secret env files are never in the manifest, so the drift
+# check never reads or diffs them.
+ExecStart=/usr/local/lib/machinist-factory/drift-check.sh

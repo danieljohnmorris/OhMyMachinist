@@ -118,7 +118,7 @@ class ControlPlaneProfileTests(unittest.TestCase):
                 return False
 
             def read(self):
-                return json.dumps({"project": "omacom/mobile", "source": "project", "profile": "name: p\nversion: 1\n", "extra_instructions": "rules"}).encode()
+                return json.dumps({"project": "acme/widgets", "source": "project", "profile": "name: p\nversion: 1\n", "extra_instructions": "rules"}).encode()
 
         def fake_urlopen(request, timeout):
             captured["url"] = request.full_url
@@ -129,12 +129,12 @@ class ControlPlaneProfileTests(unittest.TestCase):
         env = {
             "MACHINIST_CONTROL_PLANE_URL": "http://cp:7331",
             "MACHINIST_CONTROL_PLANE_TOKEN": "worker-token",
-            "MACHINIST_PROJECT": "omacom/mobile",
+            "MACHINIST_PROJECT": "acme/widgets",
         }
         with mock.patch.object(post.profile_mod.urllib.request, "urlopen", side_effect=fake_urlopen):
             payload = post.profile_mod._control_plane_profile(env, 900)
         self.assertIsNotNone(payload)
-        self.assertEqual(captured["url"], "http://cp:7331/api/v1/review-profile?project=omacom%2Fmobile")
+        self.assertEqual(captured["url"], "http://cp:7331/api/v1/review-profile?project=acme%2Fwidgets")
         self.assertEqual(captured["auth"], "Bearer worker-token")
         self.assertLessEqual(captured["timeout"], 30)
 

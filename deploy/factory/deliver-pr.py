@@ -9,12 +9,22 @@ Fork mode (2026-10-10): if the repo has git config machinist.prBase=<remote> (e.
 origin is OUR fork (push target) and <remote> is the third-party upstream (never pushed).
   machinist.upstreamPr=manual (default): push branch to fork, open a REVIEW PR inside the fork
      (fork main synced to upstream main first); log upstream compare URL. Upstream is not touched.
-  machinist.upstreamPr=draft: also open a DRAFT PR fork:branch -> upstream (only after Daniel opts in)."""
+  machinist.upstreamPr=draft: also open a DRAFT PR fork:branch -> upstream (only after the fork owner opts in)."""
 import argparse, fnmatch, json, os, re, subprocess, sys, time
 
-ALLOWED_OWNERS = {"danieljohnmorris", "omacom"}          # owners we may PUSH to
-UPSTREAM_PR_OWNERS = {"MiaAI-Lab"}                     # third-party: PR target only, never pushed
-PLAIN_BRANCH_OWNERS = {"omacom"}                      # branch = plain title slug (no factory/, no KEY-)
+def _owners(var):
+    return set(filter(None, (value.strip() for value in os.environ.get(var, "").split(","))))
+
+# Owners the delivery step may PUSH to. Instance values: set MACHINIST_ALLOWED_OWNERS
+# (comma-separated) in the factory env file. Never in git.
+ALLOWED_OWNERS = _owners("MACHINIST_ALLOWED_OWNERS")
+# Third-party owners a PR may target from a fork; never pushed to.
+UPSTREAM_PR_OWNERS = _owners("MACHINIST_UPSTREAM_PR_OWNERS")
+# Owners whose branches use a plain title slug (no factory/, no KEY-).
+PLAIN_BRANCH_OWNERS = _owners("MACHINIST_PLAIN_BRANCH_OWNERS")
+# Commit identity for the factory; override per instance.
+GIT_NAME = os.environ.get("MACHINIST_GIT_NAME", "Machinist Factory")
+GIT_EMAIL = os.environ.get("MACHINIST_GIT_EMAIL", "machinist@localhost")
 MAX_FILES = 300
 SECRET_GLOBS = [".env", ".env.*", "*.env", "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa*", "id_ed25519*",
                 "id_ecdsa*", "*.keystore", "credentials*.json", ".npmrc", ".netrc", "*secret*"]
@@ -23,7 +33,7 @@ SECRET_GLOBS = [".env", ".env.*", "*.env", "*.pem", "*.key", "*.p12", "*.pfx", "
 ENV_TEMPLATE_GLOBS = [".env.example", ".env.sample", ".env.template", ".env.dist", ".env.defaults",
                       "example.env", "sample.env", "*.env.example", "*.env.sample"]
 NOHOOKS = ["-c", "core.hooksPath=/dev/null"]
-# PR title/body rules (Daniel, 2026-10-10; model PR: omacom/mobile#179):
+# PR title/body rules (delivery contract; model PR: <owner>/<repo>#179):
 #  - title: short plain description, no ticket-id prefix ("OMM-1:"), no colon chains
 #  - body: one lead sentence + What it adds / What is not implemented / What was not tested / Tested
 #  - no Machinist boilerplate, no pasted spec, no run ids
@@ -193,8 +203,8 @@ def _commit_or_stash_review_edits(repo, branch, run_id):
         bad = secret_like(files)
         if bad:
             raise RuntimeError(f"secret-like files {bad}")
-        run("git", *NOHOOKS, "-c", "user.name=Machinist Factory",
-            "-c", "user.email=danieljohnmorris@users.noreply.github.com",
+        run("git", *NOHOOKS, "-c", f"user.name={GIT_NAME}",
+            "-c", f"user.email={GIT_EMAIL}",
             "commit", "--no-verify", "-q", "-m", f"Review fixes ({label})", cwd=repo)
         run("git", *NOHOOKS, "push", "--no-verify", "origin", f"HEAD:refs/heads/{branch}", cwd=repo)
         log(f"review lane: committed and pushed leftover review fixes ({label})")
@@ -338,7 +348,7 @@ def main():
     run_id = os.environ.get("MACHINIST_RUN_ID", "manual")
     pr_title = pr_file_title or clean_title(title) or "Machinist change"
     if PLAIN_BRANCH_OWNERS & {owner, (up_full or "").split("/")[0]}:
-        # omacom/* (Daniel, 2026-10-10): plain kebab-case from the PR title; no factory/, no ticket key, no run id
+        # Plain-branch owners: plain kebab-case from the PR title; no factory/, no ticket key, no run id
         base_b = slug(pr_title, 50)
         branch, n = base_b, 2
         while (run("git", "rev-parse", "--verify", "-q", f"refs/heads/{branch}", cwd=repo, check=False)
@@ -358,8 +368,8 @@ def main():
         g("reset", "-q")
         raise RuntimeError(f"refusing to commit: {'secret-like files ' + str(bad) if bad else str(len(files)) + ' files > ' + str(MAX_FILES)}; left on branch {branch}")
     msg = f"{pr_title}\n\nMachinist run {run_id}" + (f"\nRefs {key}" if key else "")
-    env_id = ["-c", "user.name=" + (run("git", "config", "user.name", cwd=repo, check=False) or "Machinist Factory"),
-              "-c", "user.email=" + (run("git", "config", "user.email", cwd=repo, check=False) or "danieljohnmorris@users.noreply.github.com")]
+    env_id = ["-c", "user.name=" + (run("git", "config", "user.name", cwd=repo, check=False) or GIT_NAME),
+              "-c", "user.email=" + (run("git", "config", "user.email", cwd=repo, check=False) or GIT_EMAIL)]
     run("git", *NOHOOKS, *env_id, "commit", "--no-verify", "-q", "-m", msg, cwd=repo)
     sha = g("rev-parse", "--short", "HEAD")
     if os.environ.get("DELIVER_PR_DRY") == "1":
@@ -403,7 +413,7 @@ def main():
                            cwd=repo, capture_output=True, text=True)
         if r.returncode != 0: log(f"warn: could not sync fork {base} to {up_remote}/{up_base}: {r.stderr.strip()[-200:]}")
         pr = open_pr(full, base, branch,
-                     f"Review PR inside the fork. NOT sent upstream.\nAfter Daniel approves, open upstream PR: {up_compare}")
+                     f"Review PR inside the fork. NOT sent upstream.\nAfter the fork owner approves, open upstream PR: {up_compare}")
         result["pr"] = pr
         result["review_pr"] = pr
         review_rc = run_review(repo, pr)

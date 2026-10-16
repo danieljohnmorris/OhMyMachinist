@@ -1,0 +1,30 @@
+# Machinist worker configuration template.
+#
+# The installer copies this file to /etc/machinist/worker.toml (and, for each
+# lane unit, /etc/machinist/worker-<lane>.toml) only when the file does not
+# exist; it never overwrites an existing worker config, the local overlay or
+# the env files. Instance values belong in /etc/machinist/worker.local.toml,
+# merged on top of this file at load time (base first, overlay second, the
+# overlay wins). Secrets never belong here: the control-plane token is read
+# from token_file and Plane/GitHub tokens come from the systemd
+# EnvironmentFile files under /etc/machinist/.
+
+# Optional; defaults to the machine hostname.
+# name = "lane"
+data_directory = "~/.machinist/worker"
+
+[control_plane]
+url = "http://127.0.0.1:7331"
+token_file = "~/.machinist/server/worker.token"
+
+# Executors read a prompt on stdin. Point command at your coding agent; keep
+# {{machinist.model}} as a complete --flag={{machinist.model}} argument to
+# expose model aliases.
+[executors.omp]
+command = ["/usr/local/lib/machinist-factory/omp-glm-pr"]
+# models = { default = "<your-model>" }
+
+# Register every repository a managed worker may use. Paths are instance
+# values, so put them in worker.local.toml, not here.
+# [repositories.my-project]
+# path = "/absolute/path/to/my-project"

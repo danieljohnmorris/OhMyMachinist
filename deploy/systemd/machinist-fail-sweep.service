@@ -1,0 +1,13 @@
+[Unit]
+Description=Machinist fail sweep: alert on timed_out/failed runs the wrapper hook missed
+
+[Service]
+Type=oneshot
+User=machinist
+Group=machinist
+WorkingDirectory=/home/machinist
+Environment=HOME=/home/machinist
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+ExecStart=/usr/bin/python3 /usr/local/lib/machinist-factory/fail.py sweep
