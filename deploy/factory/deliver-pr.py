@@ -132,7 +132,110 @@ def fallback_body(title, files):
 
 def log(*a): print("deliver-pr:", *a, file=sys.stderr, flush=True)
 
-REVIEW_VERDICTS = {0: "PASS", 2: "BLOCKED", 3: "INCOMPLETE"}
+REVIEW_VERDICTS = {0: "PASS", 2: "BLOCKED", 3: "INCOMPLETE", 4: "ERROR"}
+# MACH-63: every verdict publishes a machinist/review status; PASS=success,
+# BLOCKED=failure, INCOMPLETE/ERROR=error (the reason goes in the description).
+REVIEW_STATUS_STATES = {"PASS": "success", "BLOCKED": "failure", "INCOMPLETE": "error", "ERROR": "error"}
+
+def review_verdict(json_path, returncode):
+    """Resolve the built-in review verdict (MACH-63).
+
+    The JSON verdict (``status``/``reason`` written by post_pr_review.py) wins;
+    the exit code is the fallback. Only an explicit PASS is a pass: a missing or
+    unreadable verdict, an unknown exit code, INCOMPLETE and ERROR all stay
+    non-PASS, so a review that did not run is never reported as PASS. Returns a
+    dict with status, reason, exit_code, passed and failure (BLOCKED fails the
+    delivery job; INCOMPLETE/ERROR do not, MACH-31)."""
+    status = None
+    reason = ""
+    if json_path and os.path.isfile(json_path):
+        try:
+            with open(json_path, errors="replace") as handle:
+                payload = json.load(handle) or {}
+            candidate = str(payload.get("status") or "").strip().upper()
+            reason = str(payload.get("reason") or "").strip()
+            if candidate in REVIEW_STATUS_STATES:
+                status = candidate
+            else:
+                status = "ERROR"
+                reason = reason or f"review wrote an unknown verdict: {candidate or '(none)'}"
+        except (OSError, ValueError, AttributeError) as error:
+            status = "ERROR"
+            reason = f"cannot read the review verdict: {error}"
+    elif json_path:
+        # A JSON verdict was requested but not written. Fall back to the exit
+        # code, but 0 is not a pass without the verdict file (MACH-63).
+        mapped = REVIEW_VERDICTS.get(returncode)
+        status = mapped if mapped and mapped != "PASS" else "ERROR"
+        reason = f"review wrote no verdict (exit code {returncode})"
+    if status is None:
+        mapped = REVIEW_VERDICTS.get(returncode)
+        status = mapped if mapped else "ERROR"
+        if mapped is None:
+            reason = f"unknown review exit code {returncode}"
+    return {
+        "status": status,
+        "reason": reason,
+        "exit_code": returncode,
+        "passed": status == "PASS",
+        "failure": status == "BLOCKED",
+    }
+
+def publish_review_status(full, pr, status, reason, repo):
+    """Publish the machinist/review commit status on the PR head (MACH-63).
+
+    post_pr_review.py posts its own status when it runs; this publishes the
+    verdict again from the delivery side so the PR never shows a mismatch: a
+    review that produced no usable verdict (bad arguments, a crash, a missing
+    JSON file, an unknown exit code) still gets a non-PASS status posted here.
+    Never raises: a status we cannot post is only a warning."""
+    if not pr:
+        return
+    state = REVIEW_STATUS_STATES.get(status, "error")
+    description = (f"Machinist review {status}" + (f": {reason}" if reason else ""))[:140]
+    sha = run("gh", "pr", "view", pr, "--json", "headRefOid", "--jq", ".headRefOid", check=False, cwd=repo)
+    if not sha:
+        log("warn: could not resolve the PR head to publish the review status")
+        return
+    r = subprocess.run(
+        ["gh", "api", f"repos/{full}/statuses/{sha}", "-f", f"state={state}",
+         "-f", "context=machinist/review", "-f", f"description={description}"],
+        cwd=repo, capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        log(f"warn: could not publish the review status: {(r.stderr or r.stdout).strip()[-300:]}")
+
+def run_review(repo, pr_url):
+    """Run the built-in review (types/lint/build, parallel reviewers, docs) and
+    return its verdict.
+
+    Returns a dict from review_verdict(), or None when the review script is not
+    installed (nothing ran). Only an explicit PASS is a pass; the delivery job
+    fails on BLOCKED only — INCOMPLETE and ERROR never fail it (MACH-31) but are
+    never reported as PASS either (MACH-63)."""
+    script = review_script_path()
+    if not os.path.isfile(script):
+        log(f"review skipped: {script} not found")
+        return None
+    command = [sys.executable, script, "--repo", repo, "--pr", pr_url]
+    executor = review_executor_cmd()
+    if executor:
+        command += ["--executor-cmd", executor]
+    else:
+        log("no review executor available (set MACHINIST_REVIEW_EXECUTOR); reviewers will be skipped")
+    out = os.environ.get("MACHINIST_OUTPUT_DIR")
+    json_path = None
+    if out:
+        json_path = os.path.join(out, "post-pr-review.json")
+        command += ["--json-out", json_path]
+    log("built-in review starting")
+    completed = subprocess.run(command, cwd=repo)
+    verdict = review_verdict(json_path, completed.returncode)
+    detail = f": {verdict['reason']}" if verdict["reason"] else ""
+    log(f"built-in review verdict: {verdict['status']}{detail}")
+    if verdict["status"] != "PASS":
+        log(f"review {verdict['status']}: the delivery job continues for INCOMPLETE/ERROR and fails only for BLOCKED")
+    return verdict
 
 def review_executor_cmd():
     """Executor for the built-in review (MACH-31): MACHINIST_REVIEW_EXECUTOR,
@@ -152,32 +255,6 @@ def review_script_path():
     return os.environ.get("MACHINIST_REVIEW_SCRIPT") or os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "post_pr_review.py"
     )
-
-def run_review(repo, pr_url):
-    """Run the built-in review (types/lint/build, parallel reviewers, docs).
-    Returns the review exit code (0 PASS, 2 BLOCKED; INCOMPLETE and any other
-    non-BLOCKED verdict are reported as 0 so they never fail the delivery,
-    MACH-31) or None when the review script is not installed."""
-    script = review_script_path()
-    if not os.path.isfile(script):
-        log(f"review skipped: {script} not found")
-        return None
-    command = [sys.executable, script, "--repo", repo, "--pr", pr_url]
-    executor = review_executor_cmd()
-    if executor:
-        command += ["--executor-cmd", executor]
-    else:
-        log("no review executor available (set MACHINIST_REVIEW_EXECUTOR); reviewers will be skipped")
-    out = os.environ.get("MACHINIST_OUTPUT_DIR")
-    if out:
-        command += ["--json-out", os.path.join(out, "post-pr-review.json")]
-    log("built-in review starting")
-    completed = subprocess.run(command, cwd=repo)
-    log(f"built-in review verdict: {REVIEW_VERDICTS.get(completed.returncode, f'exit {completed.returncode}')}")
-    if completed.returncode not in (0, 2):
-        log("warn: review did not complete; not failing the delivery job")
-        return 0
-    return completed.returncode
 
 def review_status(out_dir):
     if not out_dir:
@@ -398,12 +475,33 @@ def main():
     def finish(rc):
         out = os.environ.get("MACHINIST_OUTPUT_DIR")
         if out:
-            result["review_status"] = review_status(out)
+            # run_review already recorded the verdict (status/reason); fall back
+            # to reading the JSON only when no review ran at all.
+            if "review_status" not in result:
+                result["review_status"] = review_status(out)
             json.dump(result, open(os.path.join(out, "pr.json"), "w"))
         if a.start_branch and a.start_branch != "HEAD":
             save_wip(repo)
             g("switch", "-q", a.start_branch)
         return rc
+
+    def handle_review(pr):
+        """Run the review, publish its status, record the verdict (MACH-63).
+
+        Returns the delivery exit code when BLOCKED (0 otherwise): only BLOCKED
+        fails the delivery; INCOMPLETE and ERROR are recorded and never a PASS."""
+        verdict = run_review(repo, pr)
+        if verdict is not None:
+            result["review_status"] = verdict["status"]
+            if verdict["reason"]:
+                result["review_reason"] = verdict["reason"]
+            publish_review_status(full, pr, verdict["status"], verdict["reason"], repo)
+            if verdict["status"] in ("INCOMPLETE", "ERROR"):
+                # Recorded in the run events (the job result) as well as pr.json.
+                log(f"review {verdict['status']}: {verdict['reason']}")
+        if verdict is not None and verdict["failure"]:
+            return 2
+        return 0
 
     if up_full:
         up_compare = f"https://github.com/{up_full}/compare/{up_base}...{owner}:{branch}?expand=1"
@@ -416,9 +514,9 @@ def main():
                      f"Review PR inside the fork. NOT sent upstream.\nAfter the fork owner approves, open upstream PR: {up_compare}")
         result["pr"] = pr
         result["review_pr"] = pr
-        review_rc = run_review(repo, pr)
+        review_rc = handle_review(pr)
         finalize_after_review(repo, branch, pr, run_id)
-        if review_rc not in (None, 0):
+        if review_rc:
             log("review did not pass; upstream PR not opened")
             return finish(review_rc)
         if up_mode == "draft":
@@ -431,9 +529,9 @@ def main():
     else:
         pr = open_pr(full, base, branch, "Not merged. Review before merging.")
         result["pr"] = pr
-        review_rc = run_review(repo, pr)
+        review_rc = handle_review(pr)
         finalize_after_review(repo, branch, pr, run_id)
-        if review_rc not in (None, 0):
+        if review_rc:
             return finish(review_rc)
     log(f"PR: {pr}")
     return finish(0)

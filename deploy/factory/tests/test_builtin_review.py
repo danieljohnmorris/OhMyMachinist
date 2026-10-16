@@ -189,9 +189,12 @@ class BuiltinReviewWiringTests(unittest.TestCase):
             env = os.environ.copy()
             env["MACHINIST_REVIEW_SCRIPT"] = str(script)
             env["ARGV_OUT"] = str(argv_out)
+            env.pop("MACHINIST_OUTPUT_DIR", None)
             with mock.patch.dict(os.environ, env, clear=False):
-                code = deliver.run_review(str(root), "https://github.com/owner/repo/pull/1")
-            self.assertEqual(code, 2)
+                verdict = deliver.run_review(str(root), "https://github.com/owner/repo/pull/1")
+            self.assertEqual(verdict["status"], "BLOCKED")
+            self.assertEqual(verdict["exit_code"], 2)
+            self.assertTrue(verdict["failure"])
             argv = json.loads(argv_out.read_text())
             self.assertEqual(argv[0], "--repo")
             self.assertIn("--pr", argv)
@@ -200,6 +203,7 @@ class BuiltinReviewWiringTests(unittest.TestCase):
         self.assertEqual(deliver.REVIEW_VERDICTS[0], "PASS")
         self.assertEqual(deliver.REVIEW_VERDICTS[2], "BLOCKED")
         self.assertEqual(deliver.REVIEW_VERDICTS[3], "INCOMPLETE")
+        self.assertEqual(deliver.REVIEW_VERDICTS[4], "ERROR")
 
 
 class EndToEndAmendLoopTests(unittest.TestCase):
@@ -324,9 +328,10 @@ class EndToEndAmendLoopTests(unittest.TestCase):
             root = Path(temp)
             bin_dir, _ = self._environment(root)
             summary = self._run(root, bin_dir, ["--amend-rounds", "0"])
-            # MACH-61: an exhausted budget is INCOMPLETE with the reason, never
-            # PASS and never BLOCKED (it must not fail the delivery job).
-            self.assertEqual(summary["exit_code"], 0)
+            # MACH-61/MACH-63: an exhausted budget is INCOMPLETE with the
+            # reason, never PASS and never BLOCKED (it must not fail the
+            # delivery job).
+            self.assertEqual(summary["exit_code"], 3)
             self.assertEqual(summary["status"], "INCOMPLETE")
             self.assertTrue(summary["blocking"])
             # 4 reviewer passes; the budget stops the review before docs.
@@ -362,7 +367,7 @@ class ReviewBudgetEndToEndTests(unittest.TestCase):
             root = Path(temp)
             bin_dir, _ = self._always_blocking(root)
             summary = self._run(root, bin_dir, ["--amend-rounds", "1"])
-        self.assertEqual(summary["exit_code"], 0)
+        self.assertEqual(summary["exit_code"], 3)
         self.assertEqual(summary["status"], "INCOMPLETE")
         self.assertNotEqual(summary["status"], "PASS")
         self.assertEqual(summary["amend_rounds"], {"used": 1, "limit": 1})
@@ -376,7 +381,7 @@ class ReviewBudgetEndToEndTests(unittest.TestCase):
             root = Path(temp)
             bin_dir, _ = self._always_blocking(root)
             summary = self._run(root, bin_dir, ["--max-minutes", "0"])
-        self.assertEqual(summary["exit_code"], 0)
+        self.assertEqual(summary["exit_code"], 3)
         self.assertEqual(summary["status"], "INCOMPLETE")
         self.assertEqual(summary["amend_rounds"], {"used": 0, "limit": 3})
         self.assertEqual(summary["budget"]["exhausted"], "review budget exhausted (minutes)")

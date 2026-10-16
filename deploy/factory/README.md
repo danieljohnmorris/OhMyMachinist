@@ -57,10 +57,22 @@ Reviewers and the amend pass run under the executor from
 `MACHINIST_REVIEW_EXECUTOR`; if that is unset, `deliver-pr.py` uses
 `<install dir>/omp-glm medium` when `omp-glm` sits next to it (the same
 sandboxed GLM coder the wrapper uses), and with no executor at all it logs the
-fact and the review skips the reviewer passes. INCOMPLETE (crashed review, no
-executor, timeout) never fails the delivery job: `post_pr_review.py` logs a
-warning and exits 0 while still recording the `machinist/review` status and
-JSON summary; only BLOCKED exits `2` and fails the delivery.
+fact and the review skips the reviewer passes.
+
+MACH-63: the review reports four distinct verdicts, each with its own exit code:
+PASS `0`, BLOCKED `2`, INCOMPLETE `3` and ERROR `4` (a review that could not run
+— setup failure, missing base commit, bad arguments, an unexpected exception).
+Only an explicit PASS counts as passed. `deliver-pr.py` reads the JSON verdict
+(`status`/`reason` in `$MACHINIST_OUTPUT_DIR/post-pr-review.json`) first and the
+exit code second; a missing or unreadable verdict, an unknown exit code,
+INCOMPLETE or ERROR is never logged, recorded in `pr.json` (its `review_status`)
+or treated as PASS. INCOMPLETE and ERROR never fail the delivery job (the PR
+stays open and the lane stays clean, MACH-31); BLOCKED does. Every verdict is
+also published as the `machinist/review` commit status on the PR head — PASS
+`success`, BLOCKED `failure`, INCOMPLETE/ERROR `error`, with the reason in the
+description. That includes a setup failure or an exception in `main()`; when the
+status itself cannot be posted the review logs a warning and records it in the
+JSON (`status_publish_error`) instead of aborting.
 
 Run tests:
 
@@ -104,6 +116,14 @@ reviewers rerun. Each amend round counts against the retry budget:
 that still has blocking findings and cannot amend them (review-only scope, or a
 verified credential) exits `2` (BLOCKED) and `deliver-pr.py` propagates it, so
 the run is not eligible for auto-merge.
+
+Before it creates the base worktree the review fetches the PR base branch and
+head from origin (and from the fork's upstream remote when `machinist.prBase` is
+set), so a lane clone that is behind the base branch does not fail with
+`cannot create base worktree: invalid reference` (MACH-30 PR #62). If the base
+commit still cannot be resolved it falls back to
+`git merge-base origin/<base> HEAD` (logged when used); when neither works the
+verdict is ERROR with the git message (MACH-63).
 
 MACH-61: the review also has a wall-clock budget so it cannot consume the whole
 job timeout. `blocking.max_minutes` (env `MACHINIST_REVIEW_MAX_MINUTES`, CLI

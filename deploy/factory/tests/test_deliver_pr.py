@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -246,6 +248,203 @@ class LaneWipTests(unittest.TestCase):
                 deliver.save_wip(str(repo))
             self.assertEqual(list(scratch.glob("*.patch")) if scratch.exists() else [], [])
             self.assertIn("machinist-earlier", _git(repo, "stash", "list"))
+
+
+class ReviewVerdictEndToEndTests(unittest.TestCase):
+    """MACH-63: every verdict flows through deliver-pr.py end to end (with a
+    stubbed review script). Only an explicit PASS is a pass; BLOCKED fails the
+    delivery; INCOMPLETE and ERROR do not, but they are never recorded as PASS.
+    Each verdict is written to pr.json and posted as a matching machinist/review
+    status with the reason in the description."""
+
+    _GIT = """#!/bin/sh
+case "$*" in
+  *"remote get-url"*) printf 'https://github.com/owner/repo.git\\n' ;;
+  *"symbolic-ref"*) printf 'origin/main\\n' ;;
+  *"diff --cached --name-only"*) printf 'src/app.py\\n' ;;
+  *"diff --cached -U0"*) printf '' ;;
+  *"rev-parse --abbrev-ref"*) printf 'feature\\n' ;;
+  *"rev-parse --short"*) printf 'abc1234\\n' ;;
+  *"rev-parse HEAD"*) printf 'deadbeef\\n' ;;
+  *"status --porcelain"*) printf ' M src/app.py\\n' ;;
+  *"prBase"*) printf '' ;;
+  *) : ;;
+esac
+exit 0
+"""
+
+    _GH = """#!/bin/sh
+case "$*" in
+  *"pr list"*) exit 0 ;;
+  *"pr view"*)
+    case "$*" in
+      *"headRefOid"*) printf 'headsha123\\n' ;;
+      *) printf 'OPEN\\n' ;;
+    esac
+    exit 0 ;;
+  *"pr create"*) printf 'https://github.com/owner/repo/pull/7\\n'; exit 0 ;;
+  *"api"*) printf '%s\\n' "$*" >> "$STATUS_LOG"; exit 0 ;;
+esac
+exit 0
+"""
+
+    def _environment(self, root: Path) -> tuple[Path, Path, Path]:
+        repo = root / "repo"
+        (repo / "src").mkdir(parents=True)
+        (repo / "src" / "app.py").write_text("print(1)\n", encoding="utf-8")
+        (repo / ".machinist-pr.md").write_text("# Add a thing\n\nLead sentence.\n", encoding="utf-8")
+        brief = root / "brief.md"
+        brief.write_text("--- SPEC: MACH-63 A title ---\nbody\n", encoding="utf-8")
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "git").write_text(self._GIT, encoding="utf-8")
+        (bin_dir / "gh").write_text(self._GH, encoding="utf-8")
+        os.chmod(bin_dir / "git", 0o755)
+        os.chmod(bin_dir / "gh", 0o755)
+        return repo, bin_dir, brief
+
+    def _run_verdict(self, root: Path, status: str, reason: str, exit_code: int, write_json: bool = True) -> dict:
+        repo, bin_dir, brief = self._environment(root)
+        out = root / "out"
+        out.mkdir()
+        status_log = root / "status.log"
+        review_json = out / "post-pr-review.json"
+        script = root / "review.py"
+        if write_json:
+            script.write_text(
+                "import json, os, sys\n"
+                f"json.dump({{'status': {status!r}, 'reason': {reason!r}}}, open(os.environ['REVIEW_JSON'], 'w'))\n"
+                f"sys.exit({exit_code})\n",
+                encoding="utf-8",
+            )
+        else:
+            script.write_text(f"import sys\nsys.exit({exit_code})\n", encoding="utf-8")
+        env = os.environ.copy()
+        env.update(
+            {
+                "PATH": f"{bin_dir}:{env['PATH']}",
+                "MACHINIST_ALLOWED_OWNERS": "owner",
+                "MACHINIST_REVIEW_SCRIPT": str(script),
+                "MACHINIST_OUTPUT_DIR": str(out),
+                "MACHINIST_SCRATCH_DIR": str(root / "scratch"),
+                "MACHINIST_RUN_ID": "run123",
+                "REVIEW_JSON": str(review_json),
+                "STATUS_LOG": str(status_log),
+            }
+        )
+        env.pop("MACHINIST_REVIEW_EXECUTOR", None)
+        env.pop("DELIVER_PR_DRY", None)
+        argv = ["deliver-pr.py", "--repo", str(repo), "--brief", str(brief)]
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(sys, "argv", argv), \
+             mock.patch.object(deliver, "ALLOWED_OWNERS", {"owner"}):
+            code = deliver.main()
+        pr_json = json.loads((out / "pr.json").read_text(encoding="utf-8"))
+        pr_json["exit_code"] = code
+        pr_json["status_calls"] = status_log.read_text(encoding="utf-8") if status_log.exists() else ""
+        return pr_json
+
+    def test_pass_is_the_only_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            result = self._run_verdict(Path(temp), "PASS", "", 0)
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(result["review_status"], "PASS")
+        self.assertIn("state=success", result["status_calls"])
+        self.assertIn("context=machinist/review", result["status_calls"])
+
+    def test_blocked_fails_the_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            result = self._run_verdict(Path(temp), "BLOCKED", "blocking findings", 2)
+        self.assertEqual(result["exit_code"], 2)
+        self.assertEqual(result["review_status"], "BLOCKED")
+        self.assertEqual(result["review_reason"], "blocking findings")
+        self.assertIn("state=failure", result["status_calls"])
+        self.assertIn("blocking findings", result["status_calls"])
+
+    def test_incomplete_does_not_fail_the_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            result = self._run_verdict(Path(temp), "INCOMPLETE", "review budget exhausted (rounds)", 3)
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(result["review_status"], "INCOMPLETE")
+        self.assertNotEqual(result["review_status"], "PASS")
+        self.assertIn("state=error", result["status_calls"])
+        self.assertIn("review budget exhausted", result["status_calls"])
+
+    def test_error_does_not_fail_the_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            result = self._run_verdict(Path(temp), "ERROR", "cannot resolve the review base commit", 4)
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(result["review_status"], "ERROR")
+        self.assertIn("state=error", result["status_calls"])
+
+    def test_missing_json_file_is_never_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            # The review exited 0 but wrote no verdict: not a PASS.
+            result = self._run_verdict(Path(temp), "", "", 0, write_json=False)
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(result["review_status"], "ERROR")
+        self.assertIn("no verdict", result["review_reason"])
+        self.assertIn("state=error", result["status_calls"])
+
+    def test_unknown_exit_code_is_never_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            result = self._run_verdict(Path(temp), "", "", 7, write_json=False)
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(result["review_status"], "ERROR")
+        self.assertIn("state=error", result["status_calls"])
+
+    def test_unreadable_json_is_never_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repo, bin_dir, brief = self._environment(Path(temp))
+            root = Path(temp)
+            out = root / "out"
+            out.mkdir()
+            (out / "post-pr-review.json").write_text("{not json", encoding="utf-8")
+            script = root / "review.py"
+            script.write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+            env = os.environ.copy()
+            env.update({
+                "PATH": f"{bin_dir}:{env['PATH']}", "MACHINIST_ALLOWED_OWNERS": "owner",
+                "MACHINIST_REVIEW_SCRIPT": str(script), "MACHINIST_OUTPUT_DIR": str(out),
+                "MACHINIST_SCRATCH_DIR": str(root / "scratch"), "MACHINIST_RUN_ID": "run123",
+                "STATUS_LOG": str(root / "status.log"),
+            })
+            env.pop("MACHINIST_REVIEW_EXECUTOR", None)
+            with mock.patch.dict(os.environ, env, clear=True), \
+                 mock.patch.object(sys, "argv", ["deliver-pr.py", "--repo", str(repo), "--brief", str(brief)]), \
+                 mock.patch.object(deliver, "ALLOWED_OWNERS", {"owner"}):
+                code = deliver.main()
+            result = json.loads((out / "pr.json").read_text(encoding="utf-8"))
+        self.assertEqual(code, 0)
+        self.assertEqual(result["review_status"], "ERROR")
+        self.assertNotEqual(result["review_status"], "PASS")
+
+
+class ReviewVerdictResolutionTests(unittest.TestCase):
+    """MACH-63: the verdict is read from the JSON first, the exit code second."""
+
+    def test_json_verdict_wins_over_exit_code(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "post-pr-review.json"
+            path.write_text(json.dumps({"status": "BLOCKED", "reason": "a bug"}), encoding="utf-8")
+            verdict = deliver.review_verdict(str(path), 0)
+        self.assertEqual(verdict["status"], "BLOCKED")
+        self.assertEqual(verdict["reason"], "a bug")
+        self.assertFalse(verdict["passed"])
+        self.assertTrue(verdict["failure"])
+
+    def test_exit_code_used_when_no_json_requested(self) -> None:
+        self.assertEqual(deliver.review_verdict(None, 0)["status"], "PASS")
+        self.assertEqual(deliver.review_verdict(None, 3)["status"], "INCOMPLETE")
+        self.assertEqual(deliver.review_verdict(None, 4)["status"], "ERROR")
+        self.assertEqual(deliver.review_verdict(None, 9)["status"], "ERROR")
+
+    def test_requested_json_that_is_missing_is_not_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            missing = str(Path(temp) / "post-pr-review.json")
+            verdict = deliver.review_verdict(missing, 0)
+        self.assertEqual(verdict["status"], "ERROR")
+        self.assertFalse(verdict["passed"])
+        self.assertIn("no verdict", verdict["reason"])
 
 
 if __name__ == "__main__":

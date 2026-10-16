@@ -50,12 +50,18 @@ except ModuleNotFoundError:
     )
 
 
-# MACH-31: INCOMPLETE (crashed review, no executor, unavailable skill) must
-# not fail the delivery job, so it exits 0 like PASS; the machinist/review
-# status and the JSON summary still record the INCOMPLETE verdict. Only
-# BLOCKED returns 2.
-EXIT_CODES = {"PASS": 0, "BLOCKED": 2, "INCOMPLETE": 0}
-STATUS_STATES = {"PASS": "success", "BLOCKED": "failure", "INCOMPLETE": "error"}
+# MACH-63: PASS, BLOCKED, INCOMPLETE and ERROR are distinct outcomes, each with
+# its own exit code, so a review that never ran can never be mistaken for a PASS
+# (MACH-31 made the crashed-review verdict exit 0, which the delivery read as
+# PASS). The MACH-31 rule that INCOMPLETE/ERROR must not fail the delivery job
+# is kept in deliver-pr.py, which maps those codes to a non-failing delivery.
+#   PASS       the review ran and found nothing blocking
+#   BLOCKED    the review ran and found something blocking
+#   INCOMPLETE the review ran but did not finish (budget, unavailable reviewer/skill)
+#   ERROR      the review could not run (setup failure, missing base commit,
+#              bad arguments, unexpected exception)
+EXIT_CODES = {"PASS": 0, "BLOCKED": 2, "INCOMPLETE": 3, "ERROR": 4}
+STATUS_STATES = {"PASS": "success", "BLOCKED": "failure", "INCOMPLETE": "error", "ERROR": "error"}
 
 # MACH-61: the review gets its own budget (rounds + wall-clock minutes) so it
 # cannot consume the whole job timeout. When the budget runs out the verdict is
@@ -229,6 +235,53 @@ def repo_file_list(repo: Path, timeout: int) -> list[str]:
     if not result.ok:
         return []
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def commit_exists(repo: Path, sha: str, timeout: int) -> bool:
+    """True when the commit is in the local object database."""
+    if not sha:
+        return False
+    result = run_git(repo, ["rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}"], timeout)
+    return result.ok and bool(result.stdout.strip())
+
+
+def resolve_base_sha(repo: Path, metadata: dict[str, Any], timeout: int) -> str:
+    """Resolve a base commit that exists locally, fetching it if needed (MACH-63).
+
+    The lane clone can be behind the base branch, so the PR's ``baseRefOid`` may
+    not be in the object database and ``git worktree add`` fails with "invalid
+    reference" (MACH-30 PR #62). Fetch the PR base branch and head first, from
+    origin and from the fork's upstream remote when configured
+    (``machinist.prBase``), then fall back to
+    ``git merge-base origin/<base> HEAD`` (logged when used). When neither
+    works this raises ReviewError, which main() reports as ERROR.
+    """
+    base_sha = str(metadata.get("baseRefOid") or "")
+    base_ref = str(metadata.get("baseRefName") or "main")
+    head_ref = str(metadata.get("headRefName") or "")
+    remotes = ["origin"]
+    upstream = run_git(repo, ["config", "machinist.prBase"], timeout)
+    if upstream.ok and upstream.stdout.strip() and upstream.stdout.strip() not in remotes:
+        remotes.append(upstream.stdout.strip())
+    errors: list[str] = []
+    for remote in remotes:
+        for ref in (base_ref, head_ref):
+            if not ref:
+                continue
+            result = run_git(repo, ["fetch", "--no-tags", remote, ref], timeout)
+            if not result.ok:
+                errors.append(f"git fetch {remote} {ref}: {result.output.strip()}")
+    if commit_exists(repo, base_sha, timeout):
+        return base_sha
+    fallback = run_git(repo, ["merge-base", f"origin/{base_ref}", "HEAD"], timeout)
+    if fallback.ok and fallback.stdout.strip():
+        print(
+            f"post-pr review: base {base_sha[:12] or '(none)'} not available after fetch; "
+            f"using merge-base origin/{base_ref} HEAD = {fallback.stdout.strip()[:12]}"
+        )
+        return fallback.stdout.strip()
+    detail = "; ".join(errors + [f"git merge-base origin/{base_ref} HEAD: {fallback.output.strip()}"])
+    raise ReviewError(f"cannot resolve the review base commit: {detail}")
 
 
 def classify_failure(
@@ -895,6 +948,48 @@ def write_json(path: str, summary: dict[str, Any]) -> None:
     target.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 
 
+def post_commit_status(
+    repo: Path,
+    owner: str,
+    name: str,
+    head_sha: str,
+    status: str,
+    reason: str = "",
+    commit_status: str = "machinist/review",
+    timeout: int = 900,
+    dry_run: bool = False,
+) -> str | None:
+    """Post the ``machinist/review`` status on the PR head (MACH-63).
+
+    PASS maps to success, BLOCKED to failure and INCOMPLETE/ERROR to error, with
+    the reason in the description. Returns None on success, else an error string
+    the caller logs and records in the JSON (a status that cannot be posted must
+    never abort the review).
+    """
+    state = STATUS_STATES.get(status, "error")
+    description = (f"Machinist review {status}" + (f": {reason}" if reason else ""))[:140]
+    if dry_run:
+        print(f"Planned command: gh api repos/{owner}/{name}/statuses/{head_sha} state={state} context={commit_status} description={description!r}")
+        return None
+    result = run_gh(
+        repo,
+        [
+            "api",
+            f"repos/{owner}/{name}/statuses/{head_sha}",
+            "-f",
+            f"state={state}",
+            "-f",
+            f"context={commit_status}",
+            "-f",
+            f"description={description}",
+        ],
+        timeout,
+    )
+    if not result.ok:
+        return result.output or f"gh api exited {result.returncode}"
+    return None
+
+
 def publish_review(
     options: ReviewOptions,
     owner: str,
@@ -904,6 +999,8 @@ def publish_review(
     resolved: profile_mod.ResolvedProfile,
     status: str,
     comment: str,
+    reason: str = "",
+    summary: dict[str, Any] | None = None,
 ) -> str | None:
     """Post the review comment and commit status, returning the comment URL.
 
@@ -911,6 +1008,9 @@ def publish_review(
     that reaches the end of ``review`` — including an INCOMPLETE one that never
     ran the reviewers — goes through here, leaving the ``machinist/review``
     status on the head commit reflecting that result instead of a stale green.
+
+    A status that cannot be posted is a warning recorded in the JSON summary
+    (MACH-63), never an exception: the verdict is still returned to the caller.
     """
     output = resolved.body.get("output") or {}
     commit_status = str(output.get("commit_status", "machinist/review"))
@@ -919,7 +1019,7 @@ def publish_review(
         print(f"Planned command: gh api repos/{owner}/{name}/statuses/{head_sha} ...")
         return None
     comment_url = None
-    comment_result = CommandResult((), 0, "", "")
+    comment_error = None
     if output.get("pr_comment", True):
         comment_result = run_gh(
             options.repo,
@@ -929,23 +1029,52 @@ def publish_review(
         )
         if comment_result.ok:
             comment_url = comment_result.stdout.strip().splitlines()[-1]
-    status_result = run_gh(
+        else:
+            comment_error = comment_result.output
+    status_error = post_commit_status(
         options.repo,
-        [
-            "api",
-            f"repos/{owner}/{name}/statuses/{head_sha}",
-            "-f",
-            f"state={STATUS_STATES[status]}",
-            "-f",
-            f"context={commit_status}",
-            "-f",
-            "description=Machinist review " + status,
-        ],
+        owner,
+        name,
+        head_sha,
+        status,
+        reason,
+        commit_status,
         options.timeout,
     )
-    if not status_result.ok or (output.get("pr_comment", True) and not comment_result.ok):
-        raise ReviewError(f"could not publish review: {comment_result.output} {status_result.output}")
+    if status_error:
+        print(f"post-pr review warning: could not publish the review status: {status_error}", file=sys.stderr)
+        if summary is not None:
+            summary["status_publish_error"] = status_error
+    if comment_error:
+        print(f"post-pr review warning: could not publish the review comment: {comment_error}", file=sys.stderr)
+        if summary is not None:
+            summary["comment_error"] = comment_error
     return comment_url
+
+
+def publish_error_status(options: ReviewOptions, summary: dict[str, Any]) -> None:
+    """Best-effort ``machinist/review`` error status for a review that did not
+    run (MACH-63): a setup failure or an exception in main(). Reads the PR head
+    back from GitHub so the error is visible on the pull request even when
+    review() raised before it could publish anything."""
+    if options.dry_run:
+        return
+    try:
+        owner, name, number = core.parse_pull_request(options.pr)
+        metadata = pull_request_metadata(options.repo, owner, name, str(number), options.timeout)
+        head_sha = str(metadata.get("headRefOid") or "")
+        if not head_sha:
+            raise ReviewError("the pull request has no head commit to publish a status on")
+        reason = str(summary.get("reason") or "the review could not run")
+        error = post_commit_status(
+            options.repo, owner, name, head_sha, "ERROR", reason, "machinist/review", options.timeout
+        )
+        if error:
+            raise ReviewError(error)
+    except Exception as publish_error:
+        message = f"could not publish the review status: {publish_error}"
+        print(f"post-pr review warning: {message}", file=sys.stderr)
+        summary["status_publish_error"] = message
 
 
 def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
@@ -968,7 +1097,13 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
         "head_sha": metadata.get("headRefOid", ""),
     }
     try:
-        base_sha = metadata["baseRefOid"]
+        # MACH-63: the lane clone can be behind the base branch, so fetch the PR
+        # base and head before the profile/checks need the base commit (the
+        # base worktree add would otherwise fail with "invalid reference").
+        if options.dry_run:
+            base_sha = metadata["baseRefOid"]
+        else:
+            base_sha = resolve_base_sha(options.repo, metadata, options.timeout)
         resolved = None
         if options.profile_file:
             # Explicit operator override (e.g. testing a new profile).
@@ -1011,17 +1146,20 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
         except skill_library.RequiredSkillError as error:
             # A required skill that is not installed must fail the review
             # visibly: publish an INCOMPLETE (error) status and comment so the
-            # machinist/review check does not stay green, then exit 0 like any
-            # other INCOMPLETE result (MACH-31). Otherwise the missing skill
+            # machinist/review check does not stay green. INCOMPLETE is a
+            # non-zero exit code (MACH-63) and deliver-pr.py still does not fail
+            # the delivery job for it (MACH-31). Otherwise the missing skill
             # would leave the review silently unrun behind a stale green status.
             failure_notes = [f"the review did not run: {error}"]
+            reason = str(error)
             summary.update(
                 {
                     "status": "INCOMPLETE",
+                    "reason": reason,
                     "skills": [],
                     "skill_warnings": [],
                     "notes": failure_notes,
-                    "error": str(error),
+                    "error": reason,
                 }
             )
             comment = (
@@ -1041,10 +1179,10 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
             )
             print(comment)
             summary["comment_url"] = publish_review(
-                options, owner, name, number_text, head_sha, resolved, "INCOMPLETE", comment
+                options, owner, name, number_text, head_sha, resolved, "INCOMPLETE", comment, reason, summary
             )
             print(
-                "post-pr review warning: review incomplete; exiting 0 so the delivery job does not fail",
+                "post-pr review warning: review incomplete; the delivery job does not fail for it",
                 file=sys.stderr,
             )
             return EXIT_CODES["INCOMPLETE"], summary
@@ -1245,9 +1383,18 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
             incomplete = True
             notes.append(budget.exhausted_reason)
         status = "INCOMPLETE" if budget.exhausted_reason else final_status(blocking, incomplete)
+        if budget.exhausted_reason:
+            reason = budget.exhausted_reason
+        elif status == "INCOMPLETE":
+            reason = "the review did not finish"
+        elif status == "BLOCKED":
+            reason = "blocking findings"
+        else:
+            reason = ""
         summary.update(
             {
                 "status": status,
+                "reason": reason,
                 "blocking": blocking,
                 "checks": [
                     {
@@ -1272,12 +1419,12 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
         comment = render_comment(status, checks, reviewers, docs, resolved, merged, summary["head_sha"], notes, secret_scan)
         print(comment)
         summary["comment_url"] = publish_review(
-            options, owner, name, number_text, head_sha, resolved, status, comment
+            options, owner, name, number_text, head_sha, resolved, status, comment, reason, summary
         )
         if status == "INCOMPLETE":
-            reason = f": {budget.exhausted_reason}" if budget.exhausted_reason else ""
+            detail = f": {reason}" if reason else ""
             print(
-                f"post-pr review warning: review incomplete{reason}; exiting 0 so the delivery job does not fail",
+                f"post-pr review warning: review incomplete{detail}; the delivery job does not fail for it",
                 file=sys.stderr,
             )
         print(
@@ -1304,6 +1451,7 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    options = None
     try:
         args = parse_args(argv)
         timeout = max(1, args.timeout_seconds or timeout_from_env())
@@ -1321,20 +1469,37 @@ def main(argv: list[str] | None = None) -> int:
             authorized={item.strip() for item in (args.authorized or "").split(",") if item.strip()},
         )
     except Exception as error:
+        # Bad arguments are a review that could not run: ERROR, its own exit
+        # code, never PASS (MACH-63). There is no PR to publish a status on yet.
         print(f"post-pr review error: {error}", file=sys.stderr)
-        return EXIT_CODES["INCOMPLETE"]
+        return EXIT_CODES["ERROR"]
     try:
         code, summary = review(options)
     except Exception as error:
-        summary = {"status": "INCOMPLETE", "blocking": False, "checks": [], "reviewers": [], "findings": [], "docs": {}, "docs_changed": [], "comment_url": None, "error": str(error)}
+        # Setup failure or unexpected exception: the review could not run.
+        # Report ERROR and publish the error status on the PR head so it never
+        # looks green (MACH-63).
+        summary = {
+            "status": "ERROR",
+            "reason": str(error),
+            "blocking": False,
+            "checks": [],
+            "reviewers": [],
+            "findings": [],
+            "docs": {},
+            "docs_changed": [],
+            "comment_url": None,
+            "error": str(error),
+        }
         print(f"post-pr review error: {error}", file=sys.stderr)
-        code = EXIT_CODES["INCOMPLETE"]
+        publish_error_status(options, summary)
+        code = EXIT_CODES["ERROR"]
     if options.json_out:
         try:
             write_json(options.json_out, summary)
         except OSError as error:
             print(f"post-pr review error: {error}", file=sys.stderr)
-            code = EXIT_CODES["INCOMPLETE"]
+            code = EXIT_CODES["ERROR"]
     return code
 
 

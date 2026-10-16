@@ -123,10 +123,15 @@ class ExitCodeTests(unittest.TestCase):
         self.assertEqual(post.EXIT_CODES[post.final_status(False, False)], 0)
         self.assertEqual(post.STATUS_STATES[post.final_status(False, False)], "success")
         self.assertEqual(post.final_status(False, True), "INCOMPLETE")
-        # MACH-31: INCOMPLETE exits 0 (never fails the delivery); the status
-        # state still records "error" on machinist/review.
-        self.assertEqual(post.EXIT_CODES[post.final_status(False, True)], 0)
+        # MACH-63: every verdict has its own exit code. INCOMPLETE and ERROR
+        # never fail the delivery job (deliver-pr.py maps them to a non-failing
+        # delivery, MACH-31) but they are never PASS either; the status state
+        # still records "error" on machinist/review.
+        self.assertEqual(post.EXIT_CODES[post.final_status(False, True)], 3)
         self.assertEqual(post.STATUS_STATES[post.final_status(False, True)], "error")
+        self.assertEqual(post.EXIT_CODES["ERROR"], 4)
+        self.assertEqual(post.STATUS_STATES["ERROR"], "error")
+        self.assertEqual(post.EXIT_CODES["INCOMPLETE"], 3)
 
 
 class EndToEndDryRunTests(unittest.TestCase):
@@ -220,6 +225,7 @@ class RequiredSkillTests(unittest.TestCase):
                 "#!/bin/sh\n"
                 'case "$*" in\n'
                 '  *"remote get-url"*) printf \'https://github.com/owner/repo.git\\n\' ;;\n'
+                '  *"rev-parse --verify"*) printf \'basecommit\\n\' ;;\n'
                 "  *) : ;;\n"
                 "esac\n",
                 encoding="utf-8",
@@ -260,7 +266,7 @@ class RequiredSkillTests(unittest.TestCase):
                 )
             summary = json.loads(json_out.read_text(encoding="utf-8"))
             gh_calls = gh_log.read_text(encoding="utf-8") if gh_log.exists() else ""
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 3)
         self.assertEqual(summary["status"], "INCOMPLETE")
         self.assertEqual(summary["error"], str(error))
         self.assertIn("pr comment", gh_calls)
@@ -518,7 +524,7 @@ class SecretScanEndToEndTests(unittest.TestCase):
                 ),
             ):
                 code, summary, _ = self._run(root, bin_dir)
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 3)
         self.assertEqual(summary["status"], "INCOMPLETE")
         self.assertFalse(summary["blocking"])
         self.assertIn("not installed", summary["secret_scan"]["error"])
@@ -654,6 +660,190 @@ class LaneWipTests(unittest.TestCase):
             self.assertEqual(changed, ["deploy/factory/README.md"])
             self.assertEqual(post.changed_paths(repo, 5), [])
             self.assertEqual(docs["saved"]["committed"], ["deploy/factory/README.md"])
+
+
+class StatusPublishFailureTests(unittest.TestCase):
+    """MACH-63: a status that cannot be posted is a warning recorded in the JSON,
+    never an exception that hides the verdict."""
+
+    def test_status_failure_is_recorded_not_raised(self) -> None:
+        options = post.ReviewOptions(
+            repo=Path("."), pr="owner/repo#1", base=None, executor_cmd=None,
+            dry_run=False, json_out=None, timeout=5,
+        )
+        summary: dict = {}
+        comment_ok = CommandResult(("gh",), 0, "https://github.com/owner/repo/pull/1#issuecomment-1\n", "")
+        status_fail = CommandResult(("gh",), 1, "", "boom: status API refused")
+
+        def fake_gh(repo, args, timeout, stdin=None):
+            return status_fail if "api" in args else comment_ok
+
+        with mock.patch.object(post, "run_gh", side_effect=fake_gh):
+            url = post.publish_review(
+                options, "owner", "repo", "1", "head", _resolved_profile(), "INCOMPLETE", "body", "budget", summary
+            )
+        self.assertEqual(url, "https://github.com/owner/repo/pull/1#issuecomment-1")
+        self.assertIn("boom", summary["status_publish_error"])
+
+    def test_dry_run_posts_nothing(self) -> None:
+        options = post.ReviewOptions(
+            repo=Path("."), pr="owner/repo#1", base=None, executor_cmd=None,
+            dry_run=True, json_out=None, timeout=5,
+        )
+        with mock.patch.object(post, "run_gh") as gh:
+            url = post.publish_review(options, "owner", "repo", "1", "head", _resolved_profile(), "PASS", "body")
+        self.assertIsNone(url)
+        gh.assert_not_called()
+
+
+class BaseResolutionTests(unittest.TestCase):
+    """MACH-63: the lane clone can be behind the base branch, so the review
+    fetches the PR base and head before the base worktree, falls back to
+    merge-base, and reports ERROR only when neither works."""
+
+    _METADATA = {"baseRefName": "main", "headRefName": "feature", "baseRefOid": "deadbeef"}
+
+    def test_uses_base_sha_after_fetching(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_git(repo, args, timeout):
+            calls.append(args)
+            if args[:2] == ["rev-parse", "--verify"]:
+                return CommandResult(tuple(args), 0, "deadbeef\n", "")
+            return CommandResult(tuple(args), 0, "", "")
+
+        with mock.patch.object(post, "run_git", side_effect=fake_git):
+            sha = post.resolve_base_sha(Path("."), self._METADATA, 5)
+        self.assertEqual(sha, "deadbeef")
+        self.assertIn(["fetch", "--no-tags", "origin", "main"], calls)
+        self.assertIn(["fetch", "--no-tags", "origin", "feature"], calls)
+
+    def test_fetches_from_upstream_for_forks(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_git(repo, args, timeout):
+            calls.append(args)
+            if args[:2] == ["config", "machinist.prBase"]:
+                return CommandResult(tuple(args), 0, "upstream\n", "")
+            if args[:2] == ["rev-parse", "--verify"]:
+                return CommandResult(tuple(args), 0, "deadbeef\n", "")
+            return CommandResult(tuple(args), 0, "", "")
+
+        with mock.patch.object(post, "run_git", side_effect=fake_git):
+            post.resolve_base_sha(Path("."), self._METADATA, 5)
+        self.assertIn(["fetch", "--no-tags", "upstream", "main"], calls)
+
+    def test_falls_back_to_merge_base_when_base_is_missing(self) -> None:
+        def fake_git(repo, args, timeout):
+            if args[:2] == ["rev-parse", "--verify"]:
+                return CommandResult(tuple(args), 1, "", "fatal: invalid reference")
+            if args[0] == "merge-base":
+                return CommandResult(tuple(args), 0, "cafebabe\n", "")
+            return CommandResult(tuple(args), 0, "", "")
+
+        with mock.patch.object(post, "run_git", side_effect=fake_git):
+            sha = post.resolve_base_sha(Path("."), self._METADATA, 5)
+        self.assertEqual(sha, "cafebabe")
+
+    def test_errors_when_base_and_merge_base_fail(self) -> None:
+        def fake_git(repo, args, timeout):
+            if args[:2] == ["rev-parse", "--verify"]:
+                return CommandResult(tuple(args), 1, "", "fatal: invalid reference")
+            if args[0] == "merge-base":
+                return CommandResult(tuple(args), 128, "", "fatal: Not a valid object name origin/main")
+            if args[0] == "fetch":
+                return CommandResult(tuple(args), 128, "", "fatal: couldn't find remote ref")
+            return CommandResult(tuple(args), 0, "", "")
+
+        with mock.patch.object(post, "run_git", side_effect=fake_git):
+            with self.assertRaises(post.ReviewError) as caught:
+                post.resolve_base_sha(Path("."), self._METADATA, 5)
+        self.assertIn("cannot resolve the review base commit", str(caught.exception))
+        self.assertIn("git fetch", str(caught.exception))
+
+
+class BaseResolutionEndToEndTests(unittest.TestCase):
+    """MACH-63 acceptance: with a lane clone behind main the review fetches the
+    base and runs; when the base cannot be resolved it reports ERROR (exit 4)
+    and posts an error status on the PR head — never PASS."""
+
+    def _bins(self, root: Path, *, base_exists: bool, merge_base: str | None) -> Path:
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "git").write_text(
+            "#!/bin/sh\n"
+            'case "$*" in\n'
+            '  *"remote get-url"*) printf \'https://github.com/owner/repo.git\\n\' ;;\n'
+            '  *"rev-parse --abbrev-ref"*) printf \'feature\\n\' ;;\n'
+            + ("  *\"rev-parse --verify\"*) printf 'deadbeef\\n' ;;\n" if base_exists else "")
+            + (f"  *\"merge-base\"*) printf '{merge_base}\\n' ;;\n" if merge_base else "")
+            + "  *) : ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        (bin_dir / "gh").write_text(
+            "#!/bin/sh\n"
+            'printf \'%s\\n\' "$*" >> "$TEMP_GH_LOG"\n'
+            'case "$*" in\n'
+            '  *"pr view"*) printf \'{"headRefName":"feature","headRefOid":"head","baseRefName":"main","baseRefOid":"deadbeef","body":"body","url":"url"}\\n\' ;;\n'
+            '  *"pr comment"*) printf \'https://github.com/owner/repo/pull/1#issuecomment-1\\n\' ;;\n'
+            "  *) : ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        (bin_dir / "ruff").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (bin_dir / "trufflehog").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        for name in ("git", "gh", "ruff", "trufflehog"):
+            os.chmod(bin_dir / name, 0o755)
+        return bin_dir
+
+    def _run(self, root: Path, bin_dir: Path) -> tuple[int, dict, str]:
+        repo = root / "repo"
+        repo.mkdir()
+        json_out = root / "summary.json"
+        gh_log = root / "gh.log"
+        env = os.environ.copy()
+        env.update({"PATH": f"{bin_dir}:{env['PATH']}", "TEMP_GH_LOG": str(gh_log)})
+        env.pop("MACHINIST_CONTROL_PLANE_URL", None)
+        env.pop("MACHINIST_CONTROL_PLANE_TOKEN", None)
+        env.pop("MACHINIST_REVIEW_EXECUTOR", None)
+        env.pop("MACHINIST_REVIEW_PROFILE_FILE", None)
+        with mock.patch.dict(os.environ, env, clear=True):
+            code = post.main(
+                ["--repo", str(repo), "--pr", "owner/repo#1", "--timeout-seconds", "5", "--json-out", str(json_out)]
+            )
+        summary = json.loads(json_out.read_text(encoding="utf-8"))
+        calls = gh_log.read_text(encoding="utf-8") if gh_log.exists() else ""
+        return code, summary, calls
+
+    def test_base_after_fetch_runs_the_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bin_dir = self._bins(root, base_exists=True, merge_base=None)
+            code, summary, _ = self._run(root, bin_dir)
+        self.assertEqual(summary["status"], "PASS")
+        self.assertEqual(code, 0)
+
+    def test_merge_base_fallback_runs_the_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bin_dir = self._bins(root, base_exists=False, merge_base="cafebabe")
+            code, summary, _ = self._run(root, bin_dir)
+        self.assertEqual(summary["status"], "PASS")
+        self.assertEqual(code, 0)
+
+    def test_unresolvable_base_reports_error_and_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bin_dir = self._bins(root, base_exists=False, merge_base=None)
+            code, summary, calls = self._run(root, bin_dir)
+        self.assertEqual(code, 4)
+        self.assertEqual(summary["status"], "ERROR")
+        self.assertNotEqual(summary["status"], "PASS")
+        self.assertIn("cannot resolve the review base commit", summary["reason"])
+        self.assertIn("statuses/head", calls)
+        self.assertIn("state=error", calls)
+        self.assertIn("context=machinist/review", calls)
 
 
 if __name__ == "__main__":

@@ -92,10 +92,11 @@ class ReviewExecutorDefaultTests(unittest.TestCase):
 
 
 class DeliverExitPolicyTests(unittest.TestCase):
-    """INCOMPLETE must not fail the delivery job (exit 0); only BLOCKED (2)
-    propagates as a failure."""
+    """MACH-63: only BLOCKED fails the delivery job. INCOMPLETE and ERROR are
+    non-zero review exit codes but never fail the job, and they are never a
+    PASS either."""
 
-    def _run_review_with_verdict(self, code: int) -> int:
+    def _run_review_with_verdict(self, code: int) -> dict:
         deliver = _load_deliver_from(_FACTORY / "deliver-pr.py")
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -112,22 +113,42 @@ class DeliverExitPolicyTests(unittest.TestCase):
             env = os.environ.copy()
             env["MACHINIST_REVIEW_SCRIPT"] = str(script)
             env.pop("MACHINIST_REVIEW_EXECUTOR", None)
+            env.pop("MACHINIST_OUTPUT_DIR", None)
             with mock.patch.dict(os.environ, env, clear=False):
                 return deliver.run_review(str(root), "https://github.com/owner/repo/pull/1")
 
     def test_incomplete_verdict_does_not_fail_delivery(self) -> None:
-        self.assertEqual(self._run_review_with_verdict(3), 0)
+        verdict = self._run_review_with_verdict(3)
+        self.assertEqual(verdict["status"], "INCOMPLETE")
+        self.assertFalse(verdict["passed"])
+        self.assertFalse(verdict["failure"])
 
-    def test_crashed_review_does_not_fail_delivery(self) -> None:
-        self.assertEqual(self._run_review_with_verdict(1), 0)
+    def test_error_verdict_does_not_fail_delivery(self) -> None:
+        verdict = self._run_review_with_verdict(4)
+        self.assertEqual(verdict["status"], "ERROR")
+        self.assertFalse(verdict["passed"])
+        self.assertFalse(verdict["failure"])
+
+    def test_crashed_review_is_error(self) -> None:
+        verdict = self._run_review_with_verdict(1)
+        self.assertEqual(verdict["status"], "ERROR")
+        self.assertFalse(verdict["passed"])
 
     def test_blocked_verdict_fails_delivery(self) -> None:
-        self.assertEqual(self._run_review_with_verdict(2), 2)
+        verdict = self._run_review_with_verdict(2)
+        self.assertEqual(verdict["status"], "BLOCKED")
+        self.assertTrue(verdict["failure"])
+
+    def test_pass_verdict(self) -> None:
+        verdict = self._run_review_with_verdict(0)
+        self.assertEqual(verdict["status"], "PASS")
+        self.assertTrue(verdict["passed"])
 
     def test_exit_code_mapping(self) -> None:
         self.assertEqual(post.EXIT_CODES["PASS"], 0)
-        self.assertEqual(post.EXIT_CODES["INCOMPLETE"], 0)
+        self.assertEqual(post.EXIT_CODES["INCOMPLETE"], 3)
         self.assertEqual(post.EXIT_CODES["BLOCKED"], 2)
+        self.assertEqual(post.EXIT_CODES["ERROR"], 4)
 
 
 if __name__ == "__main__":
