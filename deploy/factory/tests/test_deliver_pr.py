@@ -117,10 +117,10 @@ class SecretLikeTests(unittest.TestCase):
 
 
 def _git(repo: Path, *args: str) -> str:
-    result = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
+    result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
     if result.returncode != 0:
-        raise AssertionError(f"git {' '.join(args)}: {result.stderr.strip()}")
-    return result.stdout
+        raise AssertionError(f"git {args}: {result.stderr or result.stdout}")
+    return result.stdout.strip()
 
 
 class FinalizeAfterReviewTests(unittest.TestCase):
@@ -165,6 +165,87 @@ class FinalizeAfterReviewTests(unittest.TestCase):
             patch = out / "machinist-review-budget-run1.patch"
             self.assertTrue(patch.is_file())
             self.assertIn("print(3)", patch.read_text(encoding="utf-8"))
+
+
+def _dirty_repo(root: Path) -> Path:
+    repo = root / "repo"
+    repo.mkdir()
+    _git(repo, "init", "--quiet")
+    _git(repo, "config", "user.name", "test")
+    _git(repo, "config", "user.email", "test@example.com")
+    (repo / "README.md").write_text("seed\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-m", "seed", "--quiet")
+    (repo / "README.md").write_text("edited by the review\n", encoding="utf-8")
+    return repo
+
+
+class LaneWipTests(unittest.TestCase):
+    """MACH-59: deliver-pr switches back to the start branch at the end; a
+    review edit left in the lane must be stashed (with a patch) first."""
+
+    def test_save_wip_stashes_a_dirty_lane_and_writes_a_patch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = _dirty_repo(root)
+            scratch = root / "scratch"
+            output = root / "outputs"
+            output.mkdir()
+            with mock.patch.dict(
+                os.environ,
+                {"MACHINIST_SCRATCH_DIR": str(scratch), "MACHINIST_OUTPUT_DIR": str(output)},
+            ):
+                deliver.save_wip(str(repo))
+            self.assertEqual(_git(repo, "status", "--porcelain"), "")
+            self.assertEqual(len(list(scratch.glob("*.patch"))), 1)
+            # The published task folder must stay free of the WIP patch.
+            self.assertEqual(list(output.glob("*.patch")), [])
+
+    def test_save_wip_is_a_noop_on_a_clean_lane(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = _dirty_repo(root)
+            _git(repo, "checkout", "--", "README.md")
+            with mock.patch.dict(os.environ, {"MACHINIST_SCRATCH_DIR": str(root / "scratch")}):
+                deliver.save_wip(str(repo))
+            self.assertEqual(_git(repo, "stash", "list"), "")
+
+    def test_save_wip_reports_a_failed_status(self) -> None:
+        """A failed `git status` is not a clean lane: warn, stash nothing."""
+        with tempfile.TemporaryDirectory() as temp:
+            repo = _dirty_repo(Path(temp))
+            failure = subprocess.CompletedProcess(["git"], 128, "", "fatal: not a git repository")
+            with mock.patch.dict(os.environ, {"MACHINIST_SCRATCH_DIR": str(Path(temp) / "scratch")}), \
+                 mock.patch.object(deliver.subprocess, "run", return_value=failure) as run_mock:
+                deliver.save_wip(str(repo))
+            self.assertEqual(run_mock.call_count, 1)
+            self.assertEqual(_git(repo, "stash", "list"), "")
+
+    def test_save_wip_does_not_read_a_stale_stash_after_a_failed_push(self) -> None:
+        """A failed stash push must not label and publish a pre-existing stash."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = _dirty_repo(root)
+            _git(repo, "checkout", "--", "README.md")
+            (repo / "seed-2.txt").write_text("seed\n", encoding="utf-8")
+            _git(repo, "add", "seed-2.txt")
+            _git(repo, "commit", "-m", "seed 2", "--quiet")
+            (repo / "seed-2.txt").write_text("earlier stash\n", encoding="utf-8")
+            _git(repo, "stash", "push", "-m", "machinist-earlier")
+            (repo / "README.md").write_text("dirty again\n", encoding="utf-8")
+            scratch = root / "scratch"
+            real_run = subprocess.run
+
+            def fake_run(args, **kwargs):
+                if "stash" in args and "push" in args:
+                    return subprocess.CompletedProcess(args, 1, "", "fatal: stash failed")
+                return real_run(args, **kwargs)
+
+            with mock.patch.dict(os.environ, {"MACHINIST_SCRATCH_DIR": str(scratch)}), \
+                 mock.patch.object(deliver.subprocess, "run", side_effect=fake_run):
+                deliver.save_wip(str(repo))
+            self.assertEqual(list(scratch.glob("*.patch")) if scratch.exists() else [], [])
+            self.assertIn("machinist-earlier", _git(repo, "stash", "list"))
 
 
 if __name__ == "__main__":

@@ -698,7 +698,7 @@ func TestExecuteFastForwardsLaneBaseBranch(t *testing.T) {
 	}
 }
 
-func TestExecuteRefusesDirtyLane(t *testing.T) {
+func TestExecuteSavesDirtyLaneBeforeRunning(t *testing.T) {
 	repository := newGitRepository(t)
 	if err := os.WriteFile(filepath.Join(repository, "tracked.txt"), []byte("clean"), 0o600); err != nil {
 		t.Fatal(err)
@@ -717,24 +717,32 @@ func TestExecuteRefusesDirtyLane(t *testing.T) {
 		Stdout:        &stdout,
 		Stderr:        &stderr,
 	})
-	var outcome *OutcomeError
-	if !errors.As(err, &outcome) || outcome.State != StateFailed || outcome.ExitCode != 1 {
-		t.Fatalf("error = %#v", err)
+	// MACH-59: a dirty lane is auto-saved instead of failing the run, so one
+	// dirty checkout does not fail this job and every queued job behind it.
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
 	}
-	if result.State != StateFailed || result.ExitCode != 1 {
+	if result.State != StateSucceeded || result.ExitCode != 0 {
 		t.Fatalf("result = %#v", result)
 	}
-	if !strings.Contains(outcome.Error(), "lane checkout is dirty") {
-		t.Fatalf("error = %q", outcome.Error())
+	if status := runGitCommand(t, repository, "status", "--porcelain", "-uno"); status != "" {
+		t.Fatalf("lane still dirty after auto-save: %q", status)
 	}
-	events := readEvents(t, result.EventsPath)
-	if last := events[len(events)-1]; last.Type != "run.completed" || !strings.Contains(last.Message, "dirty") {
-		t.Fatalf("last event = %#v", last)
+	if !strings.Contains(stderr.String(), "saved them to a stash") {
+		t.Fatalf("missing lane alert: %q", stderr.String())
 	}
-	for _, event := range events {
-		if event.Type == "process.started" {
-			t.Fatalf("agent started despite dirty lane: %#v", event)
+	saved := false
+	for _, event := range readEvents(t, result.EventsPath) {
+		if event.Type == "lane.wip.saved" && strings.Contains(event.Message, "machinist-lane-wip-") {
+			saved = true
 		}
+	}
+	if !saved {
+		t.Fatalf("no lane.wip.saved event: %#v", readEvents(t, result.EventsPath))
+	}
+	patches, err := filepath.Glob(filepath.Join(filepath.Dir(result.EventsPath), "machinist-lane-wip-*.patch"))
+	if err != nil || len(patches) != 1 {
+		t.Fatalf("lane WIP patches = %v, %v", patches, err)
 	}
 }
 

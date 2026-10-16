@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/owainlewis/machinist/internal/skills"
@@ -45,20 +46,87 @@ func (s *Server) openSkills() (*skills.Library, error) {
 	return library, nil
 }
 
-// skillUsedBy lists the projects and review profiles that reference a skill.
-// Reference tracking arrives with the skills configuration work (MACH-50); the
-// field is always present and empty until then.
-func (s *Server) skillUsedBy(string) []string { return []string{} }
+// skillUsedBy lists the projects and review profiles that reference a skill:
+// every skills.project.<project> and skills.default setting that names it, and
+// every shipped or stored review profile whose reviewers reference it. A
+// setting or profile that cannot be read is skipped rather than failing the
+// listing, so an unreadable reference never hides the installed skills.
+func (s *Server) skillUsedBy(ctx context.Context, name string) []string {
+	key, err := skills.Key(name)
+	if err != nil {
+		return []string{}
+	}
+	used := []string{}
+	if values, err := s.store.Settings(ctx); err == nil {
+		settingKeys := make([]string, 0, len(values))
+		for settingKey := range values {
+			settingKeys = append(settingKeys, settingKey)
+		}
+		sort.Strings(settingKeys)
+		for _, settingKey := range settingKeys {
+			project, scoped := strings.CutPrefix(settingKey, "skills.project.")
+			if global := settingKey == "skills.default"; !scoped && !global {
+				continue
+			}
+			if !settingReferencesSkill([]byte(values[settingKey]), key) {
+				continue
+			}
+			if scoped {
+				used = append(used, project)
+			} else {
+				used = append(used, "global default")
+			}
+		}
+	}
+	if profiles, err := s.store.ReviewProfiles(ctx); err == nil {
+		for _, profile := range profiles {
+			if bodyReferencesSkill(profile.Body, key) {
+				used = append(used, "review profile "+profile.Name)
+			}
+		}
+	}
+	if shipped, err := review.SkillReferenced(name); err == nil && shipped {
+		used = append(used, "shipped review profile")
+	}
+	return used
+}
 
-func (s *Server) newSkillView(name, source, active string, versions []skills.Version) skillView {
+// settingReferencesSkill reports whether a skills.project/skills.default
+// setting names the skill key. A malformed setting is treated as no reference.
+func settingReferencesSkill(value []byte, key string) bool {
+	entries, err := skills.ParseConfig(value)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		base, _ := skills.SplitName(entry.Name)
+		if entryKey, err := skills.Key(base); err == nil && entryKey == key {
+			return true
+		}
+	}
+	return false
+}
+
+// bodyReferencesSkill reports whether a review profile body names the skill key.
+func bodyReferencesSkill(body, key string) bool {
+	for _, reference := range skills.ProfileReferences(body) {
+		base, _ := skills.SplitName(reference)
+		if referenceKey, err := skills.Key(base); err == nil && referenceKey == key {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) newSkillView(ctx context.Context, name, source, active string, versions []skills.Version) skillView {
 	if versions == nil {
 		versions = []skills.Version{}
 	}
-	return skillView{Name: name, Source: source, Active: active, Versions: versions, UsedBy: s.skillUsedBy(name)}
+	return skillView{Name: name, Source: source, Active: active, Versions: versions, UsedBy: s.skillUsedBy(ctx, name)}
 }
 
 // listSkills returns every installed skill, sorted by name.
-func (s *Server) listSkills() ([]skillView, error) {
+func (s *Server) listSkills(ctx context.Context) ([]skillView, error) {
 	library, err := s.openSkills()
 	if err != nil {
 		return nil, err
@@ -69,13 +137,13 @@ func (s *Server) listSkills() ([]skillView, error) {
 	}
 	views := make([]skillView, 0, len(installed))
 	for _, skill := range installed {
-		views = append(views, s.newSkillView(skill.Name, skill.Source, skill.Active, skill.Versions))
+		views = append(views, s.newSkillView(ctx, skill.Name, skill.Source, skill.Active, skill.Versions))
 	}
 	return views, nil
 }
 
 // getSkill returns one installed skill with all of its versions.
-func (s *Server) getSkill(name string) (skillView, error) {
+func (s *Server) getSkill(ctx context.Context, name string) (skillView, error) {
 	library, err := s.openSkills()
 	if err != nil {
 		return skillView{}, err
@@ -84,7 +152,7 @@ func (s *Server) getSkill(name string) (skillView, error) {
 	if err != nil {
 		return skillView{}, err
 	}
-	return s.newSkillView(manifest.Name, manifest.Source, manifest.Active, manifest.Versions), nil
+	return s.newSkillView(ctx, manifest.Name, manifest.Source, manifest.Active, manifest.Versions), nil
 }
 
 // installSkill resolves a URL, directory or zip source and installs it.
@@ -214,7 +282,7 @@ func decodeOptionalJSON(request *http.Request, target any) error {
 
 // listSkillsHandler serves GET /api/v1/skills.
 func (s *Server) listSkillsHandler(response http.ResponseWriter, request *http.Request) {
-	views, err := s.listSkills()
+	views, err := s.listSkills(request.Context())
 	if err != nil {
 		writeError(response, http.StatusInternalServerError, err)
 		return
@@ -229,7 +297,7 @@ func (s *Server) getSkillHandler(response http.ResponseWriter, request *http.Req
 	if !ok {
 		return
 	}
-	view, err := s.getSkill(name)
+	view, err := s.getSkill(request.Context(), name)
 	if err != nil {
 		writeSkillError(response, err, http.StatusInternalServerError)
 		return
@@ -351,7 +419,7 @@ func (s *Server) pinSkillHandler(response http.ResponseWriter, request *http.Req
 		return
 	}
 	s.recordAudit(request, "skills.pin", name+" "+version)
-	view, err := s.getSkill(name)
+	view, err := s.getSkill(request.Context(), name)
 	if err != nil {
 		writeSkillError(response, err, http.StatusInternalServerError)
 		return

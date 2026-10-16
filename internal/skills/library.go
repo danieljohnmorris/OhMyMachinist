@@ -131,6 +131,11 @@ var ErrNotInstalled = errors.New("not installed")
 // errors.Is to answer with a conflict rather than a server error.
 var ErrReferenced = errors.New("referenced by a review profile")
 
+// ErrNoVersion reports that a skill is installed but does not have the
+// requested version. Callers use errors.Is to tell a missing version from a
+// missing skill.
+var ErrNoVersion = errors.New("no such version")
+
 // UninstallOptions controls whether a referenced skill may be removed.
 type UninstallOptions struct {
 	// Referenced is set by the caller when a review profile still uses the
@@ -292,6 +297,28 @@ func (l *Library) Uninstall(name string, options UninstallOptions) error {
 func (l *Library) Versions(name string) (Manifest, error) {
 	manifest, _, err := l.load(name)
 	return manifest, err
+}
+
+// Read returns the SKILL.md body for an installed skill and the version identity
+// it read. version may be empty to read the active version; an unknown version
+// wraps ErrNoVersion and a missing skill wraps ErrNotInstalled.
+func (l *Library) Read(name, version string) (string, string, error) {
+	manifest, dir, err := l.load(name)
+	if err != nil {
+		return "", "", err
+	}
+	identity := strings.TrimSpace(version)
+	if identity == "" {
+		identity = manifest.Active
+	}
+	if _, ok := manifest.version(identity); !ok {
+		return "", "", fmt.Errorf("skill %q is %w %q", manifest.Name, ErrNoVersion, identity)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, identity, "SKILL.md"))
+	if err != nil {
+		return "", "", err
+	}
+	return string(body), identity, nil
 }
 
 func (l *Library) load(name string) (Manifest, string, error) {

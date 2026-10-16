@@ -1,4 +1,4 @@
 # Gitleaks allowlist: pre-existing test fixtures with obviously fake values.
 # Fingerprint format: <file>:<rule>:<line>.
-deploy/factory/tests/test_deliver_pr.py:generic-api-key:70
-internal/runner/runner_test.go:generic-api-key:201
+deploy/factory/tests/test_deliver_pr.py:generic-api-key:74
+internal/runner/runner_test.go:generic-api-key:224

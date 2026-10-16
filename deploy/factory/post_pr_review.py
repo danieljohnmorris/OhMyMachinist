@@ -332,14 +332,26 @@ def run_secret_scan(repo: Path, base_sha: str, head_ref: str, timeout: int) -> d
     return scan
 
 
-def changed_paths(repo: Path, timeout: int) -> list[str]:
+def lane_changes(repo: Path, timeout: int) -> tuple[list[str], str | None]:
+    """Dirty paths plus an error string when ``git status`` itself failed.
+
+    ``changed_paths`` flattens a failed status to an empty list, which reads
+    exactly like a clean tree. The lane-WIP path must tell the two apart: a
+    status failure reported as "nothing to save" leaves the lane dirty and the
+    branch switch then fails with an unrelated error.
+    """
     result = run_git(repo, ["status", "--porcelain"], timeout)
     if not result.ok:
-        return []
+        return [], result.output or "git status failed"
     paths = []
     for line in result.stdout.splitlines():
         if len(line) > 3:
             paths.append(line[3:].strip().strip('"'))
+    return paths, None
+
+
+def changed_paths(repo: Path, timeout: int) -> list[str]:
+    paths, _ = lane_changes(repo, timeout)
     return paths
 
 
@@ -357,6 +369,96 @@ def commit_allowed(repo: Path, paths: list[str], message: str, timeout: int) -> 
 
 def push_branch(repo: Path, branch: str, timeout: int) -> CommandResult:
     return run_git(repo, ["push", "origin", f"HEAD:refs/heads/{branch}"], timeout)
+
+
+# MACH-59: the review runs in the lane checkout (docs pass, amend rounds). An
+# edit left behind makes the final branch switch fail and then fails every
+# queued job behind it, so before switching we commit the wanted edits or stash
+# them with a labelled stash plus a patch outside the published run artifacts.
+WIP_STASH_PREFIX = "machinist-review-wip"
+
+
+def wip_patch_dir() -> Path:
+    """Where a labelled WIP patch goes: never the published run artifacts.
+
+    ``MACHINIST_OUTPUT_DIR`` is the run's published task folder (uploaded and
+    shown to the user). The stash path deliberately covers files a commit
+    refuses (an untracked ``.env``, say), so a patch there would publish the
+    very secret the stash exists to keep out. Prefer the unpublishable scratch
+    dir, then the Machinist data dir.
+    """
+    scratch = os.environ.get("MACHINIST_SCRATCH_DIR", "").strip()
+    if scratch:
+        return Path(scratch)
+    data_dir = os.environ.get("MACHINIST_DATA_DIR", "").strip()
+    base = Path(data_dir) if data_dir else Path.home() / ".machinist"
+    return base / "review-wip"
+
+
+def current_branch(repo: Path, timeout: int) -> str:
+    result = run_git(repo, ["rev-parse", "--abbrev-ref", "HEAD"], timeout)
+    return result.stdout.strip() if result.ok else ""
+
+
+def save_lane_wip(
+    repo: Path,
+    timeout: int,
+    *,
+    message: str,
+    label: str | None = None,
+    artifact_dir: Path | None = None,
+    prefer_stash: bool = False,
+    paths: list[str] | None = None,
+) -> dict[str, Any]:
+    """Commit wanted edits, else stash them with a labelled stash and patch.
+
+    Returns a report with the committed/stashed paths and, when the work was
+    stashed, the patch written outside the published run artifacts. The lane is
+    left clean either way so the branch switch cannot fail on a dirty checkout.
+    ``paths`` limits the work to the wanted delta (the docs pass passes its
+    before/after diff), so pre-existing lane dirt is never committed to the PR
+    branch. ``prefer_stash`` skips the commit for leftovers that may include
+    unrelated build output, so only the docs/fix passes ever push. A failed
+    ``git status`` is reported as an error, never as a clean tree.
+    """
+    report: dict[str, Any] = {"committed": [], "stashed": [], "stash": None, "patch": None, "error": None}
+    dirty, status_error = lane_changes(repo, timeout)
+    if status_error:
+        report["error"] = f"could not read lane status: {status_error}"
+        return report
+    if paths is None:
+        wanted = dirty
+    else:
+        dirty_set = set(dirty)
+        wanted = [path for path in paths if path in dirty_set]
+    if not wanted:
+        return report
+    if not prefer_stash and not any(core.is_secret_path(path) for path in wanted):
+        # Wanted edits go back to the PR branch; a commit is the cleanest exit.
+        if commit_allowed(repo, wanted, message, timeout):
+            report["committed"] = wanted
+            branch = current_branch(repo, timeout)
+            if not branch or not push_branch(repo, branch, timeout).ok:
+                report["error"] = "committed review changes but could not push them"
+            return report
+    name = label or f"{WIP_STASH_PREFIX}-{time.strftime('%Y%m%d-%H%M%S')}"
+    stash = run_git(repo, ["stash", "push", "--include-untracked", "-m", name, "--", *wanted], timeout)
+    if not stash.ok:
+        report["error"] = f"could not stash review changes: {stash.output}"
+        return report
+    report["stash"] = name
+    report["stashed"] = wanted
+    patch = run_git(repo, ["stash", "show", "--patch", "--include-untracked", "stash@{0}"], timeout)
+    if patch.ok and patch.stdout:
+        target = artifact_dir or wip_patch_dir()
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            patch_path = target / f"{name}.patch"
+            patch_path.write_text(patch.stdout, encoding="utf-8")
+            report["patch"] = str(patch_path)
+        except OSError as error:
+            report["error"] = f"could not write review WIP patch: {error}"
+    return report
 
 
 def rerun_new_failures(
@@ -527,17 +629,23 @@ def run_docs(
         return docs, []
     docs["ran"] = True
     after = set(changed_paths(repo, timeout))
-    allowed = set(files) or {"README.md", "CLAUDE.md", "AGENTS.md"}
-    docs_changed = sorted((after - before) & allowed)
+    # MACH-59: every file the docs pass touched is a wanted edit, not just the
+    # configured files list (the incident edit was deploy/factory/README.md).
+    docs_changed = sorted(after - before)
     docs["changed"] = docs_changed
     stale_line = next((line for line in result.stdout.splitlines() if line.startswith("PR_DESCRIPTION_STALE:")), "")
     docs["pr_description_stale"] = "yes" in stale_line.lower()
     if docs_changed and not dry_run:
-        branch = metadata["headRefName"]
-        if not commit_allowed(repo, docs_changed, "Update docs from PR review", timeout):
-            docs["error"] = "could not commit documentation changes"
-        elif not push_branch(repo, branch, timeout).ok:
-            docs["error"] = "could not push documentation changes"
+        saved = save_lane_wip(
+            repo,
+            timeout,
+            message="Update docs from PR review",
+            label=f"{WIP_STASH_PREFIX}-docs-{time.strftime('%Y%m%d-%H%M%S')}",
+            paths=docs_changed,
+        )
+        docs["saved"] = {key: saved[key] for key in ("committed", "stashed", "stash", "patch")}
+        if saved["error"]:
+            docs["error"] = saved["error"]
     suggested = parse_suggested_body(result.stdout)
     if docs.get("pr_description_stale") and suggested and docs_config.get("update_pr_description", True):
         docs["suggested_pr_body"] = suggested
@@ -787,6 +895,59 @@ def write_json(path: str, summary: dict[str, Any]) -> None:
     target.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 
 
+def publish_review(
+    options: ReviewOptions,
+    owner: str,
+    name: str,
+    number: str,
+    head_sha: str,
+    resolved: profile_mod.ResolvedProfile,
+    status: str,
+    comment: str,
+) -> str | None:
+    """Post the review comment and commit status, returning the comment URL.
+
+    Publishing is the review's only externally visible effect, so every result
+    that reaches the end of ``review`` — including an INCOMPLETE one that never
+    ran the reviewers — goes through here, leaving the ``machinist/review``
+    status on the head commit reflecting that result instead of a stale green.
+    """
+    output = resolved.body.get("output") or {}
+    commit_status = str(output.get("commit_status", "machinist/review"))
+    if options.dry_run:
+        print("Planned command: gh pr comment ... --body-file -")
+        print(f"Planned command: gh api repos/{owner}/{name}/statuses/{head_sha} ...")
+        return None
+    comment_url = None
+    comment_result = CommandResult((), 0, "", "")
+    if output.get("pr_comment", True):
+        comment_result = run_gh(
+            options.repo,
+            ["pr", "comment", number, "--repo", f"{owner}/{name}", "--body-file", "-"],
+            options.timeout,
+            stdin=comment,
+        )
+        if comment_result.ok:
+            comment_url = comment_result.stdout.strip().splitlines()[-1]
+    status_result = run_gh(
+        options.repo,
+        [
+            "api",
+            f"repos/{owner}/{name}/statuses/{head_sha}",
+            "-f",
+            f"state={STATUS_STATES[status]}",
+            "-f",
+            f"context={commit_status}",
+            "-f",
+            "description=Machinist review " + status,
+        ],
+        options.timeout,
+    )
+    if not status_result.ok or (output.get("pr_comment", True) and not comment_result.ok):
+        raise ReviewError(f"could not publish review: {comment_result.output} {status_result.output}")
+    return comment_url
+
+
 def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
     if not options.repo.is_dir():
         raise ReviewError(f"repository path does not exist: {options.repo}")
@@ -828,6 +989,9 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
             if resolved is None:
                 resolved = profile_mod.resolve_profile(options.repo, "", options.timeout, run_git)
         head_sha = metadata["headRefOid"]
+        # MACH-50: resolve the ordered skills list once (repo config, project
+        # setting, global setting) so reviewer passes and the summary share it.
+        skill_library.configure(repo_dir=str(options.repo), base_sha=base_sha, project=os.environ.get("MACHINIST_PROJECT"), kind="review")
         summary["profile"] = {
             "name": resolved.name,
             "source": resolved.source,
@@ -842,6 +1006,50 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
             reserve_seconds=delivery_reserve_seconds(),
             job_seconds=job_seconds_left(),
         )
+        try:
+            loaded = skill_library.loaded_skills()
+        except skill_library.RequiredSkillError as error:
+            # A required skill that is not installed must fail the review
+            # visibly: publish an INCOMPLETE (error) status and comment so the
+            # machinist/review check does not stay green, then exit 0 like any
+            # other INCOMPLETE result (MACH-31). Otherwise the missing skill
+            # would leave the review silently unrun behind a stale green status.
+            failure_notes = [f"the review did not run: {error}"]
+            summary.update(
+                {
+                    "status": "INCOMPLETE",
+                    "skills": [],
+                    "skill_warnings": [],
+                    "notes": failure_notes,
+                    "error": str(error),
+                }
+            )
+            comment = (
+                "\n".join(
+                    [
+                        "Machinist PR review",
+                        "Status: INCOMPLETE",
+                        "",
+                        f"Profile: {resolved.name or '(unnamed)'} (source: {resolved.source})",
+                        f"Head SHA: {head_sha}",
+                        "",
+                        "## Notes",
+                        f"- {error}",
+                    ]
+                ).rstrip()
+                + "\n"
+            )
+            print(comment)
+            summary["comment_url"] = publish_review(
+                options, owner, name, number_text, head_sha, resolved, "INCOMPLETE", comment
+            )
+            print(
+                "post-pr review warning: review incomplete; exiting 0 so the delivery job does not fail",
+                file=sys.stderr,
+            )
+            return EXIT_CODES["INCOMPLETE"], summary
+        summary["skills"] = loaded["skills"]
+        summary["skill_warnings"] = loaded["warnings"]
         files, files_readable = changed_file_list(
             options.repo, owner, name, number_text, metadata, options.base, options.timeout
         )
@@ -1063,38 +1271,9 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
         )
         comment = render_comment(status, checks, reviewers, docs, resolved, merged, summary["head_sha"], notes, secret_scan)
         print(comment)
-        state = STATUS_STATES[status]
-        commit_status = str((resolved.body.get("output") or {}).get("commit_status", "machinist/review"))
-        if options.dry_run:
-            print("Planned command: gh pr comment ... --body-file -")
-            print(f"Planned command: gh api repos/{owner}/{name}/statuses/{head_sha} ...")
-        else:
-            comment_result = CommandResult((), 0, "", "")
-            if (resolved.body.get("output") or {}).get("pr_comment", True):
-                comment_result = run_gh(
-                    options.repo,
-                    ["pr", "comment", number_text, "--repo", f"{owner}/{name}", "--body-file", "-"],
-                    options.timeout,
-                    stdin=comment,
-                )
-                if comment_result.ok:
-                    summary["comment_url"] = comment_result.stdout.strip().splitlines()[-1]
-            status_result = run_gh(
-                options.repo,
-                [
-                    "api",
-                    f"repos/{owner}/{name}/statuses/{head_sha}",
-                    "-f",
-                    f"state={state}",
-                    "-f",
-                    f"context={commit_status}",
-                    "-f",
-                    "description=Machinist review " + status,
-                ],
-                options.timeout,
-            )
-            if not status_result.ok or ((resolved.body.get("output") or {}).get("pr_comment", True) and not comment_result.ok):
-                raise ReviewError(f"could not publish review: {comment_result.output} {status_result.output}")
+        summary["comment_url"] = publish_review(
+            options, owner, name, number_text, head_sha, resolved, status, comment
+        )
         if status == "INCOMPLETE":
             reason = f": {budget.exhausted_reason}" if budget.exhausted_reason else ""
             print(
@@ -1109,6 +1288,18 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
         )
         return EXIT_CODES[status], summary
     finally:
+        # MACH-59: never leave the lane dirty before switching back. The docs
+        # pass and amend rounds run here; anything they left behind is
+        # committed or stashed so the switch (and the next queued job) works.
+        if not options.dry_run:
+            wip = save_lane_wip(
+                options.repo,
+                options.timeout,
+                message="Save review work in progress",
+                prefer_stash=True,
+            )
+            if wip.get("error"):
+                print(f"post-pr review warning: {wip['error']}", file=sys.stderr)
         restore_branch(options.repo, starting_branch, options.timeout)
 
 

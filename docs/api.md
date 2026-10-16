@@ -40,7 +40,7 @@ All requests and responses are `application/json`. Errors are
 | --- | --- | --- |
 | GET | `/api/v1/jobs?state=queued` | List jobs newest first with their runs. Optional `state` filter. |
 | GET | `/api/v1/jobs/{id}` | One job: prompt, state, attempts and runs. |
-| GET | `/api/v1/runs/{id}` | One run: command, executor, state, exit code, timings, final message. |
+| GET | `/api/v1/runs/{id}` | One run: command, executor, state, exit code, timings, final message, and the `skills` it loaded. |
 | GET | `/api/v1/runs/{id}/events` | The run's transcript (event log). |
 | GET | `/api/v1/jobs/{id}/artifacts` | Artifact files for a job. |
 | GET | `/api/v1/artifacts/{id}/content` | Artifact content. |
@@ -154,9 +154,11 @@ A skill entry looks like:
 }
 ```
 
-`used_by` lists the projects and review profiles that reference the skill. It is
-always present and currently empty; reference tracking lands with the skills
-configuration work. Recorded sources and manifests never contain credentials, so
+`used_by` lists the projects and review profiles that reference the skill: each
+`skills.project.<project>` and `skills.default` setting that names it, plus the
+shipped and stored review profiles whose reviewers reference it. It is always
+present, and empty when nothing references the skill. Recorded sources and
+manifests never contain credentials, so
 no response returns a token or a token-bearing URL. Every install, update, pin
 and removal is audit-logged with the token's name.
 

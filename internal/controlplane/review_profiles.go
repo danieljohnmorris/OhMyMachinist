@@ -317,7 +317,7 @@ func validateProfileNode(root *yaml.Node) []ProfileIssue {
 	if root.Kind != yaml.MappingNode {
 		return append(issues, ProfileIssue{Line: nodeLine(root), Message: "profile must be a YAML mapping"})
 	}
-	knownTop := map[string]bool{"name": true, "version": true, "description": true, "source": true, "extends": true, "extra_instructions": true, "scope": true, "checks": true, "concurrency": true, "reviewers": true, "passes": true, "routing": true, "reconcile": true, "docs": true, "blocking": true, "output": true}
+	knownTop := map[string]bool{"name": true, "version": true, "description": true, "source": true, "extends": true, "extra_instructions": true, "scope": true, "checks": true, "concurrency": true, "reviewers": true, "passes": true, "routing": true, "reconcile": true, "docs": true, "blocking": true, "output": true, "skills": true}
 	for index := 0; index < len(root.Content); index += 2 {
 		key := root.Content[index]
 		if !knownTop[key.Value] {
