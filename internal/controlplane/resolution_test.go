@@ -38,7 +38,7 @@ func newPlaneFixture(t *testing.T) (*issues.PlaneClient, *[]planeRequest) {
 		mu.Unlock()
 		// Emulates real Plane: keys resolve only through the workspace-level
 		// endpoint, issues carry a state UUID, and states live per project.
-		const doneID, startedID = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
+		const doneID, startedID, attentionID = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222", "33333333-3333-3333-3333-333333333333"
 		path := request.URL.Path
 		write := func(body string) {
 			response.Header().Set("Content-Type", "application/json")
@@ -54,7 +54,11 @@ func newPlaneFixture(t *testing.T) (*issues.PlaneClient, *[]planeRequest) {
 			return
 		}
 		if request.Method == http.MethodGet && path == "/api/v1/workspaces/platform/projects/proj/states/" {
-			write(`{"results":[{"id":"` + startedID + `","name":"In Progress","group":"started"},{"id":"` + doneID + `","name":"Done","group":"completed"}]}`)
+			write(`{"results":[{"id":"` + startedID + `","name":"In Progress","group":"started"},{"id":"` + doneID + `","name":"Done","group":"completed"},{"id":"` + attentionID + `","name":"Needs attention","group":"started"}]}`)
+			return
+		}
+		if request.Method == http.MethodGet && strings.HasSuffix(path, "/states/"+attentionID+"/") {
+			write(`{"id":"` + attentionID + `","name":"Needs attention","group":"started"}`)
 			return
 		}
 		if request.Method == http.MethodGet && strings.HasSuffix(path, "/states/"+doneID+"/") {

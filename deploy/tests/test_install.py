@@ -37,7 +37,7 @@ class InstallTest(unittest.TestCase):
         result = self.install()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.root / "factory" / "deliver-pr.py").exists())
-        self.assertTrue((self.root / "factory" / "fail.py").exists())
+        self.assertFalse((self.root / "factory" / "fail.py").exists())
         self.assertTrue((self.root / "factory" / "drift-check.sh").exists())
         self.assertTrue((self.root / "systemd" / "machinist-control.service").exists())
         self.assertTrue((self.root / "systemd" / "machinist-worker@.service.d" / "memory.conf").exists())

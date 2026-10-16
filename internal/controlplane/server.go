@@ -56,6 +56,10 @@ type Server struct {
 	authMode             string
 	reviewDefaultProfile string
 	failAlerts           *failAlertWriter
+	healing              config.Healing
+	health               config.Health
+	healthChecker        *healthChecker
+	healingEvery         time.Duration
 	planeIntake          *PlaneIntake
 	planePollEvery       time.Duration
 	planeSyncEvery       time.Duration
@@ -181,6 +185,10 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 		schedulerEvery:     30 * time.Second, shutdownTimeout: 5 * time.Second,
 		schedulerError:    func(err error) { log.Printf("scheduler: %v", err) },
 		failAlerts:        &failAlertWriter{directory: alertsDirectory},
+		healing:           definition.Healing,
+		health:            definition.Health,
+		healthChecker:     &healthChecker{alerts: &failAlertWriter{directory: alertsDirectory}, timeout: 10 * time.Second, now: time.Now},
+		healingEvery:      30 * time.Second,
 		maxConcurrentJobs: maxConcurrentJobs, workerToken: workerToken, csrfToken: csrfToken,
 		authMode:             authMode,
 		reviewDefaultProfile: definition.Review.DefaultProfile,
@@ -313,6 +321,10 @@ func (s *Server) runScheduler(ctx context.Context) error {
 	loop(s.schedulerEvery, true, s.maintainState)
 	loop(s.schedulerEvery, true, s.store.CleanupArtifacts)
 	loop(s.resolutionEvery, false, s.reconcileTicketOutcomes)
+	loop(s.healingEvery, true, s.healPendingRetries)
+	if len(s.health.Endpoints) > 0 {
+		loop(healthCheckInterval(s.health), true, s.runHealthChecks)
+	}
 	if s.planeIntake != nil {
 		loop(s.planePollEvery, true, s.planePoll)
 		loop(s.planeSyncEvery, true, s.planeSync)
@@ -696,6 +708,9 @@ func (s *Server) complete(response http.ResponseWriter, request *http.Request) {
 	}
 	if alertingState(input.State) {
 		s.writeFailAlert(request.Context(), request.PathValue("id"))
+		// Self-healing (MACH-25): diagnose and requeue failed runs without
+		// waiting for an external watcher. Best effort, off the request path.
+		go s.HealRun(context.WithoutCancel(request.Context()), request.PathValue("id"))
 	}
 	response.WriteHeader(http.StatusNoContent)
 }

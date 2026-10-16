@@ -37,6 +37,7 @@ type JobMetadata struct {
 	IntakeSource     string          `json:"intake_source,omitempty"`
 	IntakeDeliveryID string          `json:"intake_delivery_id,omitempty"`
 	IntakeSpecHash   string          `json:"intake_spec_hash,omitempty"`
+	Healing          *healingRecord  `json:"healing,omitempty"`
 	Screenshots      []JobScreenshot `json:"screenshots,omitempty"`
 }
 
@@ -95,7 +96,8 @@ func NormalizeJobMetadata(raw map[string]any) (*JobMetadata, error) {
 	}
 	if metadata.IssueURL == "" && metadata.Branch == "" && metadata.PRURL == "" && metadata.PreviewURL == "" &&
 		metadata.ReviewVerdict == "" && metadata.ReviewSummary == "" && len(metadata.Screenshots) == 0 &&
-		metadata.IntakeSource == "" && metadata.IntakeDeliveryID == "" && metadata.IntakeSpecHash == "" {
+		metadata.IntakeSource == "" && metadata.IntakeDeliveryID == "" && metadata.IntakeSpecHash == "" &&
+		metadata.Healing == nil {
 		if metadata.Project == "" {
 			return nil, nil
 		}

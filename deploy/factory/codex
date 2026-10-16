@@ -4,21 +4,17 @@
 # 1. Runs the real Codex CLI with the given args (sandbox stays workspace-write).
 # 2. If Codex succeeded, runs deliver-pr.py OUTSIDE the sandbox: branch, commit,
 #    push over SSH, open PR with gh. The model never gets network/.git access.
-# 3. (2026-10-10) On ANY failure (preflight / codex / deliver-pr / killed) runs
-#    fail.py hook -> ~/.machinist/alerts/inbox/<job>.json; machinist-fail-notify.path
-#    then comments on the Plane ticket and hands it to Factory Alerts (alerts/pending/).
+# 3. (2026-10-16, MACH-25) Failures are handled by the control plane's
+#    self-healing pass; the wrapper no longer runs fail.py.
 set -uo pipefail
 REAL_CODEX="${MACHINIST_REAL_CODEX:-$HOME/.local/share/mise/shims/codex}"
 HERE="$(dirname "$(readlink -f "$0")")"
 repo="$(pwd)"
-brief="$(mktemp)"; errlog="$(mktemp)"
-trap 'rm -f "$brief" "$errlog"' EXIT
-exec 3>&2
-exec 2> >(tee -a "$errlog" >&3)
+brief="$(mktemp)"
+trap 'rm -f "$brief"' EXIT
 
 fail() {  # fail <rc> <stage>
-  sleep 0.3
-  /usr/bin/python3 "$HERE/fail.py" hook --rc "$1" --stage "$2" --stderr-file "$errlog" --brief "$brief" 2>&3 || true
+  echo "codex-glm-pr: failed at stage $2 with exit $1" >&2
   exit "$1"
 }
 trap 'echo "codex-glm-pr: killed by signal (timeout/stop)" >&2; fail 143 killed' TERM INT

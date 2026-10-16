@@ -140,6 +140,13 @@ export function TaskDetail({
                 ["Intake", job.metadata?.intake_source],
                 ["Plane delivery", job.metadata?.intake_delivery_id],
                 ["Spec hash", job.metadata?.intake_spec_hash],
+                [
+                  "Diagnosis",
+                  job.metadata?.healing &&
+                    `(${job.metadata.healing.cause}) ${job.metadata.healing.fix || ""} ${
+                      job.metadata.healing.exhausted ? "Retry budget exhausted." : ""
+                    }`.trim(),
+                ],
                 ["Status", stateLabel(job.state)],
                 ["Created", formatTimestamp(job.created_at)],
                 ["Updated", formatTimestamp(job.updated_at)],

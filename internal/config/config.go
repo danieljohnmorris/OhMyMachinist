@@ -104,6 +104,8 @@ type Config struct {
 	Alerts       Alerts              `toml:"alerts"`
 	Review       Review              `toml:"review"`
 	Plane        Plane               `toml:"plane"`
+	Healing      Healing             `toml:"healing"`
+	Health       Health              `toml:"health"`
 	path         string
 }
 
@@ -119,6 +121,112 @@ type Review struct {
 // alert poller watches it; when unset, no failure alerts are written.
 type Alerts struct {
 	Directory string `toml:"directory"`
+}
+
+// Healing configures the self-healing pass (MACH-25): when a run fails, times
+// out or is refused, Machinist classifies the cause and requeues within a
+// per-ticket retry budget instead of waiting for an external watcher.
+type Healing struct {
+	// MaxRetries is the default requeue budget per ticket. Zero means the
+	// default of 2; a negative value disables self-healing entirely.
+	MaxRetries int `toml:"max_retries"`
+	// MaxRetriesPerProject overrides MaxRetries per project key (e.g. MACH).
+	MaxRetriesPerProject map[string]int `toml:"max_retries_per_project"`
+	// DiagnoseCommand classifies a failure: the diagnose prompt goes to stdin
+	// and the process prints {"cause": "...", "summary": "..."} on stdout,
+	// e.g. ["/usr/local/lib/machinist-factory/omp-glm", "low"]. Empty uses the
+	// built-in keyword classifier on the run's error and transcript.
+	DiagnoseCommand []string `toml:"diagnose_command"`
+	// DiagnoseTimeout bounds the diagnose command. Empty means 5m.
+	DiagnoseTimeout string `toml:"diagnose_timeout"`
+	// Backoff is the delay before the first infra-cause retry. Empty means 5m;
+	// each further infra retry doubles it.
+	Backoff string `toml:"backoff"`
+}
+
+// DiagnoseBudget returns the effective retry budget for a project key. The
+// per-project table wins over the default; the default itself is 2 retries.
+func (h Healing) DiagnoseBudget(project string) int {
+	if h.MaxRetries < 0 {
+		return 0
+	}
+	if h.MaxRetries == 0 {
+		if override, ok := h.MaxRetriesPerProject[project]; ok {
+			if override < 0 {
+				return 0
+			}
+			return override
+		}
+		return 2
+	}
+	if override, ok := h.MaxRetriesPerProject[project]; ok {
+		if override < 0 {
+			return 0
+		}
+		return override
+	}
+	return h.MaxRetries
+}
+
+// DiagnoseDeadline parses the diagnose timeout, defaulting to 5 minutes.
+func (h Healing) DiagnoseDeadline() (time.Duration, error) {
+	if h.DiagnoseTimeout == "" {
+		return 5 * time.Minute, nil
+	}
+	parsed, err := time.ParseDuration(h.DiagnoseTimeout)
+	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf("healing.diagnose_timeout must be a positive duration: %w", err)
+	}
+	return parsed, nil
+}
+
+// HealingBackoff parses the base retry backoff, defaulting to 5 minutes.
+func (h Healing) HealingBackoff() (time.Duration, error) {
+	if h.Backoff == "" {
+		return 5 * time.Minute, nil
+	}
+	parsed, err := time.ParseDuration(h.Backoff)
+	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf("healing.backoff must be a positive duration: %w", err)
+	}
+	return parsed, nil
+}
+
+// Health configures endpoint health checks (MACH-25): Machinist alerts when a
+// configured endpoint is unreachable. Alerts land in the same spool directory
+// as failure alerts.
+type Health struct {
+	// Every is the check cadence. Empty means 1m.
+	Every string `toml:"every"`
+	// Timeout bounds each request. Empty means 10s.
+	Timeout string `toml:"timeout"`
+	// Endpoints maps a name to the URL to probe, e.g. glm = the GLM API
+	// endpoint, sparks = the Sparks host, pipsqueek = the pipsqueek host.
+	Endpoints map[string]string `toml:"endpoints"`
+}
+
+// Interval parses the check cadence, defaulting to one minute.
+func (h Health) Interval() (time.Duration, error) {
+	if h.Every == "" {
+		return time.Minute, nil
+	}
+	parsed, err := time.ParseDuration(h.Every)
+	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf("health.every must be a positive duration: %w", err)
+	}
+	return parsed, nil
+}
+
+// RequestTimeout parses the per-request timeout, defaulting to 10 seconds.
+func (h Health) RequestTimeout() (time.Duration, error) {
+	if h.Timeout == "" {
+		return 10 * time.Second, nil
+	}
+	parsed, err := time.ParseDuration(h.Timeout)
+	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf("health.timeout must be a positive duration: %w", err)
+	}
+	return parsed, nil
 }
 
 // ResolveAlerts expands the alert spool directory like other configured paths
