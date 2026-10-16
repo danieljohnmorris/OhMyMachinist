@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/owainlewis/machinist/internal/skills"
 	review "github.com/owainlewis/machinist/profiles/review"
@@ -140,7 +139,7 @@ func newSkillsUninstallCommand(options *commandOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			referenced, err := skillReferenced(args[0])
+			referenced, err := review.SkillReferenced(args[0])
 			if err != nil {
 				return err
 			}
@@ -153,33 +152,4 @@ func newSkillsUninstallCommand(options *commandOptions) *cobra.Command {
 	}
 	uninstall.Flags().BoolVar(&force, "force", false, "remove the skill even when a review profile references it")
 	return uninstall
-}
-
-// skillReferenced reports whether any shipped review profile still references
-// the named skill. An error means the reference set could not be read; callers
-// must not treat that as "unreferenced".
-func skillReferenced(name string) (bool, error) {
-	key, err := skills.Key(name)
-	if err != nil {
-		return false, err
-	}
-	entries, err := review.FS.ReadDir(".")
-	if err != nil {
-		return false, fmt.Errorf("read review profiles: %w", err)
-	}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".yaml") {
-			continue
-		}
-		body, err := review.FS.ReadFile(entry.Name())
-		if err != nil {
-			return false, fmt.Errorf("read review profile %s: %w", entry.Name(), err)
-		}
-		for _, reference := range skills.ProfileReferences(string(body)) {
-			if referenceKey, err := skills.Key(reference); err == nil && referenceKey == key {
-				return true, nil
-			}
-		}
-	}
-	return false, nil
 }

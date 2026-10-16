@@ -49,6 +49,8 @@ All requests and responses are `application/json`. Errors are
 | GET | `/api/v1/review-profiles` | Stored review profiles. |
 | GET | `/api/v1/review-profile?project=X` | Resolved review profile for a project. |
 | GET | `/api/v1/review-default-profile` | The global default profile name. |
+| GET | `/api/v1/skills` | Installed skills with their versions and `used_by` references. |
+| GET | `/api/v1/skills/{name}` | One installed skill with every version. |
 
 `GET /api/v1/status` (board state: jobs, workers, triggers, plus the CSRF
 token) and `GET /api/v1/catalog` and `GET /api/v1/definitions` remain open so
@@ -77,6 +79,11 @@ they reach the log.
 | PUT | `/api/v1/review-profiles` | Save a library review profile. |
 | PUT | `/api/v1/review-profile` | Save a project review profile. |
 | PUT | `/api/v1/review-default-profile` | Set the global default profile name. |
+| POST | `/api/v1/skills` | Install a skill. Body: `{"source": "<github url, directory or zip>"}`. Returns the install result. |
+| POST | `/api/v1/skills/upload` | Install an uploaded skill. Multipart form with one `file` part holding a `.zip` archive or a bare `SKILL.md`. |
+| POST | `/api/v1/skills/{name}/update` | Re-resolve the recorded source and add the new version. Body: `{"activate": true}` (optional). |
+| POST | `/api/v1/skills/{name}/pin` | Set the active version. Body: `{"version": "…"}`. Returns the updated skill. |
+| DELETE | `/api/v1/skills/{name}` | Remove a skill and every installed version. Add `?force=true` to remove a skill a shipped review profile still references. |
 
 ### Worker endpoints (worker token)
 
@@ -121,7 +128,46 @@ environment.
 The same API is exposed as MCP tools over streamable HTTP at `/mcp`; see
 [docs/mcp.md](mcp.md).
 
-## Skills and review profiles
+## Skills
 
-Review profile endpoints ship above. Skills are a stub until the shared
-skills loader lands (see the review docs); no skills endpoints exist yet.
+The skills endpoints manage the versioned skills library on disk
+(`<data>/skills`, see the CLI `machinist skills`). An install resolves a GitHub
+`SKILL.md`/directory URL, a local directory, or a zip archive, validates its
+frontmatter and scans it for secrets before the version becomes active.
+
+A skill entry looks like:
+
+```json
+{
+  "name": "feature-dev:code-reviewer",
+  "source": "https://github.com/owner/repo/tree/main/skills/reviewer",
+  "active": "0123456789abcdef0123456789abcdef01234567",
+  "versions": [
+    {
+      "version": "0123456789abcdef0123456789abcdef01234567",
+      "resolved": "0123456789abcdef0123456789abcdef01234567",
+      "installed_at": "2025-01-01T00:00:00Z",
+      "scanned": true
+    }
+  ],
+  "used_by": []
+}
+```
+
+`used_by` lists the projects and review profiles that reference the skill. It is
+always present and currently empty; reference tracking lands with the skills
+configuration work. Recorded sources and manifests never contain credentials, so
+no response returns a token or a token-bearing URL. Every install, update, pin
+and removal is audit-logged with the token's name.
+
+A removal is refused with `409` while a shipped review profile still references
+the skill; pass `?force=true` to remove it anyway. The CLI `--force` flag and the
+MCP `force` argument carry the same override.
+
+A skill installed through `/api/v1/skills/upload` records its source as the
+sentinel `upload:<name>` rather than the staging path, which the server deletes
+once the version is written. Updating such a skill fails with `400` and
+`skill "…" was installed from an upload; re-upload it to add a version`; upload
+the archive or `SKILL.md` again to add a version and activate it. Re-uploading
+content that matches an installed version adds no new version and makes that
+version active.

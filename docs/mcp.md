@@ -46,6 +46,12 @@ scope.
 | `cancel_job` | write | `job_id` | Cancel the job and its latest run, or a queued job that has no runs yet. |
 | `requeue_job` | write | `job_id`, `previous_process_stopped?` | Retry a failed/blocked/interrupted/cancelled job. |
 | `set_setting` | write | `key`, `value` | Write one settings key/value pair. |
+| `list_skills` | read | — | Installed skills with versions and `used_by` references. |
+| `get_skill` | read | `name` | One installed skill with every version. |
+| `install_skill` | write | `source` | Install a skill from a GitHub URL, directory or zip archive. |
+| `update_skill` | write | `name`, `activate?` | Re-resolve the recorded source and add the new version; `activate` makes it active. A skill installed from an upload must be re-uploaded instead. |
+| `pin_skill` | write | `name`, `version` | Set the active version of an installed skill. |
+| `uninstall_skill` | write | `name`, `force?` | Remove a skill and every installed version. A skill a shipped review profile still references is refused unless `force` is set. |
 
 Tool results are JSON rendered as text content; failures return
 `isError: true` with the reason. Every change made through the tools is

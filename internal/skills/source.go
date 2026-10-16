@@ -30,6 +30,26 @@ const (
 type Source struct {
 	Kind     SourceKind
 	Location string
+	// Uploaded marks a source read from bytes the caller uploaded and staged
+	// in a temporary location. The staged file is removed once the install
+	// finishes, so the recorded manifest source is a stable uploadSource
+	// sentinel instead of that path, and Update reports that the skill must be
+	// re-uploaded to add a version.
+	Uploaded bool
+}
+
+// uploadSourcePrefix marks the recorded source of a skill installed from an
+// upload. It is never a real path or URL, so callers can tell an upload apart
+// from a re-resolvable source.
+const uploadSourcePrefix = "upload:"
+
+// uploadSource is the manifest source recorded for a skill installed from an
+// uploaded archive or SKILL.md.
+func uploadSource(name string) string { return uploadSourcePrefix + name }
+
+// isUploadSource reports whether a recorded source came from an upload.
+func isUploadSource(source string) bool {
+	return strings.HasPrefix(source, uploadSourcePrefix)
 }
 
 // ParseSource classifies a CLI argument as a GitHub URL, a local directory, or

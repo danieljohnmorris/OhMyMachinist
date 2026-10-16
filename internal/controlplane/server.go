@@ -361,6 +361,13 @@ func (s *Server) routes() (http.Handler, error) {
 	mux.HandleFunc("POST /api/v1/tokens", s.authorizeWrite(s.createTokenHandler))
 	mux.HandleFunc("DELETE /api/v1/tokens/{id}", s.authorizeWrite(s.revokeTokenHandler))
 	mux.HandleFunc("GET /api/v1/audit-log", s.authorizeRead(s.auditLogHandler))
+	mux.HandleFunc("GET /api/v1/skills", s.authorizeRead(s.listSkillsHandler))
+	mux.HandleFunc("GET /api/v1/skills/{name}", s.authorizeRead(s.getSkillHandler))
+	mux.HandleFunc("POST /api/v1/skills", s.authorizeWrite(s.installSkillHandler))
+	mux.HandleFunc("POST /api/v1/skills/upload", s.authorizeWrite(s.uploadSkillHandler))
+	mux.HandleFunc("POST /api/v1/skills/{name}/update", s.authorizeWrite(s.updateSkillHandler))
+	mux.HandleFunc("POST /api/v1/skills/{name}/pin", s.authorizeWrite(s.pinSkillHandler))
+	mux.HandleFunc("DELETE /api/v1/skills/{name}", s.authorizeWrite(s.uninstallSkillHandler))
 	// Model Context Protocol endpoint (docs/mcp.md), streamable HTTP.
 	mux.HandleFunc("POST /mcp", s.handleMCP)
 	mux.HandleFunc("GET /mcp", methodNotAllowed)

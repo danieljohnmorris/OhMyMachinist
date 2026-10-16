@@ -132,6 +132,81 @@ func TestInstallFromZip(t *testing.T) {
 	}
 }
 
+// TestInstallFromUploadRecordsSentinel pins the source recorded for an upload:
+// the caller's staged bytes are gone once the install finishes, so the
+// manifest holds an "upload:" sentinel and Update asks for a re-upload instead
+// of statting the deleted temporary path.
+func TestInstallFromUploadRecordsSentinel(t *testing.T) {
+	library := newTestLibrary(t)
+	directory := t.TempDir()
+	writeSkillDir(t, directory, "reviewer", validSkill)
+
+	result, err := library.Install(context.Background(), Source{Kind: SourceDirectory, Location: directory, Uploaded: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "upload:feature-dev:code-reviewer"
+	if result.Source != want {
+		t.Fatalf("uploaded install source = %q, want %q", result.Source, want)
+	}
+	manifest := readManifestFile(t, library.Root, "feature-dev_code-reviewer")
+	if manifest.Source != want {
+		t.Fatalf("manifest source = %q, want %q", manifest.Source, want)
+	}
+	if strings.Contains(manifest.Source, directory) {
+		t.Fatalf("manifest source leaked the staged path: %q", manifest.Source)
+	}
+	if _, err := library.Update(context.Background(), "feature-dev:code-reviewer", false); err == nil || !strings.Contains(err.Error(), "re-upload") {
+		t.Fatalf("update of an uploaded skill = %v, want a re-upload error", err)
+	}
+}
+
+// TestInstallUploadAddsVersion pins the recovery path the upload API relies on:
+// re-uploading an upload-sourced skill appends an active version, while a skill
+// installed from a re-resolvable source is refused so its recorded source is
+// never silently replaced.
+func TestInstallUploadAddsVersion(t *testing.T) {
+	library := newTestLibrary(t)
+	first := t.TempDir()
+	writeSkillDir(t, first, "reviewer", validSkill)
+	installed, err := library.InstallUpload(context.Background(), Source{Kind: SourceDirectory, Location: first, Uploaded: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	second := t.TempDir()
+	writeSkillDir(t, second, "reviewer", strings.Replace(validSkill, "Review the diff.", "Review the diff twice.", 1))
+	reuploaded, err := library.InstallUpload(context.Background(), Source{Kind: SourceDirectory, Location: second, Uploaded: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reuploaded.Added || reuploaded.Version == installed.Version || reuploaded.Active != reuploaded.Version {
+		t.Fatalf("re-upload result = %#v, want a new active version", reuploaded)
+	}
+	manifest := readManifestFile(t, library.Root, "feature-dev_code-reviewer")
+	if len(manifest.Versions) != 2 || manifest.Source != "upload:feature-dev:code-reviewer" {
+		t.Fatalf("manifest after re-upload = %#v", manifest)
+	}
+
+	// A source that is not marked uploaded is refused.
+	if _, err := library.InstallUpload(context.Background(), Source{Kind: SourceDirectory, Location: second}); err == nil || !strings.Contains(err.Error(), "uploaded source") {
+		t.Fatalf("InstallUpload without an uploaded source = %v, want a rejection", err)
+	}
+
+	// A skill installed from a re-resolvable source is refused.
+	resolvable := newTestLibrary(t)
+	resolvableSource := t.TempDir()
+	writeSkillDir(t, resolvableSource, "reviewer", validSkill)
+	if _, err := resolvable.Install(context.Background(), Source{Kind: SourceDirectory, Location: resolvableSource}); err != nil {
+		t.Fatal(err)
+	}
+	third := t.TempDir()
+	writeSkillDir(t, third, "reviewer", strings.Replace(validSkill, "Review the diff.", "Review the diff again.", 1))
+	if _, err := resolvable.InstallUpload(context.Background(), Source{Kind: SourceDirectory, Location: third, Uploaded: true}); err == nil || !strings.Contains(err.Error(), "already installed") {
+		t.Fatalf("InstallUpload over a resolvable source = %v, want an already-installed error", err)
+	}
+}
+
 func TestInstallFromGitHubResolvesRefToSHA(t *testing.T) {
 	library := newTestLibrary(t)
 	const sha = "0123456789abcdef0123456789abcdef01234567"

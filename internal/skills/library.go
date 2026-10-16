@@ -122,6 +122,15 @@ type InstallResult struct {
 	Added bool `json:"added"`
 }
 
+// ErrNotInstalled reports that a skill is not present in the library. Callers
+// wrap it with the skill name and use errors.Is to tell it from a read error.
+var ErrNotInstalled = errors.New("not installed")
+
+// ErrReferenced reports that a skill is still referenced by a review profile
+// and was therefore not removed. Callers wrap it with the skill name and use
+// errors.Is to answer with a conflict rather than a server error.
+var ErrReferenced = errors.New("referenced by a review profile")
+
 // UninstallOptions controls whether a referenced skill may be removed.
 type UninstallOptions struct {
 	// Referenced is set by the caller when a review profile still uses the
@@ -158,6 +167,27 @@ func (l *Library) List() ([]Skill, error) {
 // Install resolves a source and adds it as a new, active skill. It refuses to
 // overwrite an installed skill so history is never silently dropped.
 func (l *Library) Install(ctx context.Context, source Source) (InstallResult, error) {
+	return l.install(ctx, source, false)
+}
+
+// InstallUpload installs an uploaded archive or SKILL.md. A name that is not in
+// the library is installed like Install. A name already installed from an
+// earlier upload gains the uploaded content as a new active version, so an
+// upload-sourced skill is updated by re-uploading it rather than by Update,
+// which cannot re-resolve the deleted staging path. A name installed from a
+// re-resolvable source is still refused so its recorded source is not silently
+// replaced.
+func (l *Library) InstallUpload(ctx context.Context, source Source) (InstallResult, error) {
+	if !source.Uploaded {
+		return InstallResult{}, errors.New("upload install requires an uploaded source")
+	}
+	return l.install(ctx, source, true)
+}
+
+// install adds a skill as a new active version, either refusing an existing
+// skill or, when allowUploadVersion is set and the existing skill came from an
+// upload, appending the new content as another version.
+func (l *Library) install(ctx context.Context, source Source, allowUploadVersion bool) (InstallResult, error) {
 	resolved, err := l.fetch(ctx, source)
 	if err != nil {
 		return InstallResult{}, err
@@ -168,7 +198,24 @@ func (l *Library) Install(ctx context.Context, source Source) (InstallResult, er
 	}
 	dir := filepath.Join(l.Root, key)
 	if _, err := os.Stat(filepath.Join(dir, manifestName)); err == nil {
-		return InstallResult{}, fmt.Errorf("skill %q is already installed; run update instead", resolved.name)
+		if !allowUploadVersion {
+			return InstallResult{}, fmt.Errorf("skill %q is already installed; run update instead", resolved.name)
+		}
+		manifest, _, err := l.load(resolved.name)
+		if err != nil {
+			return InstallResult{}, err
+		}
+		if !isUploadSource(manifest.Source) {
+			return InstallResult{}, fmt.Errorf("skill %q is already installed; run update instead", resolved.name)
+		}
+		added, err := l.addVersion(ctx, dir, &manifest, resolved, true)
+		if err != nil {
+			return InstallResult{}, err
+		}
+		if err := writeManifest(dir, manifest); err != nil {
+			return InstallResult{}, err
+		}
+		return InstallResult{Name: manifest.Name, Source: manifest.Source, Version: resolved.version, Active: manifest.Active, Added: added}, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return InstallResult{}, err
 	}
@@ -188,6 +235,9 @@ func (l *Library) Update(ctx context.Context, name string, activate bool) (Insta
 	manifest, dir, err := l.load(name)
 	if err != nil {
 		return InstallResult{}, err
+	}
+	if isUploadSource(manifest.Source) {
+		return InstallResult{}, fmt.Errorf("skill %q was installed from an upload; re-upload it to add a version", manifest.Name)
 	}
 	source, err := ParseSource(manifest.Source)
 	if err != nil {
@@ -233,7 +283,7 @@ func (l *Library) Uninstall(name string, options UninstallOptions) error {
 		return err
 	}
 	if options.Referenced && !options.Force {
-		return fmt.Errorf("skill %q is referenced by a review profile; pass force to remove it", manifest.Name)
+		return fmt.Errorf("skill %q is %w; pass force to remove it", manifest.Name, ErrReferenced)
 	}
 	return os.RemoveAll(dir)
 }
@@ -252,7 +302,7 @@ func (l *Library) load(name string) (Manifest, string, error) {
 	dir := filepath.Join(l.Root, key)
 	manifest, err := readManifest(dir)
 	if errors.Is(err, os.ErrNotExist) {
-		return Manifest{}, "", fmt.Errorf("skill %q is not installed", name)
+		return Manifest{}, "", fmt.Errorf("skill %q is %w", name, ErrNotInstalled)
 	}
 	if err != nil {
 		return Manifest{}, "", err
@@ -369,5 +419,8 @@ func (l *Library) fetch(ctx context.Context, source Source) (fetched, error) {
 		return fetched{}, err
 	}
 	resolved.name = name
+	if source.Uploaded {
+		resolved.source = uploadSource(name)
+	}
 	return resolved, nil
 }
