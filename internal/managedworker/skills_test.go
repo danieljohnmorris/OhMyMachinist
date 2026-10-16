@@ -63,7 +63,7 @@ func TestPrepareSkillsInjectsRepoSkillIntoAgentDirectory(t *testing.T) {
 
 	dataDirectory := filepath.Join(directory, "worker")
 	worker := &Worker{config: config.Worker{DataDirectory: dataDirectory}, stderr: io.Discard}
-	command := config.ResolvedCommand{Name: "build-pr", Executor: "omp-glm", Command: []string{"omp-glm", "medium"}}
+	command := config.ResolvedCommand{Name: "build-pr", Executor: "omp-glm", Command: []string{"omp-glm", "medium"}, Output: config.ExecutorOutputOmpJSON}
 	spec := protocol.RunSpec{ID: "run_0123456789abcdef01234567", Command: "build-pr", Executor: "omp-glm", Repository: "machinist"}
 
 	env, recorded, err := worker.prepareSkills(context.Background(), spec, &command, repository)

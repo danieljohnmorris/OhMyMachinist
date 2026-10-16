@@ -12,6 +12,8 @@
 # streams every message, thinking block, tool call and result into the run
 # transcript. The variable is set for that one command only, so deliver-pr.py and
 # the built-in review keep the wrapper's text default.
+# MACH-57: the worker parses stdout as omp JSON only when this executor is
+# configured with output = "omp-json"; the executor name no longer decides.
 set -uo pipefail
 OMP_RUN="$(dirname "$(readlink -f "$0")")/omp-glm"
 HERE="$(dirname "$(readlink -f "$0")")"

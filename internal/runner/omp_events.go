@@ -21,29 +21,15 @@ const (
 	ompThinkingBytes   = 4 << 10
 	ompToolArgsBytes   = 8 << 10
 	ompMaxEventBytes   = 1 << 20
+	// ompRawLineBytes caps one unparseable stdout line kept as raw output.
+	ompRawLineBytes = 4 << 10
 )
 
-// IsOmpExecutor reports whether the resolved executor runs omp, directly or
-// through the factory wrappers. Callers use it to choose the native skill
-// injection over the prompt fallback.
-func IsOmpExecutor(executor string, command []string) bool {
-	return ompExecutor(executor, command)
-}
-
-// ompExecutor reports whether the executor runs omp, either directly or through
-// the factory wrappers (omp-glm, omp-glm-pr) named after it.
-func ompExecutor(executor string, command []string) bool {
-	if executorNamed(executor, "omp") {
-		return true
-	}
-	programIndex := wrappedProgramIndex(command)
-	return programIndex >= 0 && executableName(command[programIndex]) == "omp"
-}
-
 // structuredOmpCommand forces JSON output on an omp command line so its agent
-// events can be streamed. Wrappers that shell out to omp (and read their own
-// first argument as an effort) are left alone; they opt in themselves.
-func structuredOmpCommand(executor string, command []string) []string {
+// events can be streamed. The caller only reaches this when the executor is
+// configured with output = "omp-json". Wrappers that shell out to omp (and read
+// their own first argument as an effort) are left alone; they opt in themselves.
+func structuredOmpCommand(command []string) []string {
 	programIndex := wrappedProgramIndex(command)
 	if programIndex < 0 || executableName(command[programIndex]) != "omp" {
 		return command
@@ -127,6 +113,10 @@ func (parser *ompStreamParser) parseLine(line []byte) {
 	}
 	var event ompEvent
 	if err := json.Unmarshal(line, &event); err != nil {
+		// MACH-57: a line the parser cannot read (a wrapper warning, a partial
+		// write, text mode despite the setting) is still real output. Record it
+		// as raw stdout so the transcript shows it instead of dropping it.
+		parser.rawLine(line)
 		return
 	}
 	switch event.Type {
@@ -135,6 +125,16 @@ func (parser *ompStreamParser) parseLine(line []byte) {
 	case "tool_execution_end":
 		parser.parseToolResult(event)
 	}
+}
+
+// rawLine records one unparseable stdout line as plain output. The transcript
+// renders it as-is; the line is capped so a runaway line cannot crowd the log.
+func (parser *ompStreamParser) rawLine(line []byte) {
+	if parser.log == nil {
+		return
+	}
+	text := truncateBytes(string(line), ompRawLineBytes)
+	_ = parser.log.appendOutput("stdout", []byte(text+"\n"))
 }
 
 type ompEvent struct {

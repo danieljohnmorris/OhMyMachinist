@@ -25,6 +25,13 @@ command = ["./scripts/custom-workflow.sh"]
 path = "/absolute/path/to/my-project"
 ```
 
+Each executor may set `output`, which decides how its stdout becomes transcript
+events. `output = "text"` (the default) passes stdout through as plain output.
+`output = "omp-json"` parses omp's `--mode json` JSONL session into typed
+transcript events (assistant messages, thinking, tool calls, tool results) and
+shows any line that is not valid JSON as raw text. The format is always
+explicit; it is never inferred from the executor name.
+
 Managed triggers select one command with `command = "audit"`. Model selection remains
 available when the executor command includes `{{machinist.model}}`.
 

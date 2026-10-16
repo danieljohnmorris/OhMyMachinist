@@ -91,6 +91,9 @@ timeout = "120m"
 [executors.omp]
 command = ["omp", "--model={{machinist.model}}", "-"]
 models = { default = "<your-model>" }
+# "omp-json" streams omp's JSON session into the transcript; "text" (default)
+# passes stdout through unchanged. Never inferred from the executor name.
+output = "omp-json"
 
 [repositories.my-project]
 path = "/absolute/path/to/my-project"
@@ -162,7 +165,7 @@ skills:
     enabled: false
 ```
 
-The loaded list (name, version, scope `global`/`repo`, injection method `native`/`prompt`, and warnings) is recorded on the run and returned with the job and run API responses; the run page shows it with any load warnings. The **Skills** page lists the installed library with its source, active version, install/update times and the projects and review profiles that reference it, and installs, updates, pins and uninstalls skills. Settings adds a per-project skills editor: an ordered list of names with `applies_to` and `required`, validated against the library, saved to the `skills.project.<project>` setting, with a **Resolve now** preview of the composed list and versions. omp executors get a per-run agent directory (`skills/<name>/SKILL.md` plus `RULES.md`) that `skill://<name>` resolves against; other executors get each SKILL.md appended to the prompt under a header naming its source and version. Review profile `skills:` and reviewer `skills` resolve through the same composed list and library.
+The loaded list (name, version, scope `global`/`repo`, injection method `native`/`prompt`, and warnings) is recorded on the run and returned with the job and run API responses; the run page shows it with any load warnings. The **Skills** page lists the installed library with its source, active version, install/update times and the projects and review profiles that reference it, and installs, updates, pins and uninstalls skills. Settings adds a per-project skills editor: an ordered list of names with `applies_to` and `required`, validated against the library, saved to the `skills.project.<project>` setting, with a **Resolve now** preview of the composed list and versions. Executors configured with `output = "omp-json"` get a per-run agent directory (`skills/<name>/SKILL.md` plus `RULES.md`) that `skill://<name>` resolves against; other executors get each SKILL.md appended to the prompt under a header naming its source and version. Review profile `skills:` and reviewer `skills` resolve through the same composed list and library.
 
 **Settings editor.** Settings shows the resolved source, a library profile picker, an inline YAML editor, extra instructions, the global default picker, and a no-execution **preview**: paste changed-file paths and see the resolved profile source, matched lanes, checks, and reviewer passes. Saves are validated server-side and rejected with line-numbered errors (unknown keys, bad globs, unknown pass refs).
 
