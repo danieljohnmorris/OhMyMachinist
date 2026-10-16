@@ -96,7 +96,7 @@ if [ "$dry_run" != 1 ] || [ -z "$binary_src" ]; then
     exit 1
   fi
   if ! version_output="$("$bin_path" version 2>&1)"; then
-    printf 'install.sh: %s does not run; `machinist version` failed:\n%s\n' "$bin_path" "$version_output" >&2
+    printf "install.sh: %s does not run; \`machinist version\` failed:\n%s\n" "$bin_path" "$version_output" >&2
     exit 1
   fi
   log "binary $bin_path: $version_output"
