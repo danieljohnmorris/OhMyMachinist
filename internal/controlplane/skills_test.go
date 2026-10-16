@@ -118,6 +118,59 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
+// containsAny reports whether the string list contains want. It accepts the
+// []any form a decoded JSON array takes.
+func containsAny(values []any, want string) bool {
+	for _, value := range values {
+		if text, ok := value.(string); ok && text == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestSkillsAPIUsedByReferences covers the used_by column: project and global
+// settings that name the skill, and stored review profiles that reference it,
+// while unrelated settings are ignored.
+func TestSkillsAPIUsedByReferences(t *testing.T) {
+	server, webServer, readSecret, writeSecret := newSkillsTestServer(t)
+	defer webServer.Close()
+	source := writeSkillSource(t, testSkillMarkdown)
+	authRequest(t, http.MethodPost, webServer.URL+"/api/v1/skills", writeSecret, map[string]any{"source": source}).Body.Close()
+
+	if err := server.store.PutSetting(t.Context(), "skills.project.acme-widgets", "skills:\n  - name: feature-dev:code-reviewer\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.store.PutSetting(t.Context(), "skills.default", `{"skills":[{"name":"feature-dev:code-reviewer@abc123"}]}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.store.PutSetting(t.Context(), "skills.project.unrelated", "skills:\n  - name: docs-reviewer\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.store.SaveReviewProfile(t.Context(), "custom", "reviewers:\n  - name: r\n    skills: [feature-dev:code-reviewer]\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	listed := decode[struct {
+		Skills []map[string]any `json:"skills"`
+	}](t, authRequest(t, http.MethodGet, webServer.URL+"/api/v1/skills", readSecret, nil))
+	if len(listed.Skills) != 1 {
+		t.Fatalf("skills list = %#v", listed.Skills)
+	}
+	usedBy, ok := listed.Skills[0]["used_by"].([]any)
+	if !ok {
+		t.Fatalf("used_by = %#v, want a list", listed.Skills[0]["used_by"])
+	}
+	for _, want := range []string{"acme-widgets", "global default", "review profile custom", "shipped review profile"} {
+		if !containsAny(usedBy, want) {
+			t.Fatalf("used_by = %#v, want %q", usedBy, want)
+		}
+	}
+	if containsAny(usedBy, "unrelated") {
+		t.Fatalf("used_by = %#v, unrelated project must not be listed", usedBy)
+	}
+}
+
 // TestSkillsAPIInstallListGet covers the read and install endpoints, the
 // read/write scope rule, the always-present used_by field, and the audit
 // entry a write leaves behind.
@@ -156,15 +209,16 @@ func TestSkillsAPIInstallListGet(t *testing.T) {
 		t.Fatal("install was not audit-logged")
 	}
 
-	// The list carries the skill and an empty (never null) used_by list.
+	// The list carries the skill and its used_by references: the shipped
+	// review profiles reference feature-dev:code-reviewer.
 	listed = decode[struct {
 		Skills []map[string]any `json:"skills"`
 	}](t, authRequest(t, http.MethodGet, webServer.URL+"/api/v1/skills", readSecret, nil))
 	if len(listed.Skills) != 1 || listed.Skills[0]["name"] != "feature-dev:code-reviewer" {
 		t.Fatalf("skills list = %#v", listed.Skills)
 	}
-	if usedBy, ok := listed.Skills[0]["used_by"].([]any); !ok || len(usedBy) != 0 {
-		t.Fatalf("used_by = %#v, want an empty list", listed.Skills[0]["used_by"])
+	if usedBy, ok := listed.Skills[0]["used_by"].([]any); !ok || !containsAny(usedBy, "shipped review profile") {
+		t.Fatalf("used_by = %#v, want the shipped review profile reference", listed.Skills[0]["used_by"])
 	}
 	if _, ok := listed.Skills[0]["versions"].([]any); !ok {
 		t.Fatalf("versions missing from list entry: %#v", listed.Skills[0])

@@ -154,9 +154,11 @@ A skill entry looks like:
 }
 ```
 
-`used_by` lists the projects and review profiles that reference the skill. It is
-always present and currently empty; reference tracking lands with the skills
-configuration work. Recorded sources and manifests never contain credentials, so
+`used_by` lists the projects and review profiles that reference the skill: each
+`skills.project.<project>` and `skills.default` setting that names it, plus the
+shipped and stored review profiles whose reviewers reference it. It is always
+present, and empty when nothing references the skill. Recorded sources and
+manifests never contain credentials, so
 no response returns a token or a token-bearing URL. Every install, update, pin
 and removal is audit-logged with the token's name.
 
