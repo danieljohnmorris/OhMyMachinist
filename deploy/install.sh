@@ -374,6 +374,8 @@ lane_config_of() { # <unit> -> worker config path
 
 # lane_idle <unit>: a lane writes <data-dir>/lane.lock for the whole run
 # (restart-when-idle.sh, MACH-59); an empty or missing lock means idle.
+# If the data dir's home cannot be resolved, report the lane as busy so the
+# restart policy fails safe and never kills a job we cannot see.
 lane_idle() {
   local unit="$1" cfg data_dir home
   cfg="$(lane_config_of "$unit")"
@@ -381,7 +383,7 @@ lane_idle() {
   data_dir="${data_dir:-~/.machinist/worker}"
   if [ "${data_dir#\~}" != "$data_dir" ]; then
     home="${MACHINIST_HOME:-$(getent passwd machinist 2>/dev/null | cut -d: -f6)}"
-    [ -n "$home" ] || return 0
+    [ -n "$home" ] || return 1
     data_dir="${data_dir/\~/$home}"
   fi
   [ ! -s "$data_dir/lane.lock" ]
@@ -473,24 +475,32 @@ else
       ;;
     drain)
       # Busy lanes: pause claims first so no lane can grab the next job while
-      # we wait, then restart each lane as soon as it has drained.
+      # we wait, then restart each lane as soon as it has drained. Lanes that
+      # are already idle (and enabled-inactive ones) restart straight away
+      # while claims are paused, so they cannot pick up new work either.
+      idle_workers=()
       busy_workers=()
       for unit in "${worker_units[@]:-}"; do
         [ -n "$unit" ] || continue
         if systemctl is-active --quiet "$unit" && ! lane_idle "$unit"; then
           busy_workers+=("$unit")
+        elif systemctl is-active --quiet "$unit" || systemctl is-enabled --quiet "$unit" 2>/dev/null; then
+          idle_workers+=("$unit")
         fi
       done
       if [ ${#busy_workers[@]} -eq 0 ]; then
-        for unit in "${worker_units[@]:-}"; do
+        for unit in "${idle_workers[@]:-}"; do
           [ -n "$unit" ] || continue
-          if systemctl is-active --quiet "$unit" || systemctl is-enabled --quiet "$unit" 2>/dev/null; then
-            log "restart $unit (no job running)"
-            run systemctl restart "$unit"
-          fi
+          log "restart $unit (no job running)"
+          run systemctl restart "$unit"
         done
       elif factory_pause; then
         trap factory_resume EXIT
+        for unit in "${idle_workers[@]:-}"; do
+          [ -n "$unit" ] || continue
+          log "restart $unit (idle)"
+          run systemctl restart "$unit"
+        done
         log "waiting for jobs on ${busy_workers[*]} to finish (drain timeout ${drain_timeout}s)"
         deadline=$(( $(date +%s) + drain_timeout ))
         remaining=("${busy_workers[@]}")
@@ -516,6 +526,11 @@ else
         trap - EXIT
       else
         # No factory control: fall back to restart-when-idle and report.
+        for unit in "${idle_workers[@]:-}"; do
+          [ -n "$unit" ] || continue
+          log "restart $unit (idle)"
+          run systemctl restart "$unit"
+        done
         for unit in "${busy_workers[@]}"; do
           if lane_idle "$unit"; then
             log "restart $unit (idle)"
