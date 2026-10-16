@@ -22,15 +22,77 @@ sudo deploy/install.sh            # add --dry-run to preview
 ```
 
 `install.sh` is idempotent. It refuses to install from a tree that a gitleaks
-scan reports as containing secrets, copies the factory scripts to
-`/usr/local/lib/machinist-factory/`, the units to `/etc/systemd/system/`, the
-templates to `/etc/machinist/`, seeds `config.toml`/`worker.toml` only when
-missing, runs `systemctl daemon-reload`, restarts only the services whose unit
-files changed, and records every managed file with its sha256 and the deployed
-git SHA in `/etc/machinist/installed.json`.
+scan reports as containing secrets (the scan runs from inside the repository
+with a relative source, so the fingerprints match `.gitleaksignore`), copies
+the factory scripts to `/usr/local/lib/machinist-factory/`, the units to
+`/etc/systemd/system/`, the templates to `/etc/machinist/`, seeds
+`config.toml`/`worker.toml` only when missing, runs `systemctl daemon-reload`,
+restarts only the services whose unit files changed (see *Restart policy*
+below), and records every managed file with its sha256 and the deployed git
+SHA in `/etc/machinist/installed.json`.
+
+### The machinist binary
+
+The units run `/usr/local/bin/machinist` and `fail.py` defaults to it.
+`install.sh` checks the binary exists and runs `machinist version` before it
+touches any unit, and refuses otherwise. Hosts that install the binary
+somewhere else point the installer at it:
+
+```sh
+sudo MACHINIST_BIN=/opt/machinist/bin/machinist deploy/install.sh   # or --binary <path>
+sudo deploy/install.sh --install-binary ./machinist                 # copy a fresh build first
+```
+
+A binary living outside `/usr/local/bin` is linked there (the hardcoded unit
+path) when the link does not exist yet. The binary path and hash are recorded
+in `installed.json` so the drift check can flag workers still running an old
+binary.
+
+### Config pre-flight
+
+Relative paths in a Machinist config resolve against the config file's
+directory. When an existing `~/.machinist/*.toml` is copied to
+`/etc/machinist`, values such as `token_file = "server/worker.token"` or
+`prompt_file = "prompts/…"` suddenly resolve under `/etc/machinist` and the
+workers fail to start. Before changing any unit, `install.sh` loads every
+config the units will use (`config.toml`, `worker.toml`, `worker-*.toml` and
+the `*.local.toml` overlays) from its new location and checks that every
+referenced token, prompt and repository path exists; on a missing file it
+fails with the resolved path and changes nothing. Fix a migrated config by
+rewriting its relative paths as absolute or `~/` ones — the check only runs
+against configs that already existed, so a first install (which seeds the
+templates) is never blocked.
+
+### Restart policy
+
+`install.sh` restarts non-worker units straight away, but never kills a
+running job:
+
+- **default (drain)** — lane claims are paused with the factory control
+  (`machinist pause`, PR #54), each changed lane is restarted once no job is
+  running, and dispatch is resumed. `--drain-timeout <seconds>` (default 600)
+  caps the wait; lanes still busy then are reported as *pending* (still
+  running old code) and the factory is always resumed.
+- `--restart-lanes=when-idle` — restart a lane only if it is idle right now
+  and report the busy ones as pending.
+- `--no-restart` — change files only; every unit keeps running until restarted
+  manually.
+
+Rerun `install.sh` once the pending lanes have drained. The drift check also
+flags worker units whose process started before the binary or unit file was
+last updated, so a drain-limited install cannot be forgotten.
+
+### Local drop-ins
+
+Only the drop-ins in `deploy/systemd/` are managed. Files that appear in a
+managed unit's `<unit>.d/` directory without coming from the repo (a
+hand-made `90-local.conf`, for example) are listed by `install.sh` and
+reported as `local_overrides` by the drift check, so they stay visible until
+they are moved into the repo.
 
 Overridable paths (for tests and unusual hosts): `MACHINIST_FACTORY_DIR`,
-`MACHINIST_SYSTEMD_DIR`, `MACHINIST_CONFIG_DIR`, `MACHINIST_MANIFEST`.
+`MACHINIST_SYSTEMD_DIR`, `MACHINIST_CONFIG_DIR`, `MACHINIST_MANIFEST`,
+`MACHINIST_BIN`, `MACHINIST_HOME`, `MACHINIST_USER`, `MACHINIST_DRAIN_TIMEOUT`.
 
 The normal deploy and the MACH-24 auto-deploy both call `deploy/install.sh`, so
 no file on the host is hand-edited.
@@ -58,7 +120,10 @@ git. The units read `/etc/machinist/plane.env` (Plane API key) and
 `/etc/machinist/machinist.env` (non-secret tooling values); the tracked templates
 are `env/plane.env.example` and `env/machinist.env.example`, with placeholders
 only (`PLANE_API_KEY=changeme`). Copy a template to the real name, fill it in,
-and keep it root-owned and mode 0600.
+and keep it root-owned and mode 0600. The control plane, the workers and the
+fail notifier all load `machinist.env`: set `PATH` there when `gh`, `go`,
+`node` or `omp` come from a version manager (mise shims, `~/.local/bin`) —
+systemd's default PATH does not include them.
 
 The installer runs gitleaks before copying anything and refuses to install from a
 tree with findings; CI runs gitleaks over the working tree, the full git history

@@ -12,6 +12,9 @@ Environment=HOME=/home/machinist
 # Plane workspace client for ticket resolution. Secrets only ever come from
 # this EnvironmentFile, which lives outside git (see plane.env.example).
 EnvironmentFile=-/etc/machinist/plane.env
+# Non-secret tooling values (PATH for gh and friends, omp paths); instance
+# file outside git (see machinist.env.example).
+EnvironmentFile=-/etc/machinist/machinist.env
 NoNewPrivileges=yes
 PrivateTmp=yes
 ExecStart=/usr/local/bin/machinist start --config /etc/machinist/config.toml

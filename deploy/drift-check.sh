@@ -13,6 +13,12 @@
 # to the Factory Alerts spool and a health/status file is updated), and 1 on a
 # setup error (no manifest, unreadable manifest).
 #
+# The status file and any alert also carry two install-time reports: the
+# unmanaged drop-ins found in the managed unit directories ("local overrides")
+# and the worker lanes still running a binary or unit older than the installed
+# one ("stale workers", possible after a drain-limited install). They are
+# reported but do not change the exit code.
+#
 # Environment:
 #   MACHINIST_MANIFEST       manifest written by install.sh (default /etc/machinist/installed.json)
 #   MACHINIST_ALERTS_DIR     Factory Alerts spool (default $HOME/.machinist/alerts/pending)
@@ -75,9 +81,96 @@ for entry in files:
     if reasons:
         drifted.append({"path": dest, "source": source, "reasons": reasons})
 
+# --- local overrides ---------------------------------------------------------
+# Drop-ins in a managed unit's directory that the installer does not manage (a
+# hand-made 90-local.conf, for example) would otherwise be invisible. List
+# them so they stay in sync and are visible; move them into the repo when they
+# are wanted for good.
+managed_paths = {entry.get("path", "") for entry in files}
+dropin_dirs = set()
+for entry in files:
+    dest = entry.get("path", "")
+    if dest.endswith((".service", ".timer", ".path", ".target")):
+        dropin_dirs.add(dest + ".d")
+    elif dest.endswith(".conf"):
+        parent = os.path.dirname(dest)
+        if parent.endswith(".d"):
+            dropin_dirs.add(parent)
+local_overrides = []
+for directory in sorted(dropin_dirs):
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        continue
+    for name in names:
+        if name.endswith(".conf"):
+            path = os.path.join(directory, name)
+            if path not in managed_paths:
+                local_overrides.append(path)
+
+# --- stale workers -------------------------------------------------------------
+# A worker whose process started before the binary or its unit file was last
+# updated is still running old code: the installer only restarts drained lanes
+# and reports the rest. Compare each running worker's start time (the mtime of
+# /proc/<pid>) against the recorded binary and the installed unit files.
+def worker_units():
+    units = []
+    for entry in files:
+        dest = entry.get("path", "")
+        base = os.path.basename(dest)
+        if base.endswith(".service") and base.startswith("machinist-worker"):
+            units.append((base, dest))
+    return units
+
+
+def unit_pids(unit):
+    try:
+        out = subprocess.run(["systemctl", "show", unit, "--property", "MainPID",
+                              "--value"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if out.returncode != 0:
+        return []
+    pid = out.stdout.strip()
+    return [int(pid)] if pid.isdigit() and int(pid) > 0 else []
+
+
+def worker_instances():
+    try:
+        out = subprocess.run(["systemctl", "list-units", "--plain", "--no-legend",
+                              "--state=active", "machinist-worker@*"],
+                             capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [line.split()[0] for line in out.stdout.splitlines() if line.strip()]
+
+
+stale_workers = []
+binary = manifest.get("binary") or {}
+binary_mtime = int(binary.get("mtime") or 0)
+for unit, dest in worker_units():
+    instances = worker_instances() if unit.endswith("@.service") else [unit]
+    for instance in instances:
+        for pid in unit_pids(instance):
+            try:
+                started = os.stat("/proc/%d" % pid).st_mtime
+            except OSError:
+                continue
+            reasons = []
+            if binary_mtime and binary_mtime > started:
+                reasons.append("binary updated after start")
+            try:
+                if os.path.getmtime(dest) > started:
+                    reasons.append("unit updated after start")
+            except OSError:
+                pass
+            if reasons:
+                stale_workers.append({"unit": instance, "pid": pid, "reasons": reasons})
+
 checked_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
 ok = not drifted
 status = {"ok": ok, "sha": sha, "checked_at": checked_at, "drifted": drifted,
+          "local_overrides": local_overrides, "stale_workers": stale_workers,
           "manifest": manifest_path}
 os.makedirs(os.path.dirname(status_file), exist_ok=True)
 tmp = status_file + ".tmp"
@@ -88,11 +181,17 @@ os.replace(tmp, status_file)
 
 if ok:
     print("drift-check: no drift", file=sys.stderr)
+    for path in local_overrides:
+        print("drift-check: local override (not repo-managed): %s" % path, file=sys.stderr)
+    for worker in stale_workers:
+        print("drift-check: stale worker %s (pid %s): %s"
+              % (worker["unit"], worker["pid"], "; ".join(worker["reasons"])), file=sys.stderr)
     sys.exit(0)
 
 os.makedirs(alerts_dir, exist_ok=True)
 alert = {"type": "machinist.drift", "detected_at": checked_at, "sha": sha,
-         "repo": repo, "drifted": drifted,
+         "repo": repo, "drifted": drifted, "local_overrides": local_overrides,
+         "stale_workers": stale_workers,
          "status_file": status_file, "manifest": manifest_path}
 alert_path = os.path.join(alerts_dir, "drift-%s.json" % time.strftime("%Y%m%dT%H%M%S"))
 with open(alert_path, "w") as handle:

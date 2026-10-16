@@ -18,6 +18,11 @@ The install snippets below are only for a one-off manual copy.
   secret scan, `machinist/review` commit status).
 - `omp-glm`, `omp-glm-pr`, `codex` — coding-executor wrappers: run the agent in
   the sandbox, then deliver the PR outside it.
+- `omp-glm-pr-clean` — pre-claim executor wrapper: saves (patch, tar and file
+  list) and stashes tracked and untracked leftovers in the lane checkout, then
+  execs `omp-glm-pr`. Point the worker configs' executor at it (it lives next
+  to `omp-glm-pr` once installed). MACH-62 replaces it when the pre-claim lane
+  clean covers untracked files.
 - `fail.py` — failure hook and Plane notifier (`hook`, `notify`, `sweep`,
   `dry-run`) called by the wrapper and by the fail-notify/fail-sweep units.
 - `lane-clean.sh` — dirty-lane guard run as `ExecStartPre` on the worker units.

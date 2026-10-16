@@ -17,7 +17,8 @@ def sha256(path):
 class DriftCheckTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        root = pathlib.Path(self.tmp.name)
+        self.root = pathlib.Path(self.tmp.name)
+        root = self.root
         self.repo = root / "repo"
         self.repo.mkdir()
         (self.repo / "deploy" / "systemd").mkdir(parents=True)
@@ -85,6 +86,78 @@ class DriftCheckTest(unittest.TestCase):
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
         self.assertIn("missing", result.stderr)
+
+    def test_unmanaged_dropin_is_reported_as_local_override(self):
+        dropin_dir = self.root / "etc" / "systemd" / "machinist-control.service.d"
+        dropin_dir.mkdir()
+        local = dropin_dir / "90-local.conf"
+        local.write_text("[Service]\nEnvironment=PATH=/opt/tools/bin\n")
+        result = self.run_check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        status = json.loads(self.status.read_text())
+        self.assertEqual(status["local_overrides"], [str(local)])
+        self.assertIn("local override", result.stderr)
+
+    def test_stale_worker_is_flagged(self):
+        worker = self.root / "etc" / "systemd" / "machinist-worker.service"
+        worker.write_text("[Service]\nExecStart=/usr/local/bin/machinist worker start\n")
+        binary = self.root / "bin" / "machinist"
+        binary.parent.mkdir()
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        # A worker process the fake systemctl reports; it started "before" the
+        # binary and the unit file were updated.
+        proc = subprocess.Popen(["sleep", "300"])
+
+        def stop_proc():
+            proc.terminate()
+            proc.wait()
+
+        self.addCleanup(stop_proc)
+        started = os.stat("/proc/%d" % proc.pid).st_mtime
+        future = started + 120
+        os.utime(binary, (future, future))
+        os.utime(worker, (future, future))
+        fake_bin = self.root / "fakebin"
+        fake_bin.mkdir()
+        fake = fake_bin / "systemctl"
+        fake.write_text("#!/bin/sh\n[ \"$1\" = show ] && echo %d && exit 0\nexit 0\n" % proc.pid)
+        fake.chmod(0o755)
+        self.manifest.write_text(json.dumps({
+            "sha": self.sha,
+            "repo": str(self.repo),
+            "binary": {"path": str(binary), "sha256": "x", "mtime": future},
+            "files": [
+                {"path": str(self.installed), "source": "deploy/systemd/machinist-control.service",
+                 "sha256": sha256(self.installed)},
+                {"path": str(worker), "source": "deploy/systemd/machinist-worker.service",
+                 "sha256": sha256(worker)},
+            ],
+        }))
+        env = dict(self.env, PATH=f"{fake_bin}:{self.env['PATH']}")
+        result = subprocess.run(["bash", str(DRIFT_CHECK)], env=env,
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)  # reported, not drift
+        status = json.loads(self.status.read_text())
+        self.assertEqual(status["stale_workers"], [{
+            "unit": "machinist-worker.service", "pid": proc.pid,
+            "reasons": ["binary updated after start", "unit updated after start"],
+        }])
+        self.assertIn("stale worker", result.stderr)
+
+    def test_fresh_worker_is_not_flagged(self):
+        worker = self.root / "etc" / "systemd" / "machinist-worker.service"
+        worker.write_text("[Service]\n")
+        self.manifest.write_text(json.dumps({
+            "sha": self.sha,
+            "repo": str(self.repo),
+            "binary": {"path": str(self.root / "nope"), "sha256": "x", "mtime": 1},
+            "files": [{"path": str(worker), "source": "deploy/systemd/machinist-worker.service",
+                       "sha256": sha256(worker)}],
+        }))
+        result = self.run_check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(self.status.read_text())["stale_workers"], [])
 
 
 if __name__ == "__main__":

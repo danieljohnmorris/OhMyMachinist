@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Pre-claim lane clean executor wrapper: omp-glm-pr-clean (MACH-67).
+#
+# The executor the worker configs point at, run as the claimed job's first
+# step. If the lane checkout is dirty, it saves the leftovers (patch, tar and
+# file list) outside the published run artifacts, stashes tracked AND
+# untracked changes with a labelled stash, and only then execs omp-glm-pr,
+# which refuses to start on a dirty tree. The runner's own auto-save
+# (internal/runner) stashes before fetching; this catches anything left after
+# that (files written between the fetch and the executor, for example).
+#
+# MACH-62 replaces this wrapper when its pre-claim lane clean covers
+# untracked files.
+set -uo pipefail
+HERE="$(dirname "$(readlink -f "$0")")"
+repo="$(pwd)"
+
+if [ -z "$(git -C "$repo" status --porcelain 2>/dev/null)" ]; then
+  exec "$HERE/omp-glm-pr" "$@"
+fi
+
+out="${MACHINIST_WIP_DIR:-$HOME/.machinist/worker/wip}"
+label="machinist-claim-wip-$(date -u +%Y%m%d-%H%M%S)"
+mkdir -p "$out"
+patch="$out/$label.patch"
+list="$out/$label.files"
+tarball="$out/$label.untracked.tar.gz"
+
+echo "omp-glm-pr-clean: $repo is dirty; saving the leftovers to $out" >&2
+if ! { git -C "$repo" diff HEAD >"$patch" 2>/dev/null || git -C "$repo" diff >"$patch"; }; then
+  echo "omp-glm-pr-clean: could not write the tracked-change patch; not touching the lane" >&2
+  exit 4
+fi
+git -C "$repo" ls-files --others --exclude-standard >"$list"
+if [ -s "$list" ]; then
+  if ! git -C "$repo" ls-files --others --exclude-standard -z | tar --null -T - -czf "$tarball"; then
+    echo "omp-glm-pr-clean: could not archive the untracked files; not touching the lane" >&2
+    exit 4
+  fi
+fi
+if ! git -C "$repo" stash push --include-untracked -m "$label" >/dev/null; then
+  echo "omp-glm-pr-clean: git stash failed; the lane is still dirty" >&2
+  exit 4
+fi
+echo "omp-glm-pr-clean: saved the dirty lane to stash $label; starting the executor" >&2
+exec "$HERE/omp-glm-pr" "$@"
