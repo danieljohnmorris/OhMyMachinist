@@ -45,7 +45,10 @@ func (s *Store) MoveToQueue(ctx context.Context, jobID string) (string, error) {
 	}
 	// Idempotency: a move already happened for this job, whether through this
 	// action or a later submission for the same card. Return that attempt.
-	if supersededBy != "" {
+	// A running job's superseded_by is only the next job in its ticket chain
+	// (attempt_links), not a completed move: the run still has to be
+	// cancelled and requeued below, and the workflow refusal must apply.
+	if state != "running" && supersededBy != "" {
 		return supersededBy, nil
 	}
 	var workflow bool

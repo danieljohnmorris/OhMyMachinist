@@ -197,6 +197,90 @@ func TestMoveToQueueIsIdempotent(t *testing.T) {
 	}
 }
 
+// A running job whose superseded_by was set by the ticket-chain linker (a
+// newer job exists for the same ticket) is not a completed move: the run must
+// still be cancelled and requeued, and the workflow refusal must still apply.
+func TestMoveToQueueRunningJobWithChainLinkStillMoves(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "machinist.db"))
+	jobID, err := store.CreateJobWithOptions(t.Context(), "first pass", "machinist", "build", testAgent("build", "{{machinist.prompt}}"), CreateJobOptions{Title: "MACH-65 first pass"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"machinist"})); err != nil {
+		t.Fatal(err)
+	}
+	// A newer job on the same ticket exists, so the attempt linker records it
+	// as the chain successor of the still-running job.
+	newerID, err := store.CreateJobWithOptions(t.Context(), "second pass", "machinist", "build", testAgent("build", "{{machinist.prompt}}"), CreateJobOptions{Title: "MACH-65 second pass"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.linkTicketAttempts(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	linked, err := store.GetJob(t.Context(), jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linked.SupersededBy != newerID {
+		t.Fatalf("chain link = %q, want %q", linked.SupersededBy, newerID)
+	}
+
+	newID, err := store.MoveToQueue(t.Context(), jobID)
+	if err != nil {
+		t.Fatalf("move to queue: %v", err)
+	}
+	if newID == "" || newID == newerID {
+		t.Fatalf("move to queue returned %q", newID)
+	}
+	moved, err := store.GetJob(t.Context(), jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved.State != "cancelled" || moved.SupersededBy != newID {
+		t.Fatalf("moved job = %#v", moved)
+	}
+	if len(moved.Runs) != 1 || moved.Runs[0].State != "cancelled" || moved.Runs[0].Error != "moved to queue" {
+		t.Fatalf("moved runs = %#v", moved.Runs)
+	}
+	next, err := store.GetJob(t.Context(), newID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.State != "queued" || next.Attempt != 2 || next.PreviousJobID != jobID {
+		t.Fatalf("requeued job = %#v", next)
+	}
+
+	// The refusal still applies to a running workflow job with a chain link.
+	steps := []config.WorkflowStep{{Command: testAgent("build", "{{task.spec}}")}}
+	workflowID, err := store.CreateTaskJob(t.Context(), protocol.Task{Title: "MACH-70 workflow", Spec: "Build it."}, "other", "deliver", "", steps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := pollRequest("worker-b", []string{"codex"}, []string{"other"})
+	worker.Workflows = true
+	worker.Artifacts = true
+	if _, err := store.Poll(t.Context(), worker); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateJobWithOptions(t.Context(), "follow-up", "other", "build", testAgent("build", "{{machinist.prompt}}"), CreateJobOptions{Title: "MACH-70 follow-up"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.linkTicketAttempts(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	wjob, err := store.GetJob(t.Context(), workflowID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wjob.State != "running" || wjob.SupersededBy == "" {
+		t.Fatalf("workflow job = %#v", wjob)
+	}
+	if _, err := store.MoveToQueue(t.Context(), workflowID); !errors.Is(err, ErrMoveNotAvailable) {
+		t.Fatalf("workflow job with chain link = %v, want ErrMoveNotAvailable", err)
+	}
+}
+
 func TestMoveToQueueRefusesNonRunningAndWorkflowJobs(t *testing.T) {
 	store := openTestStore(t, filepath.Join(t.TempDir(), "machinist.db"))
 
