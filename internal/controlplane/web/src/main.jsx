@@ -1,5 +1,5 @@
 import { TaskDetail } from "./task-detail.jsx";
-import { State, friendlyName, relativeTime, stateLabel } from "./task-display.jsx";
+import { State, ResolutionLabel, friendlyName, relativeTime, stateLabel } from "./task-display.jsx";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "@fontsource-variable/manrope";
@@ -13,7 +13,7 @@ import { Card } from "@/components/ui/card";
 import { PageHeading } from "@/components/ui/page-heading";
 import { cn } from "@/lib/utils";
 import { routeFromHash } from "@/routes";
-import { attemptTime, boardCardTimestamp, boardColumns, boardDateFilters, boardFiltersFromHash, boardHash, canCancelJob, collapseIssueAttempts, collapseJobsByTicket, currentRun, filterBoardJobs, filterJobsByDate, groupEntriesByBoardColumn, groupJobsByBoardColumn, jobCounts, jobDisplayTitle, resolutionLabel } from "@/runs-board";
+import { attemptTime, boardCardTimestamp, boardColumns, boardDateFilters, boardFiltersFromHash, boardHash, canCancelJob, collapseIssueAttempts, collapseJobsByTicket, currentRun, filterBoardJobs, filterJobsByDate, groupEntriesByBoardColumn, groupJobsByBoardColumn, jobCounts, jobDisplayTitle } from "@/runs-board";
 import { groupEntriesByProject, groupJobsByProject } from "@/project";
 import { concurrencyLabel } from "@/concurrency";
 import { createStatusLoader } from "@/status-loader";
@@ -366,7 +366,6 @@ function RunCard({ job, priors = [], onCancelJob }) {
   const title = jobDisplayTitle(job);
   const run = currentRun(job);
   const timestamp = boardCardTimestamp(job);
-  const resolution = resolutionLabel(job);
   const attemptCount = priors.length > 0 ? priors.length + 1 : (job.attempt_count || 0);
   return <Card className="overflow-hidden"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="block min-w-0 space-y-3 p-4 transition hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50" aria-label={`Open task ${title}`}>
       <p className="break-words text-sm font-medium leading-5" title={title}>{title}</p>
@@ -375,9 +374,8 @@ function RunCard({ job, priors = [], onCancelJob }) {
         <State value={job.state} />
         <time className="text-xs text-muted-foreground" dateTime={timestamp} title={timestamp ? new Date(timestamp).toLocaleString() : undefined}>{relativeTime(timestamp)}</time>
       </div>
-      {resolution && <p className="text-xs text-success">{resolution}</p>}
       {priors.length === 0 && attemptBadges(job)}
-    </a>{priors.length > 0 && <div className="flex flex-wrap items-center gap-1.5 border-t border-border px-4 py-2.5">
+    </a><ResolutionLabel job={job} result={run} className="-mt-1 px-4 pb-3 text-xs text-success" />{priors.length > 0 && <div className="flex flex-wrap items-center gap-1.5 border-t border-border px-4 py-2.5">
       <Badge className="border-border bg-surface text-muted-foreground" aria-label={`${attemptCount} attempts`}>{attemptCount} attempts</Badge>
       {priors.map((prior) => <a key={prior.id} href={`#/runs/${encodeURIComponent(prior.id)}`} className="text-xs text-muted-foreground underline hover:text-foreground" aria-label={`Open prior attempt ${stateLabel(prior.state)} ${relativeTime(attemptTime(prior))}`}>{stateLabel(prior.state)} · {relativeTime(attemptTime(prior))}</a>)}
     </div>}{canCancelJob(job) && <div className="flex justify-end px-4 pb-4"><Button size="sm" variant="outline" aria-label={`Cancel task ${title}`} onClick={() => onCancelJob(job)}>Cancel</Button></div>}</Card>;
@@ -386,8 +384,7 @@ function RunCard({ job, priors = [], onCancelJob }) {
 function RunRow({ job, onCancelJob }) {
   const title=jobDisplayTitle(job);
   const run=currentRun(job);
-  const resolution=resolutionLabel(job);
-  return <article className="border-b border-border last:border-b-0"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="flex items-center justify-between gap-4 px-5 py-4 hover:bg-muted/35" aria-label={`Open task ${title}`}><div className="min-w-0"><p className="break-words text-sm font-medium" title={title}>{title}</p><p className="mt-1 text-xs text-muted-foreground">{job.repository} · {friendlyName(run?.command || job.command)}</p>{resolution && <p className="mt-1 text-xs text-success">{resolution}</p>}{attemptBadges(job)}</div><div className="flex shrink-0 flex-col items-end gap-1"><State value={job.state} /><time className="text-xs text-muted-foreground" dateTime={job.created_at}>{relativeTime(job.created_at)}</time>{canCancelJob(job) && <Button size="sm" variant="outline" aria-label={`Cancel task ${title}`} onClick={() => onCancelJob(job)}>Cancel</Button>}</div></a></article>;
+  return <article className="border-b border-border last:border-b-0"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="flex items-center justify-between gap-4 px-5 py-4 hover:bg-muted/35" aria-label={`Open task ${title}`}><div className="min-w-0"><p className="break-words text-sm font-medium" title={title}>{title}</p><p className="mt-1 text-xs text-muted-foreground">{job.repository} · {friendlyName(run?.command || job.command)}</p>{attemptBadges(job)}</div><div className="flex shrink-0 flex-col items-end gap-1"><State value={job.state} /><time className="text-xs text-muted-foreground" dateTime={job.created_at}>{relativeTime(job.created_at)}</time>{canCancelJob(job) && <Button size="sm" variant="outline" aria-label={`Cancel task ${title}`} onClick={() => onCancelJob(job)}>Cancel</Button>}</div></a><ResolutionLabel job={job} result={run} className="-mt-2 px-5 pb-4 text-xs text-success" /></article>;
 }
 
 function EmptyRuns({ filtered, openComposer }) {

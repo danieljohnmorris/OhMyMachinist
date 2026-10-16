@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { TranscriptEntry } from "./transcript-entry.js";
 import { transcriptEntries, transcriptIsLive, transcriptPollMillis } from "./transcript.js";
+import { fetchErrorMessage } from "./fetch-error.js";
 
 // How close to the bottom the scroller must stay for auto-scroll to follow new
 // output; scrolling further up pauses following until the user returns.
@@ -36,7 +37,7 @@ export function Transcript({ run, csrfToken }) {
         if (transcriptIsLive(body.state)) timer = setTimeout(load, transcriptPollMillis);
       } catch (error) {
         if (controller.signal.aborted) return;
-        setState((current) => ({ ...current, runID: run.id, error: `Could not load transcript (${error.message})` }));
+        setState((current) => ({ ...current, runID: run.id, error: `Could not load transcript: ${fetchErrorMessage(error, "the control plane did not respond")}` }));
         if (live) timer = setTimeout(load, transcriptPollMillis);
       }
     };

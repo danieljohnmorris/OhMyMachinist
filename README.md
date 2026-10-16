@@ -47,6 +47,7 @@ It keeps the upstream control plane, worker model and executors. Everything belo
 
 - Tasks board: one card per ticket with prior attempts, active and failed by default, Show succeeded, project and date filters that persist in the URL
 - Run page: attempt picker, transcript tab, full-height transcript and an activity sidebar with state timings
+- Resolved tickets link the merged pull request and its merger on the board, list and run page
 - Transcript streams the whole agent session live: every assistant message, thinking summary, tool call and tool result (omp runs in `--mode json`), per attempt, followed by the delivery and review output
 - Sidebar shows worker count and job concurrency
 

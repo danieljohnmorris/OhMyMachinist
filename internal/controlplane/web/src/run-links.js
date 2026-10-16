@@ -62,6 +62,51 @@ function pullRequestLink(match) {
   return { href: match[0], text: `${owner}/${repository}#${number}` };
 }
 
+// Resolution details are written by the control plane; the merged form carries
+// the pull request number and the GitHub login that merged it.
+const MERGED_PULL_REQUEST_PATTERN = /^PR #(\d+) \(merged by (.+)\)$/;
+// Repositories are stored as the GitHub owner and name when they are hosted on
+// GitHub, so their pull requests can be addressed directly.
+const GITHUB_REPOSITORY_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\/[A-Za-z0-9._-]+$/;
+
+function pullRequestNumber(href) {
+  const match = matches(href, GITHUB_PULL_REQUEST_URL_PATTERN)[0];
+  return match ? Number(match[3]) : null;
+}
+
+// mergedPullRequestURL resolves the merged pull request behind a resolution.
+// The job's own pull request wins when it carries the resolved number; a
+// repository that names its GitHub owner still links without job metadata.
+function mergedPullRequestURL(job, result, number) {
+  const detected = detectGitHubPullRequest(job, result);
+  if (detected && pullRequestNumber(detected.href) === number) return detected.href;
+  const repository = typeof job?.repository === "string" ? job.repository.trim() : "";
+  return GITHUB_REPOSITORY_PATTERN.test(repository) ? `https://github.com/${repository}/pull/${number}` : "";
+}
+
+// resolutionSummary describes how a resolved ticket was closed, as text plus
+// ordered parts so the pull request and its merger render as links. Unknown
+// details stay plain text so no resolution is ever hidden.
+export function resolutionSummary(job, result) {
+  if (job?.state !== "resolved") return null;
+  const detail = typeof job?.resolution_detail === "string" ? job.resolution_detail.trim() : "";
+  if (!detail) return null;
+  const merged = MERGED_PULL_REQUEST_PATTERN.exec(detail);
+  if (!merged) return { text: `Resolved via ${detail}`, parts: [{ text: `Resolved via ${detail}` }] };
+  const [, number, login] = merged;
+  const href = mergedPullRequestURL(job, result, Number(number));
+  return {
+    text: `Resolved via PR #${number} (merged by ${login})`,
+    parts: [
+      { text: "Resolved via " },
+      { text: `PR #${number}`, ...(href ? { href } : {}) },
+      { text: " (merged by " },
+      { text: login, href: `https://github.com/${login}` },
+      { text: ")" },
+    ],
+  };
+}
+
 export function runSidebarLinks(job, result) {
   return {
     planeTicket: detectPlaneTicket(job, result),

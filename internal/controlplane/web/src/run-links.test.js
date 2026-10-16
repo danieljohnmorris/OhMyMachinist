@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { detectGitHubPullRequest, detectPlaneTicket, runSidebarLinks } from "./run-links.js";
+import { detectGitHubPullRequest, detectPlaneTicket, resolutionSummary, runSidebarLinks } from "./run-links.js";
 
 test("detects a Plane ticket from the job title", () => {
   const job = { task: { title: "OMM-3: Keep set -e failures fatal under timings" } };
@@ -59,4 +59,64 @@ test("returns no links when neither source contains a supported reference", () =
     planeTicket: null,
     pullRequest: null,
   });
+});
+
+test("links the resolved pull request and its merger", () => {
+  const job = {
+    state: "resolved",
+    resolution_kind: "pr",
+    resolution_detail: "PR #33 (merged by danieljohnmorris)",
+    repository: "danieljohnmorris/OhMyMachinist",
+    metadata: { pr_url: "https://github.com/danieljohnmorris/OhMyMachinist/pull/33" },
+  };
+  const summary = resolutionSummary(job);
+  assert.equal(summary.text, "Resolved via PR #33 (merged by danieljohnmorris)");
+  assert.deepEqual(summary.parts, [
+    { text: "Resolved via " },
+    { text: "PR #33", href: "https://github.com/danieljohnmorris/OhMyMachinist/pull/33" },
+    { text: " (merged by " },
+    { text: "danieljohnmorris", href: "https://github.com/danieljohnmorris" },
+    { text: ")" },
+  ]);
+});
+
+test("builds the pull request link from the repository when no metadata carries it", () => {
+  const job = {
+    state: "resolved",
+    resolution_kind: "pr",
+    resolution_detail: "PR #12 (merged by kim)",
+    repository: "example/repo",
+  };
+  const summary = resolutionSummary(job);
+  assert.equal(summary.parts[1].href, "https://github.com/example/repo/pull/12");
+  assert.equal(summary.parts[3].href, "https://github.com/kim");
+});
+
+test("ignores a job pull request that is not the resolved one", () => {
+  const job = {
+    state: "resolved",
+    resolution_kind: "pr",
+    resolution_detail: "PR #33 (merged by danieljohnmorris)",
+    repository: "example/repo",
+    metadata: { pr_url: "https://github.com/example/repo/pull/7" },
+  };
+  assert.equal(resolutionSummary(job).parts[1].href, "https://github.com/example/repo/pull/33");
+});
+
+test("keeps the merger link when the repository is not a GitHub owner and name", () => {
+  const job = { state: "resolved", resolution_kind: "pr", resolution_detail: "PR #4 (merged by kim)", repository: "local-checkout" };
+  const summary = resolutionSummary(job);
+  assert.deepEqual(summary.parts[1], { text: "PR #4" });
+  assert.equal(summary.parts[3].href, "https://github.com/kim");
+});
+
+test("resolutions without a merged pull request stay plain text", () => {
+  const summary = resolutionSummary({ state: "resolved", resolution_kind: "plane", resolution_detail: "Plane Done" });
+  assert.equal(summary.text, "Resolved via Plane Done");
+  assert.deepEqual(summary.parts, [{ text: "Resolved via Plane Done" }]);
+});
+
+test("only resolved jobs carry a resolution summary", () => {
+  assert.equal(resolutionSummary({ state: "succeeded", resolution_kind: "pr", resolution_detail: "PR #12 (merged by dan)" }), null);
+  assert.equal(resolutionSummary({ state: "resolved", resolution_kind: "pr", resolution_detail: "  " }), null);
 });
