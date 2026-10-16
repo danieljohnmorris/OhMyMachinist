@@ -596,11 +596,16 @@ def diff_review_config(
     Precedence for the budget: MACHINIST_REVIEW_DIFF_MAX_TOKENS, then the
     profile's ``diff.max_tokens``, then the shipped default. A profile that
     sets ``diff.exclude`` replaces the shipped default exclude list rather than
-    extending it, so an instance can narrow the exclusions deliberately.
+    extending it, so an instance can narrow the exclusions deliberately — an
+    explicit empty list disables all exclusions. Only an absent (or null)
+    ``diff.exclude`` falls back to the shipped defaults.
     """
     cfg = resolved.body.get("diff") or {}
-    patterns = [str(item) for item in (cfg.get("exclude") or []) if str(item).strip()]
-    excludes = patterns or list(diff_budget.DEFAULT_EXCLUDE_GLOBS)
+    raw_exclude = cfg.get("exclude")
+    if raw_exclude is None:
+        excludes = list(diff_budget.DEFAULT_EXCLUDE_GLOBS)
+    else:
+        excludes = [str(item) for item in raw_exclude if str(item).strip()]
     env = os.environ if environ is None else environ
     budget = 0
     raw = env.get(diff_budget.MAX_TOKENS_ENV, "").strip()

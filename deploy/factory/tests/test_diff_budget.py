@@ -184,6 +184,14 @@ class DiffConfigTests(unittest.TestCase):
         self.assertEqual(excludes, ["docs/**"])
         self.assertEqual(budget, 42)
 
+    def test_explicit_empty_exclude_list_disables_all_exclusions(self) -> None:
+        excludes, _budget = post.diff_review_config(self._resolved({"diff": {"exclude": []}}), {})
+        self.assertEqual(excludes, [])
+
+    def test_null_exclude_falls_back_to_the_defaults(self) -> None:
+        excludes, _budget = post.diff_review_config(self._resolved({"diff": {"exclude": None}}), {})
+        self.assertEqual(excludes, diff_budget.DEFAULT_EXCLUDE_GLOBS)
+
     def test_defaults_when_the_profile_omits_the_section(self) -> None:
         excludes, budget = post.diff_review_config(self._resolved({}), {})
         self.assertEqual(excludes, diff_budget.DEFAULT_EXCLUDE_GLOBS)
