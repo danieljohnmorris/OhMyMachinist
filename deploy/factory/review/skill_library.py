@@ -43,13 +43,21 @@ _CONTEXT: dict = {"repo_dir": None, "base_sha": None, "project": None, "kind": "
 _control_plane_settings = None
 
 
+class RequiredSkillError(RuntimeError):
+    """A ``required: true`` skills entry is not installed; the run must fail."""
+
+
 def configure(repo_dir: str | None = None, base_sha: str | None = None, project: str | None = None, kind: str = "review") -> None:
     """Set the review's repo/project context and drop the cached list."""
     _CONTEXT.update({"repo_dir": repo_dir, "base_sha": base_sha, "project": project, "kind": kind, "loaded": None})
 
 
 def loaded_skills() -> dict:
-    """Return the cached loaded-skills record for the configured review."""
+    """Return the cached loaded-skills record for the configured review.
+
+    Raises ``RequiredSkillError`` when a ``required: true`` entry is not
+    installed; a malformed skills config only warns.
+    """
     if _CONTEXT.get("loaded") is None:
         _CONTEXT["loaded"] = _load()
     return _CONTEXT["loaded"]
@@ -135,13 +143,15 @@ def _compose(repo: list[dict], project: list[dict], global_: list[dict], kind: s
         for entry in entries:
             if not _applies(entry, kind):
                 continue
-            name, _ = _split_name(entry["name"])
-            if not name or name in seen:
+            full = str(entry["name"]).strip()
+            base, _ = _split_name(full)
+            if not base or base in seen:
                 continue
-            seen.add(name)
+            seen.add(base)
             if entry.get("enabled") is False:
                 continue
-            chosen.append({**entry, "name": name, "scope": scope})
+            # Keep the full name (name@version) so _load resolves the pin.
+            chosen.append({**entry, "name": full, "scope": scope})
     return chosen
 
 
@@ -174,25 +184,30 @@ def _load() -> dict:
     base_sha = _CONTEXT.get("base_sha")
     project = _CONTEXT.get("project")
     kind = _CONTEXT.get("kind") or "review"
+    import yaml
+
     try:
         repo_entries = _parse_entries(_repo_file(repo_dir, base_sha, ".machinist/skills.yaml")) if repo_dir and base_sha else []
         settings = _settings()
         project_entries = _parse_entries(settings.get(f"skills.project.{project}")) if project else []
         global_entries = _parse_entries(settings.get("skills.default"))
-    except ValueError as error:
+    except (ValueError, yaml.YAMLError) as error:
         return {"skills": [], "warnings": [str(error)]}
     skills: list[dict] = []
     warnings: list[str] = []
     for entry in _compose(repo_entries, project_entries, global_entries, kind):
+        name, _ = _split_name(entry["name"])
         resolved = resolve(entry["name"], repo_dir=repo_dir, base_sha=base_sha)
         if resolved is None:
+            if entry.get("required"):
+                raise RequiredSkillError(f'required skill "{entry["name"]}" is not installed')
             message = f'skill "{entry["name"]}" is not installed; skipping'
             warnings.append(message)
             continue
         text, version = resolved
         skills.append(
             {
-                "name": entry["name"],
+                "name": name,
                 "version": version,
                 "scope": entry["scope"],
                 "method": "prompt",

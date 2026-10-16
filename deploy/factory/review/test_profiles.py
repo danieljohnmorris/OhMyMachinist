@@ -437,6 +437,52 @@ class SkillsConfigTests(unittest.TestCase):
                 loaded = skill_library.loaded_skills()
         self.assertEqual(loaded["skills"], [])
 
+    def _library_alpha(self, data_dir: str) -> None:
+        root = Path(data_dir) / "skills" / "alpha"
+        for version in ("v1", "v2"):
+            (root / version).mkdir(parents=True)
+            (root / version / "SKILL.md").write_text(
+                f"---\nname: alpha\ndescription: d\n---\n{version}\n", encoding="utf-8"
+            )
+        (root / "manifest.json").write_text(
+            json.dumps({"name": "alpha", "active": "v2", "versions": [{"version": "v1"}, {"version": "v2"}]}),
+            encoding="utf-8",
+        )
+
+    def test_name_at_version_pin_survives_compose(self):
+        skill_library._repo_file = lambda repo, sha, path: (
+            "skills:\n  - name: alpha@v1\n" if path == ".machinist/skills.yaml" else None
+        )
+        skill_library._control_plane_settings = lambda environ, timeout: {}
+        with tempfile.TemporaryDirectory() as data_dir:
+            self._library_alpha(data_dir)
+            with unittest.mock.patch.dict("os.environ", {"MACHINIST_DATA_DIR": data_dir}):
+                skill_library.configure(repo_dir="/tmp/repo", base_sha="deadbeef", project="MACH")
+                loaded = skill_library.loaded_skills()
+        self.assertEqual(
+            loaded["skills"],
+            [{"name": "alpha", "version": "v1", "scope": "repo", "method": "prompt", "rule": "", "required": False}],
+        )
+
+    def test_malformed_skills_config_warns(self):
+        skill_library._repo_file = lambda repo, sha, path: (
+            "skills:\n  - name: [unterminated\n" if path == ".machinist/skills.yaml" else None
+        )
+        skill_library._control_plane_settings = lambda environ, timeout: {}
+        skill_library.configure(repo_dir="/tmp/repo", base_sha="deadbeef", project="MACH")
+        loaded = skill_library.loaded_skills()
+        self.assertEqual(loaded["skills"], [])
+        self.assertEqual(len(loaded["warnings"]), 1)
+
+    def test_missing_required_skill_fails_the_run(self):
+        skill_library._repo_file = lambda repo, sha, path: (
+            "skills:\n  - name: ghost\n    required: true\n" if path == ".machinist/skills.yaml" else None
+        )
+        skill_library._control_plane_settings = lambda environ, timeout: {}
+        skill_library.configure(repo_dir="/tmp/repo", base_sha="deadbeef", project="MACH")
+        with self.assertRaises(skill_library.RequiredSkillError):
+            skill_library.loaded_skills()
+
     def test_unknown_optional_skill_warns(self):
         skill_library._repo_file = lambda repo, sha, path: (
             "skills:\n  - name: ghost\n" if path == ".machinist/skills.yaml" else None
