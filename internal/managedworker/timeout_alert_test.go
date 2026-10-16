@@ -32,6 +32,10 @@ timeout = "1s"
 
 [alerts]
 directory = "` + alertsDirectory + `"
+
+# The timeout-alert contract, not self-healing, is under test here.
+[healing]
+max_retries = -1
 `
 	if err := os.WriteFile(definitionPath, []byte(definition), 0o600); err != nil {
 		t.Fatal(err)

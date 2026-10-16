@@ -71,12 +71,9 @@ and `deploy/`, plus a TruffleHog verified-credential scan.
 | `machinist-control.service` | control plane (`machinist start --config /etc/machinist/config.toml`) |
 | `machinist-worker.service` | single worker (`--config /etc/machinist/worker.toml`) |
 | `machinist-worker@.service` | worker lane `%i` (`--config /etc/machinist/worker-%i.toml`) |
-| `machinist-fail-notify.{path,service}` | Plane comment + Factory Alerts hand-off on failure |
-| `machinist-fail-sweep.{service,timer}` | alert on timed-out/failed runs the wrapper hook missed |
 | `machinist-drift-check.{service,timer}` | periodic drift check |
 
-Drop-ins under `<unit>.d/` carry the memory caps, the dirty-lane guard and the
-notifier start-limit override. Create `worker-<lane>.toml` (a copy of
+Drop-ins under `<unit>.d/` carry the memory caps, the dirty-lane guard and the memory caps. Create `worker-<lane>.toml` (a copy of
 `worker.toml` with a different name/data-directory) before enabling a lane.
 
 ## Drift check

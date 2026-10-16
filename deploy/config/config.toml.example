@@ -24,8 +24,9 @@ max_concurrent_jobs = 1
 # [review]
 # default_profile = "default"
 
-# Pending failure-alert spool. An external notifier (deploy/factory/fail.py)
-# watches this directory and hands alerts to Factory Alerts.
+# Pending failure-alert spool (MACH-25). Machinist spools failure alerts,
+# self-healing outcomes and endpoint health alerts here for operators; the
+# external fail.py watcher was retired.
 [alerts]
 directory = "~/.machinist/alerts/pending"
 
@@ -40,3 +41,25 @@ timeout = "120m"
 # Map Machinist repository names to GitHub owner/name for PR links and intake.
 # [github.repositories]
 # my-project = "owner/my-project"
+
+# Self-healing (MACH-25): on failure Machinist classifies the cause (infra,
+# stale checkout, test failure, spec problem, secret guard) and requeues
+# within a per-ticket retry budget; exhausted budgets move the Plane ticket
+# to Needs attention. diagnose_command optionally runs omp (low effort) with
+# the run transcript on stdin; without it a keyword classifier is used.
+# [healing]
+# max_retries = 2
+# [healing.max_retries_per_project]
+# MACH = 3
+# diagnose_command = ["/usr/local/lib/machinist-factory/omp-glm", "low"]
+# backoff = "5m"
+
+# Endpoint health checks (MACH-25): alert when an endpoint is unreachable.
+# Alerts land in the [alerts] directory.
+# [health]
+# every = "1m"
+# timeout = "10s"
+# [health.endpoints]
+# glm = "https://api.example-glm-host/v1/models"
+# sparks = "https://sparks.internal/healthz"
+# pipsqueek = "https://pipsqueek.internal/healthz"
