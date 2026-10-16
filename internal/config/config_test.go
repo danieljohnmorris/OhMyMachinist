@@ -601,3 +601,63 @@ path = "repo"
 		t.Fatalf("worker = %#v, want base values preserved", worker)
 	}
 }
+
+func TestParseByteSize(t *testing.T) {
+	cases := map[string]int64{
+		"8G":     8 << 30,
+		"512M":   512 << 20,
+		"1024K":  1 << 20,
+		"2GiB":   2 << 30,
+		"100000": 100000,
+		"0":      0,
+		"max":    0,
+		"none":   0,
+		"1T":     1 << 40,
+	}
+	for input, want := range cases {
+		got, err := ParseByteSize(input)
+		if err != nil {
+			t.Fatalf("ParseByteSize(%q): %v", input, err)
+		}
+		if got != want {
+			t.Fatalf("ParseByteSize(%q) = %d, want %d", input, got, want)
+		}
+	}
+	for _, input := range []string{"", "abc", "-5G", "8X"} {
+		if _, err := ParseByteSize(input); err == nil {
+			t.Fatalf("ParseByteSize(%q) accepted an invalid size", input)
+		}
+	}
+}
+
+func TestWorkerMemoryDefaultsAndOverrides(t *testing.T) {
+	defaults, err := (Worker{}).ResolveMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaults.High != 8<<30 || defaults.Max != 10<<30 || defaults.SwapMax != 2<<30 {
+		t.Fatalf("default memory = %#v", defaults)
+	}
+	worker := Worker{Memory: MemoryLimit{High: "1G", Max: "2G", SwapMax: "256M"}}
+	resolved, err := worker.ResolveMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.High != 1<<30 || resolved.Max != 2<<30 || resolved.SwapMax != 256<<20 {
+		t.Fatalf("resolved memory = %#v", resolved)
+	}
+}
+
+func TestWorkerMemoryRejectsInvalidSettings(t *testing.T) {
+	if _, err := (Worker{Memory: MemoryLimit{Max: "not-a-size"}}).ResolveMemory(); err == nil {
+		t.Fatal("invalid memory.max accepted")
+	}
+	if _, err := (Worker{Memory: MemoryLimit{High: "9G", Max: "1G"}}).ResolveMemory(); err == nil {
+		t.Fatal("memory.high above memory.max accepted")
+	}
+	path := filepath.Join(t.TempDir(), "worker.toml")
+	writeTestFile(t, path, "data_directory = \"state\"\n[memory]\nmax = \"nope\"\n")
+	if _, err := LoadWorker(path); err == nil || !strings.Contains(err.Error(), "memory.max") {
+		t.Fatalf("expected memory.max validation error, got %v", err)
+	}
+}

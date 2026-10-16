@@ -79,6 +79,35 @@ Drop-ins under `<unit>.d/` carry the memory caps, the dirty-lane guard and the
 notifier start-limit override. Create `worker-<lane>.toml` (a copy of
 `worker.toml` with a different name/data-directory) before enabling a lane.
 
+## Job memory caps
+
+Every job runs in its own memory-limited cgroup scope, so a runaway job is
+OOM-killed instead of the worker. The per-job caps live in the worker config and
+use systemd size syntax (`K`, `M`, `G`, `T`, binary: `1G` = 1024^3) or plain
+bytes; `max`, `none` or `0` disables a limit, empty keys fall back to the
+defaults shown, and `high` must not exceed `max`:
+
+```toml
+[memory]
+high = "8G"        # throttled at this usage (memory.high)
+max = "10G"        # hard limit; the kernel starts killing at this usage (memory.max)
+swap_max = "2G"    # swap the job may use (memory.swap.max)
+```
+
+A job killed by its cap fails with `error_class = oom` and records
+`peak_memory_bytes`; `fail.py` then comments "out of memory in \<command\>, peak N
+GB" on the ticket and never auto-requeues it (an OOM is a capacity problem, not a
+transient one).
+
+The unit drop-ins
+(`systemd/machinist-worker.service.d/memory.conf` and, for lanes,
+`systemd/machinist-worker@.service.d/memory.conf`) are the worker-level backstop:
+`MemoryHigh=10G`, `MemoryMax=12G`, `MemorySwapMax=2G` keep a runaway worker from
+taking the host, `OOMPolicy=continue` keeps a job OOM from stopping the unit, and
+`Delegate=yes` is required so the worker can create the per-job scopes inside its
+own cgroup subtree. Keep the drop-in caps above the `[memory]` caps (the worker
+itself needs headroom) and lower everything on smaller hosts.
+
 ## Drift check
 
 ```sh

@@ -722,3 +722,242 @@ func TestWorkflowStopsProcessAfterLeaseRejection(t *testing.T) {
 		t.Fatal("workflow kept executing after definitive lease rejection")
 	}
 }
+
+func TestInfrastructureFailureClassification(t *testing.T) {
+	cases := []struct {
+		name       string
+		completion protocol.Completion
+		wantClass  string
+		wantPause  bool
+		wantOK     bool
+	}{
+		{"oom class", protocol.Completion{State: "failed", ErrorClass: "oom"}, "oom", false, true},
+		{"oom message", protocol.Completion{State: "failed", ExitCode: 137, Error: "out of memory in omp, peak 24.0 GB"}, "oom", false, true},
+		{"unsavable dirty", protocol.Completion{State: "failed", Error: "lane checkout is dirty and could not be saved"}, "lane-dirty", true, true},
+		{"preflight exit 4", protocol.Completion{State: "failed", ExitCode: 4, Error: "command exited with status 4", Events: "omp-glm-pr: refusing to start: has uncommitted changes"}, "lane-dirty", true, true},
+		{"ordinary failure", protocol.Completion{State: "failed", ExitCode: 1, Error: "compile error"}, "", false, false},
+		{"success", protocol.Completion{State: "succeeded"}, "", false, false},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			class, pause, ok := infrastructureFailure(testCase.completion)
+			if class != testCase.wantClass || pause != testCase.wantPause || ok != testCase.wantOK {
+				t.Fatalf("got (%q,%v,%v), want (%q,%v,%v)", class, pause, ok, testCase.wantClass, testCase.wantPause, testCase.wantOK)
+			}
+		})
+	}
+}
+
+func TestCircuitBreakerTripsOncePerBurst(t *testing.T) {
+	worker := &Worker{config: config.Worker{Name: "lane-1", DataDirectory: t.TempDir()}, stderr: io.Discard}
+	if worker.recordLaneFailure("lane-dirty") {
+		t.Fatal("breaker tripped before the threshold")
+	}
+	if worker.recordLaneFailure("lane-dirty") {
+		t.Fatal("breaker tripped before the threshold")
+	}
+	if !worker.recordLaneFailure("lane-dirty") {
+		t.Fatal("breaker did not trip at the threshold")
+	}
+	// The burst is cleared, so a fourth failure does not alert again.
+	if worker.recordLaneFailure("lane-dirty") {
+		t.Fatal("breaker alerted twice in one burst")
+	}
+	// A different class has its own count.
+	if worker.recordLaneFailure("oom") {
+		t.Fatal("unrelated class counted toward the dirty burst")
+	}
+}
+
+func TestCircuitBreakerPausesLaneAndRaisesOneAlert(t *testing.T) {
+	directory := t.TempDir()
+	worker := &Worker{config: config.Worker{Name: "lane-1", DataDirectory: directory}, stderr: io.Discard}
+	spec := protocol.RunSpec{ID: "run_x", JobID: "job_x"}
+	completion := protocol.Completion{State: "failed", ErrorClass: "oom", Error: "out of memory in omp, peak 24.0 GB"}
+	for i := 0; i < breakerFailureThreshold; i++ {
+		worker.handleLaneFailure(spec, completion)
+	}
+	if worker.pausedUntil.IsZero() || !time.Now().Before(worker.pausedUntil) {
+		t.Fatalf("lane not paused: %v", worker.pausedUntil)
+	}
+	alerts, err := filepath.Glob(filepath.Join(directory, "alerts", "circuit-breaker-*.json"))
+	if err != nil || len(alerts) != 1 {
+		t.Fatalf("breaker alerts = %v, %v", alerts, err)
+	}
+}
+
+func TestManagedWorkerPausesLaneOnPreflightRefusal(t *testing.T) {
+	directory := t.TempDir()
+	definitionPath := filepath.Join(directory, "config.toml")
+	if err := os.WriteFile(definitionPath, []byte("[commands.plan]\nexecutor=\"test\"\nprompt_file=\"plan.md\"\ntimeout=\"5s\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "plan.md"), []byte("{{machinist.prompt}}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := controlplane.OpenStore(filepath.Join(directory, "machinist.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	command := config.ResolvedCommand{Name: "plan", Executor: "test", Command: []string{"/bin/sh", "-c", "true"}, Timeout: time.Second, Definition: "test", Hash: "hash"}
+	for _, prompt := range []string{"first", "second"} {
+		if _, err := store.CreateJob(t.Context(), prompt, "repo", "plan", command); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server, err := controlplane.NewServer(store, definitionPath, "secret", 0, config.AuthTokens)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	tokenPath := filepath.Join(directory, "token")
+	if err := os.WriteFile(tokenPath, []byte("secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	worker, err := New(config.Worker{
+		Name:          "lane-1",
+		DataDirectory: filepath.Join(directory, "worker-data"),
+		ControlPlane:  config.ControlPlane{URL: httpServer.URL, TokenFile: tokenPath},
+		Executors:     map[string]config.Executor{"test": {Command: []string{"/bin/sh", "-c", "true"}}},
+		Repositories:  map[string]config.Repository{"repo": {Path: directory}},
+	}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker.executeRun = func(_ context.Context, spec protocol.RunSpec) protocol.Completion {
+		return protocol.Completion{InstanceID: worker.instanceID, LeaseToken: spec.LeaseToken, State: "failed", ExitCode: 4,
+			Error: "command exited with status 4", Events: `{"type":"process.output","stream":"stderr","data":"omp-glm-pr: refusing to start: repo has uncommitted changes"}`}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- worker.Run(ctx) }()
+	countRuns := func() (failed, queued int) {
+		snapshot, err := store.Snapshot(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, job := range snapshot.Jobs {
+			for _, run := range job.Runs {
+				switch run.State {
+				case "failed":
+					failed++
+				case "queued":
+					queued++
+				}
+			}
+		}
+		return failed, queued
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if failed, _ := countRuns(); failed == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the first run did not fail")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	time.Sleep(1500 * time.Millisecond)
+	failed, queued := countRuns()
+	if failed != 1 || queued != 1 {
+		t.Fatalf("lane drained the queue after preflight refusal: failed=%d queued=%d", failed, queued)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestManagedWorkerKeepsLaneUsableAfterOOM(t *testing.T) {
+	directory := t.TempDir()
+	definitionPath := filepath.Join(directory, "config.toml")
+	if err := os.WriteFile(definitionPath, []byte("[commands.plan]\nexecutor=\"test\"\nprompt_file=\"plan.md\"\ntimeout=\"5s\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "plan.md"), []byte("{{machinist.prompt}}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := controlplane.OpenStore(filepath.Join(directory, "machinist.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	command := config.ResolvedCommand{Name: "plan", Executor: "test", Command: []string{"/bin/sh", "-c", "true"}, Timeout: time.Second, Definition: "test", Hash: "hash"}
+	for _, prompt := range []string{"first", "second"} {
+		if _, err := store.CreateJob(t.Context(), prompt, "repo", "plan", command); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server, err := controlplane.NewServer(store, definitionPath, "secret", 0, config.AuthTokens)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	tokenPath := filepath.Join(directory, "token")
+	if err := os.WriteFile(tokenPath, []byte("secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	worker, err := New(config.Worker{
+		Name:          "lane-1",
+		DataDirectory: filepath.Join(directory, "worker-data"),
+		ControlPlane:  config.ControlPlane{URL: httpServer.URL, TokenFile: tokenPath},
+		Executors:     map[string]config.Executor{"test": {Command: []string{"/bin/sh", "-c", "true"}}},
+		Repositories:  map[string]config.Repository{"repo": {Path: directory}},
+	}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	worker.executeRun = func(_ context.Context, spec protocol.RunSpec) protocol.Completion {
+		calls++
+		if calls == 1 {
+			// MACH-62: only the run fails; the worker survives and the lane
+			// stays usable, so the next queued job runs normally.
+			return protocol.Completion{InstanceID: worker.instanceID, LeaseToken: spec.LeaseToken, State: "failed", ExitCode: 137,
+				Error: "out of memory in plan, peak 24.0 GB", ErrorClass: "oom", PeakMemoryBytes: 24 << 30}
+		}
+		return protocol.Completion{InstanceID: worker.instanceID, LeaseToken: spec.LeaseToken, State: "succeeded", ExitCode: 0}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- worker.Run(ctx) }()
+	countRuns := func() (failed, succeeded int) {
+		snapshot, err := store.Snapshot(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, job := range snapshot.Jobs {
+			for _, run := range job.Runs {
+				switch run.State {
+				case "failed":
+					failed++
+				case "succeeded":
+					succeeded++
+				}
+			}
+		}
+		return failed, succeeded
+	}
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		failed, succeeded := countRuns()
+		if failed == 1 && succeeded == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("lane did not run the next job after the OOM: %#v", store)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !worker.pausedUntil.IsZero() {
+		t.Fatalf("lane paused after an OOM: %v", worker.pausedUntil)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}

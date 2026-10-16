@@ -79,6 +79,17 @@ class InstallTest(unittest.TestCase):
         self.assertIn("refusing to install", result.stderr)
         self.assertFalse((self.root / "factory").exists())
 
+    def test_fail_notify_units_are_not_start_limited(self):
+        # MACH-62: a burst of fast failures must not silence the notifier, so both
+        # the service and the path unit drop-ins disable the start limit.
+        for name in ("machinist-fail-notify.service.d", "machinist-fail-notify.path.d"):
+            dropin = REPO_ROOT / "deploy" / "systemd" / name / "no-start-limit.conf"
+            self.assertIn("StartLimitIntervalSec=0", dropin.read_text(), str(dropin))
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("StartLimitIntervalSec=0",
+                      (self.root / "systemd" / "machinist-fail-notify.service.d" / "no-start-limit.conf").read_text())
+
 
 if __name__ == "__main__":
     unittest.main()

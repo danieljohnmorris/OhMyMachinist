@@ -26,6 +26,9 @@ const (
 	tokenUsageFileName     = "token_usage"
 	tokenUsageEnvironment  = "MACHINIST_TOKEN_USAGE_PATH"
 	maxTokenUsageFileBytes = 64
+	// oomTailBytes bounds how much stderr the runner keeps so it can spot an
+	// out-of-memory record even without a cgroup counter (MACH-62).
+	oomTailBytes = 16 << 10
 )
 
 type State string
@@ -47,6 +50,9 @@ type Options struct {
 	ArtifactKey   string
 	Command       config.ResolvedCommand
 	Repository    string
+	// MemoryLimit bounds this job (and everything it starts) in its own
+	// cgroup scope (MACH-62). A zero limit disables the per-job cap.
+	MemoryLimit MemoryLimit
 	// ExtraEnv is appended to the executor command environment. The managed
 	// worker uses it to expose the control plane so trusted post-agent scripts
 	// (e.g. the built-in PR review) can read per-project settings.
@@ -71,6 +77,11 @@ type Result struct {
 	TokenUsage     *int64               `json:"token_usage,omitempty"`
 	FinalMessage   string               `json:"final_message,omitempty"`
 	EventsPath     string               `json:"events_path"`
+	// ErrorClass classifies an infrastructure failure, currently "oom" for a
+	// kernel out-of-memory kill (MACH-62). PeakMemoryBytes is what the job's
+	// memory scope reached when it was killed.
+	ErrorClass      string `json:"error_class,omitempty"`
+	PeakMemoryBytes int64  `json:"peak_memory_bytes,omitempty"`
 }
 
 type OutcomeError struct {
@@ -236,6 +247,21 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 		}
 	}
 	configureProcess(command)
+	// MACH-62: contain the job (and everything it starts) in a memory-limited
+	// cgroup so a runaway job is killed instead of the worker. When the scope
+	// cannot be created the worker-level systemd backstop still applies, so
+	// this is recorded and the run continues.
+	jobScope, scopeErr := createMemoryScope(options.MemoryLimit, runID)
+	if scopeErr != nil {
+		if err := log.append("run.memory.scope.failed", "", scopeErr.Error()); err != nil {
+			return completeFailure(&result, log, runDirectory, err)
+		}
+	} else if jobScope != nil {
+		defer func() { _ = jobScope.close() }()
+		if err := log.append("run.memory.limit", "", fmt.Sprintf("high=%d max=%d swap_max=%d", options.MemoryLimit.High, options.MemoryLimit.Max, options.MemoryLimit.SwapMax)); err != nil {
+			return completeFailure(&result, log, runDirectory, err)
+		}
+	}
 
 	stdinReader, stdinWriter, err := os.Pipe()
 	if err != nil {
@@ -264,6 +290,11 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 		return completeFailure(&result, log, runDirectory, fmt.Errorf("start command %q: %w", executorCommand[0], err))
 	}
 	closeFiles(stdinReader, stdoutWriter, stderrWriter)
+	if jobScope != nil {
+		if attachErr := jobScope.attach(command.Process.Pid); attachErr != nil {
+			_ = log.append("run.memory.attach.failed", "", attachErr.Error())
+		}
+	}
 	if err := log.append("process.started", "", fmt.Sprintf("pid=%d", command.Process.Pid)); err != nil {
 		_ = stdinWriter.Close()
 		_ = terminateProcessTree(command.Process)
@@ -297,7 +328,8 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 		stdoutLog = log
 	}
 	go pumpStream(&streams, stdoutReader, stdoutDestination, "stdout", stdoutLog, streamErrors)
-	go pumpStream(&streams, stderrReader, options.Stderr, "stderr", log, streamErrors)
+	stderrTail := newTailWriter(options.Stderr, oomTailBytes)
+	go pumpStream(&streams, stderrReader, stderrTail, "stderr", log, streamErrors)
 	streamsDone := make(chan struct{})
 	go func() {
 		streams.Wait()
@@ -312,6 +344,18 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	closeInput := func() { _ = stdinWriter.Close() }
 	closeStreams := func() { closeFiles(stdoutReader, stderrReader) }
 	state, exitCode, outcome := supervise(ctx, command.Process, options.Command.Timeout, processResult, inputResult, streamErrors, streamsDone, closeInput, closeStreams, options.Stdout, options.Stderr)
+	memoryStats := MemoryStats{}
+	if jobScope != nil {
+		memoryStats = jobScope.stats()
+	}
+	if state == StateFailed {
+		if class, peak, oom := classifyResourceFailure(memoryStats, exitCode, stderrTail.String()); oom {
+			result.ErrorClass = class
+			result.PeakMemoryBytes = peak
+			outcome = errors.New(oomFailureMessage(options.Command.Name, peak))
+			_ = log.append("run.oom", "", outcome.Error())
+		}
+	}
 	if options.Workflow && state == StateSucceeded {
 		step, err := readStepResult(filepath.Join(runDirectory, "step-result.json"))
 		if err != nil {
@@ -526,16 +570,20 @@ func ResolveRepository(value string) (string, error) {
 // lane cannot fail this job and every queued job behind it (MACH-59). Other Git
 // failures are recorded as events and tolerated.
 func prepareLaneCheckout(log *eventLog, repository, runDirectory string, alert io.Writer) error {
-	// Untracked leftovers are normal after agent runs; only modifications to
-	// tracked files make the checkout dirty.
-	status := exec.Command("git", "-C", repository, "status", "--porcelain", "-uno")
+	// MACH-62: one definition of a dirty lane, matching the executor
+	// preflight (omp-glm-pr, which runs the same `git status --porcelain`):
+	// tracked changes and untracked files that are not ignored. Untracked
+	// leftovers are normal after agent runs, but the preflight refuses them,
+	// so they are saved here instead of failing the job and the queue behind
+	// it.
+	status := exec.Command("git", "-C", repository, "status", "--porcelain")
 	status.Env = sanitizedEnvironment(os.Environ())
 	if output, err := status.Output(); err == nil && len(strings.TrimSpace(string(output))) > 0 {
 		if err := saveLaneWIP(log, repository, runDirectory, strings.TrimSpace(string(output))); err != nil {
 			return err
 		}
 		if alert != nil {
-			fmt.Fprintf(alert, "machinist: lane %s had uncommitted changes; saved them to a stash before running\n", repository)
+			fmt.Fprintf(alert, "machinist: lane %s had uncommitted or untracked changes; saved them to a stash before running\n", repository)
 		}
 	}
 	fetch := exec.Command("git", "-C", repository, "fetch", "origin")
@@ -573,13 +621,29 @@ func prepareLaneCheckout(log *eventLog, repository, runDirectory string, alert i
 // left clean and the change is recoverable. Returns an error only when the
 // stash itself fails, which is the one case the caller must still refuse.
 func saveLaneWIP(log *eventLog, repository, runDirectory, dirty string) error {
+	// A repository with no commit yet has no stash base: git stash push refuses
+	// ("You do not have the initial commit yet"). There is no earlier base to
+	// protect, so record it and leave the files alone rather than failing.
+	head := exec.Command("git", "-C", repository, "rev-parse", "--verify", "HEAD")
+	head.Env = sanitizedEnvironment(os.Environ())
+	if err := head.Run(); err != nil {
+		return log.append("lane.wip.skipped", "", "checkout is dirty but has no commit yet; leaving the files untouched")
+	}
 	label := "machinist-lane-wip-" + time.Now().UTC().Format("20060102-150405")
+	// Archive the untracked files first: the stash below removes them from the
+	// lane, and the tar keeps a recoverable copy next to the run artifacts.
+	archived, archiveErr := archiveUntracked(repository, runDirectory, label)
 	stash := exec.Command("git", "-C", repository, "stash", "push", "--include-untracked", "-m", label)
 	stash.Env = sanitizedEnvironment(os.Environ())
 	if output, err := stash.CombinedOutput(); err != nil {
 		return fmt.Errorf("lane checkout is dirty and could not be saved: %s", laneGitFailure("git stash push", output, err))
 	}
 	message := fmt.Sprintf("saved dirty lane changes to stash %q: %s", label, dirty)
+	if archiveErr != nil {
+		message += fmt.Sprintf(" (could not archive untracked files: %v)", archiveErr)
+	} else if archived > 0 {
+		message += fmt.Sprintf(" (archived %d untracked file(s) to %s.untracked.tar)", archived, label)
+	}
 	if runDirectory != "" {
 		show := exec.Command("git", "-C", repository, "stash", "show", "--patch", "--include-untracked", "stash@{0}")
 		show.Env = sanitizedEnvironment(os.Environ())
@@ -622,6 +686,37 @@ func laneGitFailure(command string, output []byte, err error) string {
 		return fmt.Sprintf("%s: %v", command, err)
 	}
 	return fmt.Sprintf("%s: %s", command, message)
+}
+
+// tailWriter forwards writes to its destination while keeping the last limit
+// bytes, so a run's stderr can be scanned for an out-of-memory record after
+// the process exits (MACH-62).
+type tailWriter struct {
+	destination io.Writer
+	limit       int
+	mu          sync.Mutex
+	buffer      []byte
+}
+
+func newTailWriter(destination io.Writer, limit int) *tailWriter {
+	return &tailWriter{destination: destination, limit: limit}
+}
+
+func (writer *tailWriter) Write(p []byte) (int, error) {
+	n, err := writer.destination.Write(p)
+	writer.mu.Lock()
+	writer.buffer = append(writer.buffer, p[:n]...)
+	if len(writer.buffer) > writer.limit {
+		writer.buffer = writer.buffer[len(writer.buffer)-writer.limit:]
+	}
+	writer.mu.Unlock()
+	return n, err
+}
+
+func (writer *tailWriter) String() string {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	return string(writer.buffer)
 }
 
 func pumpStream(group *sync.WaitGroup, source *os.File, destination io.Writer, stream string, log *eventLog, errorsChannel chan<- error) {

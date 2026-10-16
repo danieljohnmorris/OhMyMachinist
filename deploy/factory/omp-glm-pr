@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Machinist "omp-glm-pr" executor wrapper (trusted, root-owned; agents cannot edit). 2026-10-11, copied from ./codex.
 # Coding step runs ./omp-glm medium (local GLM Flash, bwrap sandbox) instead of Codex.
+# 0. Refuses to start on a dirty lane (lane-dirty.sh, the runner's own MACH-62 definition).
 # 1. Runs omp-glm medium on the brief (bwrap: repo writable, .git read-only, no keys).
 # 2. If omp succeeded, runs deliver-pr.py OUTSIDE the sandbox: branch, commit,
 #    push over SSH, open PR with gh. The model never gets .git write or push keys.
@@ -28,7 +29,9 @@ fail() {  # fail <rc> <stage>
 }
 trap 'echo "omp-glm-pr: killed by signal (timeout/stop)" >&2; fail 143 killed' TERM INT
 
-if [ -n "$(git -C "$repo" status --porcelain 2>/dev/null)" ]; then
+# MACH-62: lane-dirty.sh is the single dirty-lane definition shared with the
+# runner (tracked modifications AND untracked files; ignored files never count).
+if [ -n "$("$HERE/lane-dirty.sh" "$repo")" ]; then
   echo "omp-glm-pr: refusing to start: $repo has uncommitted changes (stash or commit them first)" >&2
   fail 4 preflight
 fi

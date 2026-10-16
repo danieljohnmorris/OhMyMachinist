@@ -126,7 +126,7 @@ func TestOpenStoreReplacesLegacySchema(t *testing.T) {
 	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if count != 0 || version != 10 {
+	if count != 0 || version != 11 {
 		t.Fatalf("migrated database count=%d version=%d", count, version)
 	}
 }
@@ -137,7 +137,7 @@ func TestOpenStoreRejectsNewerSchemaWithoutDeletingIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`CREATE TABLE future_data(value TEXT); INSERT INTO future_data VALUES('preserved'); PRAGMA user_version=11;`); err != nil {
+	if _, err := db.Exec(`CREATE TABLE future_data(value TEXT); INSERT INTO future_data VALUES('preserved'); PRAGMA user_version=12;`); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -1333,8 +1333,8 @@ func testVersionOneUpgrade(t *testing.T, partial string) {
 	}
 	defer store.Close()
 	var version int
-	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 10 {
-		t.Fatalf("schema version = %d, %v, want 10", version, err)
+	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 11 {
+		t.Fatalf("schema version = %d, %v, want 11", version, err)
 	}
 	var columns int
 	if err := store.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name IN ('has_shepherd','schedule_name','title')`).Scan(&columns); err != nil || columns != 1 {
@@ -1516,5 +1516,78 @@ func TestRunSkillsRecordedAndReturnedInJobAndRun(t *testing.T) {
 	}
 	if strings.Contains(string(body), "SKILL.md") || strings.Contains(string(body), run.LeaseToken) {
 		t.Fatalf("skills response leaked content or a token: %s", body)
+	}
+}
+
+func TestStoreCompletesOOMRunWithoutReLease(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "machinist.db"))
+	if _, err := store.CreateJob(t.Context(), "request", "machinist", "plan", testAgent("plan", "Plan")); err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"machinist"}))
+	if err != nil || run == nil {
+		t.Fatalf("poll = %#v, %v", run, err)
+	}
+	if err := store.Complete(t.Context(), run.ID, protocol.Completion{
+		InstanceID: "worker-a", LeaseToken: run.LeaseToken, State: "failed", ExitCode: 137,
+		Error:      "out of memory in plan, peak 24.0 GB",
+		ErrorClass: "oom", PeakMemoryBytes: 24 << 30,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := snapshot.Jobs[0]
+	if job.State != "failed" || len(job.Runs) != 1 {
+		t.Fatalf("job = %#v", job)
+	}
+	if got := job.Runs[0]; got.State != "failed" || got.ErrorClass != "oom" || got.PeakMemoryBytes != 24<<30 || !strings.Contains(got.Error, "out of memory in plan") {
+		t.Fatalf("run = %#v", got)
+	}
+	// MACH-62: an OOM run is never leased into another lane or requeued.
+	if again, err := store.Poll(t.Context(), pollRequest("worker-b", []string{"codex"}, []string{"machinist"})); err != nil || again != nil {
+		t.Fatalf("re-lease = %#v, %v", again, err)
+	}
+	if reclaimed, err := store.ReclaimExpiredLeases(t.Context()); err != nil || reclaimed != 0 {
+		t.Fatalf("reclaimed = %d, %v", reclaimed, err)
+	}
+}
+
+func TestStoreMarkRunOOMFailsRunAndStopsReLease(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "machinist.db"))
+	clock := newTestClock(time.Date(2026, time.August, 27, 12, 0, 0, 0, time.UTC))
+	store.now = clock.Now
+	jobID, err := store.CreateJob(t.Context(), "request", "machinist", "plan", testAgent("plan", "Plan"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.Poll(t.Context(), pollRequest("worker-old", []string{"codex"}, []string{"machinist"}))
+	if err != nil || run == nil {
+		t.Fatalf("poll = %#v, %v", run, err)
+	}
+	clock.Advance(leaseDuration + time.Second)
+	// The lane restarted after an OOM kill and reports the run it was running.
+	if err := store.MarkRunOOM(t.Context(), run.ID, "test", 12<<30, "omp-glm-pr"); err != nil {
+		t.Fatal(err)
+	}
+	reclaimed, err := store.ReclaimExpiredLeases(t.Context())
+	if err != nil || reclaimed != 0 {
+		t.Fatalf("reclaimed = %d, %v", reclaimed, err)
+	}
+	snapshot, err := store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Jobs[0].ID != jobID || snapshot.Jobs[0].State != "failed" {
+		t.Fatalf("job = %#v", snapshot.Jobs[0])
+	}
+	oomRun := snapshot.Jobs[0].Runs[0]
+	if oomRun.State != "failed" || oomRun.ErrorClass != "oom" || oomRun.PeakMemoryBytes != 12<<30 || !strings.Contains(oomRun.Error, "out of memory in omp-glm-pr") {
+		t.Fatalf("run = %#v", oomRun)
+	}
+	if again, err := store.Poll(t.Context(), pollRequest("worker-new", []string{"codex"}, []string{"machinist"})); err != nil || again != nil {
+		t.Fatalf("re-lease = %#v, %v", again, err)
 	}
 }

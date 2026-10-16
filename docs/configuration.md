@@ -63,6 +63,29 @@ server and copy the entire artifact directory before changing the path; changing
 the setting alone does not move saved files. Back up the database and files together.
 See [storage settings](artifacts.md#storage) for size limits. Files are kept until their task is deleted.
 
+## Worker memory limits
+
+Worker configuration accepts a per-job memory cap:
+
+```toml
+[memory]
+high = "8G"        # throttled at this usage (memory.high)
+max = "10G"        # hard limit; the kernel starts killing at this usage (memory.max)
+swap_max = "2G"    # swap the job may use (memory.swap.max)
+```
+
+Each job runs in its own memory-limited cgroup scope, so a runaway job is
+OOM-killed instead of the worker. Values use systemd size syntax (`K`, `M`, `G`,
+`T`, binary: `1G` = 1024^3) or plain bytes; `max`, `none` or `0` disables a
+limit. Empty keys fall back to the defaults shown, and `high` must not exceed
+`max`. A job killed by a cap ends `failed` with `error_class = oom` and records
+`peak_memory_bytes`, which the failure hook reports as `out of memory in
+<command>, peak N GB`; OOM failures are never auto-requeued. The worker's cgroup
+must be delegated (`Delegate=yes`) for these scopes to be creatable — the shipped
+drop-in `machinist-worker.service.d/memory.conf` (and the lane equivalent) does
+that and carries the worker-level backstop (`MemoryHigh=10G`, `MemoryMax=12G`,
+`MemorySwapMax=2G`, `OOMPolicy=continue`).
+
 ## Failure alerts
 
 When a run ends `failed` or `timed_out`, the server writes one pending fail alert

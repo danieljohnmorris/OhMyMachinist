@@ -538,6 +538,40 @@ func TestExecuteReturnsAgentExitStatusAndPersistsFailure(t *testing.T) {
 	assertPersistedState(t, result, StateFailed, 7)
 }
 
+func TestExecuteClassifiesOOMKilledRun(t *testing.T) {
+	// MACH-62: a job the kernel kills for memory is recorded as error_class
+	// oom with the command and peak, and the worker process survives to report
+	// the run (the test process is the worker stand-in here).
+	result, err := Execute(context.Background(), Options{
+		Command:       helperAgent("oom-kill", time.Second),
+		Repository:    newGitRepository(t),
+		DataDirectory: t.TempDir(),
+		Stdout:        io.Discard,
+		Stderr:        io.Discard,
+	})
+	var outcome *OutcomeError
+	if !errors.As(err, &outcome) || outcome.State != StateFailed {
+		t.Fatalf("error = %#v", err)
+	}
+	if result.ErrorClass != ErrorClassOOM {
+		t.Fatalf("error class = %q, want %q", result.ErrorClass, ErrorClassOOM)
+	}
+	if !strings.Contains(outcome.Error(), "out of memory in ") {
+		t.Fatalf("outcome error = %q", outcome.Error())
+	}
+	body, readErr := os.ReadFile(filepath.Join(filepath.Dir(result.EventsPath), "result.json"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	var persisted Result
+	if err := json.Unmarshal(body, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted.ErrorClass != ErrorClassOOM {
+		t.Fatalf("persisted result = %#v", persisted)
+	}
+}
+
 func TestExecuteTimesOutAgent(t *testing.T) {
 	started := time.Now()
 	result, err := Execute(context.Background(), Options{
@@ -698,6 +732,62 @@ func TestExecuteFastForwardsLaneBaseBranch(t *testing.T) {
 	}
 }
 
+func TestExecuteSavesUntrackedLaneLeftoversBeforeRunning(t *testing.T) {
+	repository := newGitRepository(t)
+	if err := os.WriteFile(filepath.Join(repository, "tracked.txt"), []byte("seed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitCommand(t, repository, "add", "tracked.txt")
+	runGitCommand(t, repository, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "seed", "--quiet")
+	// Untracked leftovers from another job, plus an ignored file that must
+	// never count as dirty.
+	if err := os.WriteFile(filepath.Join(repository, "leftover.txt"), []byte("other job output"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repository, ".gitignore"), []byte("ignored.tmp\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitCommand(t, repository, "add", ".gitignore")
+	runGitCommand(t, repository, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "ignore", "--quiet")
+	if err := os.WriteFile(filepath.Join(repository, "ignored.tmp"), []byte("ignored"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	result, err := Execute(context.Background(), Options{
+		Command:       helperAgent("echo", time.Second),
+		Repository:    repository,
+		DataDirectory: t.TempDir(),
+		Stdout:        &stdout,
+		Stderr:        &stderr,
+	})
+	// MACH-62: untracked leftovers are saved before the job runs, so the
+	// executor preflight (exit 4) never refuses this lane.
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result.State != StateSucceeded || result.ExitCode != 0 {
+		t.Fatalf("result = %#v", result)
+	}
+	// Only the untracked file is gone; the ignored file stays.
+	if status := runGitCommand(t, repository, "status", "--porcelain"); status != "" {
+		t.Fatalf("lane still dirty after auto-save: %q", status)
+	}
+	runDir := filepath.Dir(result.EventsPath)
+	archives, err := filepath.Glob(filepath.Join(runDir, "machinist-lane-wip-*.untracked.tar"))
+	if err != nil || len(archives) != 1 {
+		t.Fatalf("untracked archives = %v, %v", archives, err)
+	}
+	saved, err := os.ReadFile(archives[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(saved, []byte("leftover.txt")) || !bytes.Contains(saved, []byte("other job output")) {
+		t.Fatalf("archive does not hold the untracked file: %q", saved)
+	}
+}
+
 func TestExecuteSavesDirtyLaneBeforeRunning(t *testing.T) {
 	repository := newGitRepository(t)
 	if err := os.WriteFile(filepath.Join(repository, "tracked.txt"), []byte("clean"), 0o600); err != nil {
@@ -799,6 +889,8 @@ func helperAgent(mode string, timeout time.Duration) config.ResolvedCommand {
 		script = "cat; printf 'helper stderr\\n' >&2"
 	case "fail":
 		script = "exit 7"
+	case "oom-kill":
+		script = "cat >/dev/null; printf 'Out of memory: Killed process 123 (node)\\n' >&2; kill -9 $$"
 	case "sleep":
 		script = "sleep 60"
 	case "pwd":
