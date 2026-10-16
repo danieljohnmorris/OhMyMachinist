@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import textwrap
 import unittest
@@ -506,11 +507,153 @@ class SecretScanEndToEndTests(unittest.TestCase):
             root = Path(temp)
             self._repo(root)
             bin_dir = self._bins(root, None)
-            code, summary, _ = self._run(root, bin_dir)
+            # MACH-59: never depend on whether trufflehog is on the host PATH;
+            # mock the lookup so the test is hermetic.
+            real_which = post.shutil.which
+            with mock.patch.object(
+                post.shutil,
+                "which",
+                side_effect=lambda name, *args, **kwargs: (
+                    None if name == "trufflehog" else real_which(name, *args, **kwargs)
+                ),
+            ):
+                code, summary, _ = self._run(root, bin_dir)
         self.assertEqual(code, 0)
         self.assertEqual(summary["status"], "INCOMPLETE")
         self.assertFalse(summary["blocking"])
         self.assertIn("not installed", summary["secret_scan"]["error"])
+
+
+def _git(directory: Path, *args: str) -> str:
+    result = subprocess.run(["git", "-C", str(directory), *args], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise AssertionError(f"git {args}: {result.stderr or result.stdout}")
+    return result.stdout.strip()
+
+
+def _repo_with_origin(root: Path) -> Path:
+    """A checkout on branch feature with a bare origin, so save_lane_wip can
+    commit and push like the real lane does."""
+    origin = root / "origin.git"
+    subprocess.run(["git", "init", "--bare", "--quiet", str(origin)], capture_output=True, text=True, check=True)
+    repo = root / "repo"
+    repo.mkdir()
+    _git(repo, "init", "--quiet")
+    _git(repo, "config", "user.name", "test")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "remote", "add", "origin", str(origin))
+    (repo / "README.md").write_text("seed\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-m", "seed", "--quiet")
+    _git(repo, "branch", "-M", "feature")
+    _git(repo, "push", "-u", "origin", "feature")
+    return repo
+
+
+class LaneWipTests(unittest.TestCase):
+    """MACH-59: the review runs in the lane checkout, so a docs-pass or fix-pass
+    edit must be committed or stashed before the branch switch. A leftover edit
+    fails the switch and then every queued job behind it."""
+
+    def test_save_lane_wip_commits_and_pushes_a_wanted_edit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repo = _repo_with_origin(Path(temp))
+            (repo / "README.md").write_text("edited\n", encoding="utf-8")
+            report = post.save_lane_wip(repo, 5, message="Update docs from PR review")
+            self.assertEqual(report["committed"], ["README.md"])
+            self.assertIsNone(report["error"])
+            self.assertEqual(post.changed_paths(repo, 5), [])
+            self.assertIn("README.md", _git(repo, "show", "--name-only", "--pretty=format:", "HEAD"))
+
+    def test_save_lane_wip_stashes_a_secret_edit_with_a_patch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = _repo_with_origin(root)
+            (repo / ".env").write_text("TOKEN=ghp_realsecretvalue123\n", encoding="utf-8")
+            artifacts = root / "artifacts"
+            report = post.save_lane_wip(
+                repo, 5, message="Save review work in progress", label="wip-test", artifact_dir=artifacts
+            )
+            self.assertEqual(report["stash"], "wip-test")
+            self.assertIn(".env", report["stashed"])
+            self.assertIsNotNone(report["patch"])
+            self.assertTrue(Path(report["patch"]).is_file())
+            self.assertEqual(post.changed_paths(repo, 5), [])
+
+    def test_save_lane_wip_can_prefer_stash_for_leftovers(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = _repo_with_origin(root)
+            (repo / "README.md").write_text("leftover\n", encoding="utf-8")
+            report = post.save_lane_wip(
+                repo, 5, message="Save review work in progress", label="leftover-test",
+                artifact_dir=root / "artifacts", prefer_stash=True,
+            )
+            self.assertEqual(report["committed"], [])
+            self.assertEqual(report["stash"], "leftover-test")
+            self.assertEqual(report["stashed"], ["README.md"])
+            self.assertEqual(post.changed_paths(repo, 5), [])
+
+    def test_save_lane_wip_commits_only_the_wanted_delta(self) -> None:
+        """Only the docs delta is committed; pre-existing lane dirt is left for
+        the finally-block stash, never pushed to the PR branch."""
+        with tempfile.TemporaryDirectory() as temp:
+            repo = _repo_with_origin(Path(temp))
+            (repo / "leftover.txt").write_text("pre-existing dirt\n", encoding="utf-8")
+            (repo / "README.md").write_text("docs edit\n", encoding="utf-8")
+            report = post.save_lane_wip(repo, 5, message="Update docs from PR review", paths=["README.md"])
+            self.assertEqual(report["committed"], ["README.md"])
+            committed = _git(repo, "show", "--name-only", "--pretty=format:", "HEAD")
+            self.assertIn("README.md", committed)
+            self.assertNotIn("leftover.txt", committed)
+            self.assertEqual(post.changed_paths(repo, 5), ["leftover.txt"])
+
+    def test_save_lane_wip_reports_a_failed_status(self) -> None:
+        """A failed `git status` must not read as a clean lane."""
+        failure = CommandResult(("git", "status", "--porcelain"), 128, "", "fatal: not a git repository")
+        with mock.patch.object(post, "run_git", return_value=failure):
+            report = post.save_lane_wip(Path("."), 5, message="Save review work in progress")
+        self.assertIsNone(report["stash"])
+        self.assertIn("could not read lane status", report["error"])
+
+    def test_save_lane_wip_patch_defaults_outside_the_run_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = _repo_with_origin(root)
+            (repo / ".env").write_text("TOKEN=ghp_realsecretvalue123\n", encoding="utf-8")
+            scratch = root / "scratch"
+            output = root / "outputs"
+            output.mkdir()
+            with mock.patch.dict(
+                os.environ,
+                {"MACHINIST_SCRATCH_DIR": str(scratch), "MACHINIST_OUTPUT_DIR": str(output)},
+            ):
+                report = post.save_lane_wip(repo, 5, message="Save review work in progress", label="scratch-test")
+            self.assertTrue(Path(report["patch"]).is_file())
+            self.assertEqual(Path(report["patch"]).parent, scratch)
+            self.assertEqual(list(output.glob("*.patch")), [])
+
+    def test_docs_pass_edit_leaves_the_lane_clean(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repo = _repo_with_origin(Path(temp))
+            docs_file = repo / "deploy" / "factory" / "README.md"
+            docs_file.parent.mkdir(parents=True)
+            docs_file.write_text("seed\n", encoding="utf-8")
+            _git(repo, "add", "deploy/factory/README.md")
+            _git(repo, "commit", "-m", "docs", "--quiet")
+
+            def fake_executor(args, prompt, timeout):
+                docs_file.write_text("edited by the docs pass\n", encoding="utf-8")
+                return CommandResult(("executor",), 0, "NO FINDINGS\n", "")
+
+            metadata = {"headRefName": "feature", "body": ""}
+            with mock.patch.object(post, "run_executor", side_effect=fake_executor):
+                docs, changed = post.run_docs(
+                    repo, "owner", "repo", "1", metadata, ["executor"], "diff", 5, False, {}
+                )
+            self.assertEqual(changed, ["deploy/factory/README.md"])
+            self.assertEqual(post.changed_paths(repo, 5), [])
+            self.assertEqual(docs["saved"]["committed"], ["deploy/factory/README.md"])
 
 
 if __name__ == "__main__":

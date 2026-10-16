@@ -50,6 +50,26 @@ Run tests:
 
     python3 -m unittest discover -s deploy/factory/tests -t .
 
+## Lane hygiene (MACH-59)
+
+The review runs in the lane checkout, so an edit it leaves behind (the docs
+pass, an amend round) would make the final `git switch` fail and then fail every
+queued job behind it. `post_pr_review.py` commits wanted edits to the PR branch
+and pushes them, or stashes them with a labelled stash (`machinist-review-wip-*`)
+plus a patch outside the published run artifacts (scratch, else the Machinist
+data dir), before it switches back.
+`deliver-pr.py` does the same before its final switch. The worker runner
+(`internal/runner`) auto-saves a dirty lane checkout to a labelled stash and a
+patch before fetching, logs `lane.wip.saved` on the run, and alerts once; if the
+stash itself fails the lane pauses instead of claiming the next queued job.
+
+`restart-when-idle.sh <systemd-unit> [data-dir]` restarts a worker only when it
+is idle. The worker writes `<data-dir>/lane.lock` for the whole run, including
+publishing outputs and reporting the completion, so the script never restarts a
+lane in the middle of a job's final steps. The data dir defaults to
+`$MACHINIST_DATA_DIR`, then `~/.machinist/worker` (the worker's default
+DataDirectory), so the script finds the lock the worker actually writes.
+
 ## post_pr_review.py (built-in PR review, MACH-26)
 
 After `deliver-pr.py` opens a pull request it runs the built-in review from the

@@ -10,7 +10,7 @@ origin is OUR fork (push target) and <remote> is the third-party upstream (never
   machinist.upstreamPr=manual (default): push branch to fork, open a REVIEW PR inside the fork
      (fork main synced to upstream main first); log upstream compare URL. Upstream is not touched.
   machinist.upstreamPr=draft: also open a DRAFT PR fork:branch -> upstream (only after Daniel opts in)."""
-import argparse, fnmatch, json, os, re, subprocess, sys
+import argparse, fnmatch, json, os, re, subprocess, sys, time
 
 ALLOWED_OWNERS = {"danieljohnmorris", "omacom"}          # owners we may PUSH to
 UPSTREAM_PR_OWNERS = {"MiaAI-Lab"}                     # third-party: PR target only, never pushed
@@ -187,6 +187,61 @@ def slug(s, n=40):
     s = re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")
     return s[:n].strip("-") or "change"
 
+def wip_scratch_dir():
+    """Where a saved lane-WIP patch goes: never the published run artifacts.
+
+    MACHINIST_OUTPUT_DIR is the run's published task folder (uploaded and shown
+    to the user), and the stash path deliberately covers untracked files a
+    commit refuses (an untracked .env, say), so a patch there would publish the
+    very secret the stash exists to keep out. Prefer the unpublishable scratch
+    dir, then the Machinist data dir.
+    """
+    scratch = os.environ.get("MACHINIST_SCRATCH_DIR", "").strip()
+    if scratch:
+        return scratch
+    data_dir = os.environ.get("MACHINIST_DATA_DIR", "").strip()
+    base = data_dir or os.path.join(os.path.expanduser("~"), ".machinist")
+    return os.path.join(base, "review-wip")
+
+def save_wip(repo):
+    """Stash a dirty lane so the final branch switch cannot fail (MACH-59).
+
+    The built-in review runs in this checkout; if it leaves edits behind the
+    switch at the end of delivery would fail and strand the job. Stash them
+    with a labelled stash plus a patch outside the published run artifacts,
+    then switch on a clean tree. Never raises: a delivery must not fail because
+    of this.
+    """
+    def git(*c):
+        return subprocess.run(["git", *NOHOOKS, *c], cwd=repo, capture_output=True, text=True)
+    try:
+        status = git("status", "--porcelain")
+        if status.returncode != 0:
+            log(f"warn: could not read lane status: {(status.stderr or status.stdout).strip()}")
+            return
+        if not status.stdout.strip():
+            return
+        label = "machinist-deliver-wip-" + time.strftime("%Y%m%d-%H%M%S")
+        stash = git("stash", "push", "--include-untracked", "-m", label)
+        if stash.returncode != 0:
+            # Do not read stash@{0}: a failed push leaves any pre-existing stash
+            # at the top, and labelling its patch with this run's id would claim
+            # we saved WIP we did not.
+            log(f"warn: could not stash lane WIP: {(stash.stderr or stash.stdout).strip()}")
+            return
+        patch = git("stash", "show", "--patch", "--include-untracked", "stash@{0}").stdout.strip()
+        out = wip_scratch_dir()
+        if patch:
+            os.makedirs(out, exist_ok=True)
+            path = os.path.join(out, label + ".patch")
+            with open(path, "w") as handle:
+                handle.write(patch + "\n")
+            log(f"saved lane WIP to stash {label} and {path}")
+        else:
+            log(f"saved lane WIP to stash {label}")
+    except OSError as e:
+        log(f"warn: could not save lane WIP: {e}")
+
 def gh_repo(url):
     m = re.search(r"github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?$", url)
     if not m: raise RuntimeError(f"not a GitHub repo: {url}")
@@ -282,6 +337,7 @@ def main():
             result["review_status"] = review_status(out)
             json.dump(result, open(os.path.join(out, "pr.json"), "w"))
         if a.start_branch and a.start_branch != "HEAD":
+            save_wip(repo)
             g("switch", "-q", a.start_branch)
         return rc
 
