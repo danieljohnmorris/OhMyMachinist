@@ -320,14 +320,26 @@ def run_secret_scan(repo: Path, base_sha: str, head_ref: str, timeout: int) -> d
     return scan
 
 
-def changed_paths(repo: Path, timeout: int) -> list[str]:
+def lane_changes(repo: Path, timeout: int) -> tuple[list[str], str | None]:
+    """Dirty paths plus an error string when ``git status`` itself failed.
+
+    ``changed_paths`` flattens a failed status to an empty list, which reads
+    exactly like a clean tree. The lane-WIP path must tell the two apart: a
+    status failure reported as "nothing to save" leaves the lane dirty and the
+    branch switch then fails with an unrelated error.
+    """
     result = run_git(repo, ["status", "--porcelain"], timeout)
     if not result.ok:
-        return []
+        return [], result.output or "git status failed"
     paths = []
     for line in result.stdout.splitlines():
         if len(line) > 3:
             paths.append(line[3:].strip().strip('"'))
+    return paths, None
+
+
+def changed_paths(repo: Path, timeout: int) -> list[str]:
+    paths, _ = lane_changes(repo, timeout)
     return paths
 
 
@@ -350,14 +362,25 @@ def push_branch(repo: Path, branch: str, timeout: int) -> CommandResult:
 # MACH-59: the review runs in the lane checkout (docs pass, amend rounds). An
 # edit left behind makes the final branch switch fail and then fails every
 # queued job behind it, so before switching we commit the wanted edits or stash
-# them with a labelled stash plus a patch in the run artifacts.
+# them with a labelled stash plus a patch outside the published run artifacts.
 WIP_STASH_PREFIX = "machinist-review-wip"
 
 
-def review_artifact_dir() -> Path | None:
-    """Run artifacts directory (MACHINIST_OUTPUT_DIR) when the worker set one."""
-    out = os.environ.get("MACHINIST_OUTPUT_DIR")
-    return Path(out) if out else None
+def wip_patch_dir() -> Path:
+    """Where a labelled WIP patch goes: never the published run artifacts.
+
+    ``MACHINIST_OUTPUT_DIR`` is the run's published task folder (uploaded and
+    shown to the user). The stash path deliberately covers files a commit
+    refuses (an untracked ``.env``, say), so a patch there would publish the
+    very secret the stash exists to keep out. Prefer the unpublishable scratch
+    dir, then the Machinist data dir.
+    """
+    scratch = os.environ.get("MACHINIST_SCRATCH_DIR", "").strip()
+    if scratch:
+        return Path(scratch)
+    data_dir = os.environ.get("MACHINIST_DATA_DIR", "").strip()
+    base = Path(data_dir) if data_dir else Path.home() / ".machinist"
+    return base / "review-wip"
 
 
 def current_branch(repo: Path, timeout: int) -> str:
@@ -373,45 +396,56 @@ def save_lane_wip(
     label: str | None = None,
     artifact_dir: Path | None = None,
     prefer_stash: bool = False,
+    paths: list[str] | None = None,
 ) -> dict[str, Any]:
     """Commit wanted edits, else stash them with a labelled stash and patch.
 
     Returns a report with the committed/stashed paths and, when the work was
-    stashed, the patch written next to the run artifacts. The lane is left
-    clean either way so the branch switch cannot fail on a dirty checkout.
-    ``prefer_stash`` skips the commit for leftovers that may include unrelated
-    build output, so only the docs/fix passes ever push to the PR branch.
+    stashed, the patch written outside the published run artifacts. The lane is
+    left clean either way so the branch switch cannot fail on a dirty checkout.
+    ``paths`` limits the work to the wanted delta (the docs pass passes its
+    before/after diff), so pre-existing lane dirt is never committed to the PR
+    branch. ``prefer_stash`` skips the commit for leftovers that may include
+    unrelated build output, so only the docs/fix passes ever push. A failed
+    ``git status`` is reported as an error, never as a clean tree.
     """
     report: dict[str, Any] = {"committed": [], "stashed": [], "stash": None, "patch": None, "error": None}
-    paths = changed_paths(repo, timeout)
-    if not paths:
+    dirty, status_error = lane_changes(repo, timeout)
+    if status_error:
+        report["error"] = f"could not read lane status: {status_error}"
         return report
-    if not prefer_stash and not any(core.is_secret_path(path) for path in paths):
+    if paths is None:
+        wanted = dirty
+    else:
+        dirty_set = set(dirty)
+        wanted = [path for path in paths if path in dirty_set]
+    if not wanted:
+        return report
+    if not prefer_stash and not any(core.is_secret_path(path) for path in wanted):
         # Wanted edits go back to the PR branch; a commit is the cleanest exit.
-        if commit_allowed(repo, paths, message, timeout):
-            report["committed"] = paths
+        if commit_allowed(repo, wanted, message, timeout):
+            report["committed"] = wanted
             branch = current_branch(repo, timeout)
             if not branch or not push_branch(repo, branch, timeout).ok:
                 report["error"] = "committed review changes but could not push them"
             return report
     name = label or f"{WIP_STASH_PREFIX}-{time.strftime('%Y%m%d-%H%M%S')}"
-    stash = run_git(repo, ["stash", "push", "--include-untracked", "-m", name], timeout)
+    stash = run_git(repo, ["stash", "push", "--include-untracked", "-m", name, "--", *wanted], timeout)
     if not stash.ok:
         report["error"] = f"could not stash review changes: {stash.output}"
         return report
     report["stash"] = name
-    report["stashed"] = paths
+    report["stashed"] = wanted
     patch = run_git(repo, ["stash", "show", "--patch", "--include-untracked", "stash@{0}"], timeout)
     if patch.ok and patch.stdout:
-        target = artifact_dir or review_artifact_dir()
-        if target is not None:
-            try:
-                target.mkdir(parents=True, exist_ok=True)
-                patch_path = target / f"{name}.patch"
-                patch_path.write_text(patch.stdout, encoding="utf-8")
-                report["patch"] = str(patch_path)
-            except OSError as error:
-                report["error"] = f"could not write review WIP patch: {error}"
+        target = artifact_dir or wip_patch_dir()
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            patch_path = target / f"{name}.patch"
+            patch_path.write_text(patch.stdout, encoding="utf-8")
+            report["patch"] = str(patch_path)
+        except OSError as error:
+            report["error"] = f"could not write review WIP patch: {error}"
     return report
 
 
@@ -595,7 +629,7 @@ def run_docs(
             timeout,
             message="Update docs from PR review",
             label=f"{WIP_STASH_PREFIX}-docs-{time.strftime('%Y%m%d-%H%M%S')}",
-            artifact_dir=review_artifact_dir(),
+            paths=docs_changed,
         )
         docs["saved"] = {key: saved[key] for key in ("committed", "stashed", "stash", "patch")}
         if saved["error"]:
@@ -1035,7 +1069,6 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
                 options.repo,
                 options.timeout,
                 message="Save review work in progress",
-                artifact_dir=review_artifact_dir(),
                 prefer_stash=True,
             )
             if wip.get("error"):

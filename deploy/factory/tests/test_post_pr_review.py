@@ -529,6 +529,45 @@ class LaneWipTests(unittest.TestCase):
             self.assertEqual(report["stashed"], ["README.md"])
             self.assertEqual(post.changed_paths(repo, 5), [])
 
+    def test_save_lane_wip_commits_only_the_wanted_delta(self) -> None:
+        """Only the docs delta is committed; pre-existing lane dirt is left for
+        the finally-block stash, never pushed to the PR branch."""
+        with tempfile.TemporaryDirectory() as temp:
+            repo = _repo_with_origin(Path(temp))
+            (repo / "leftover.txt").write_text("pre-existing dirt\n", encoding="utf-8")
+            (repo / "README.md").write_text("docs edit\n", encoding="utf-8")
+            report = post.save_lane_wip(repo, 5, message="Update docs from PR review", paths=["README.md"])
+            self.assertEqual(report["committed"], ["README.md"])
+            committed = _git(repo, "show", "--name-only", "--pretty=format:", "HEAD")
+            self.assertIn("README.md", committed)
+            self.assertNotIn("leftover.txt", committed)
+            self.assertEqual(post.changed_paths(repo, 5), ["leftover.txt"])
+
+    def test_save_lane_wip_reports_a_failed_status(self) -> None:
+        """A failed `git status` must not read as a clean lane."""
+        failure = CommandResult(("git", "status", "--porcelain"), 128, "", "fatal: not a git repository")
+        with mock.patch.object(post, "run_git", return_value=failure):
+            report = post.save_lane_wip(Path("."), 5, message="Save review work in progress")
+        self.assertIsNone(report["stash"])
+        self.assertIn("could not read lane status", report["error"])
+
+    def test_save_lane_wip_patch_defaults_outside_the_run_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = _repo_with_origin(root)
+            (repo / ".env").write_text("TOKEN=ghp_realsecretvalue123\n", encoding="utf-8")
+            scratch = root / "scratch"
+            output = root / "outputs"
+            output.mkdir()
+            with mock.patch.dict(
+                os.environ,
+                {"MACHINIST_SCRATCH_DIR": str(scratch), "MACHINIST_OUTPUT_DIR": str(output)},
+            ):
+                report = post.save_lane_wip(repo, 5, message="Save review work in progress", label="scratch-test")
+            self.assertTrue(Path(report["patch"]).is_file())
+            self.assertEqual(Path(report["patch"]).parent, scratch)
+            self.assertEqual(list(output.glob("*.patch")), [])
+
     def test_docs_pass_edit_leaves_the_lane_clean(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             repo = _repo_with_origin(Path(temp))

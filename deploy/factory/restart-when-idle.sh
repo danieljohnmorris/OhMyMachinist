@@ -9,11 +9,12 @@
 #
 #   restart-when-idle.sh <systemd-unit> [data-dir]
 #
-# The data dir defaults to $MACHINIST_DATA_DIR, then ~/.machinist. Exits 0
-# without restarting a busy lane, and 0 after restarting an idle one.
+# The data dir defaults to $MACHINIST_DATA_DIR, then ~/.machinist/worker (the
+# worker's default DataDirectory). Exits 0 without restarting a busy lane, and
+# 0 after restarting an idle one.
 set -euo pipefail
 unit="${1:?usage: restart-when-idle.sh <systemd-unit> [data-dir]}"
-data_dir="${2:-${MACHINIST_DATA_DIR:-$HOME/.machinist}}"
+data_dir="${2:-${MACHINIST_DATA_DIR:-$HOME/.machinist/worker}}"
 lock="$data_dir/lane.lock"
 if [ -s "$lock" ]; then
   printf 'restart-when-idle: lane busy with run %s; not restarting %s\n' "$(cat "$lock")" "$unit" >&2

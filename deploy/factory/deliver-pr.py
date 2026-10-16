@@ -187,28 +187,59 @@ def slug(s, n=40):
     s = re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")
     return s[:n].strip("-") or "change"
 
+def wip_scratch_dir():
+    """Where a saved lane-WIP patch goes: never the published run artifacts.
+
+    MACHINIST_OUTPUT_DIR is the run's published task folder (uploaded and shown
+    to the user), and the stash path deliberately covers untracked files a
+    commit refuses (an untracked .env, say), so a patch there would publish the
+    very secret the stash exists to keep out. Prefer the unpublishable scratch
+    dir, then the Machinist data dir.
+    """
+    scratch = os.environ.get("MACHINIST_SCRATCH_DIR", "").strip()
+    if scratch:
+        return scratch
+    data_dir = os.environ.get("MACHINIST_DATA_DIR", "").strip()
+    base = data_dir or os.path.join(os.path.expanduser("~"), ".machinist")
+    return os.path.join(base, "review-wip")
+
 def save_wip(repo):
     """Stash a dirty lane so the final branch switch cannot fail (MACH-59).
 
     The built-in review runs in this checkout; if it leaves edits behind the
     switch at the end of delivery would fail and strand the job. Stash them
-    with a labelled stash plus a patch next to the run artifacts, then switch
-    on a clean tree. Never raises: a delivery must not fail because of this.
+    with a labelled stash plus a patch outside the published run artifacts,
+    then switch on a clean tree. Never raises: a delivery must not fail because
+    of this.
     """
-    def git(*c): return run("git", *NOHOOKS, *c, cwd=repo, check=False)
+    def git(*c):
+        return subprocess.run(["git", *NOHOOKS, *c], cwd=repo, capture_output=True, text=True)
     try:
-        if not git("status", "--porcelain"):
+        status = git("status", "--porcelain")
+        if status.returncode != 0:
+            log(f"warn: could not read lane status: {(status.stderr or status.stdout).strip()}")
+            return
+        if not status.stdout.strip():
             return
         label = "machinist-deliver-wip-" + time.strftime("%Y%m%d-%H%M%S")
-        git("stash", "push", "--include-untracked", "-m", label)
-        patch = git("stash", "show", "--patch", "--include-untracked", "stash@{0}")
-        out = os.environ.get("MACHINIST_OUTPUT_DIR")
-        if patch and out:
+        stash = git("stash", "push", "--include-untracked", "-m", label)
+        if stash.returncode != 0:
+            # Do not read stash@{0}: a failed push leaves any pre-existing stash
+            # at the top, and labelling its patch with this run's id would claim
+            # we saved WIP we did not.
+            log(f"warn: could not stash lane WIP: {(stash.stderr or stash.stdout).strip()}")
+            return
+        patch = git("stash", "show", "--patch", "--include-untracked", "stash@{0}").stdout.strip()
+        out = wip_scratch_dir()
+        if patch:
             os.makedirs(out, exist_ok=True)
-            with open(os.path.join(out, label + ".patch"), "w") as handle:
+            path = os.path.join(out, label + ".patch")
+            with open(path, "w") as handle:
                 handle.write(patch + "\n")
-        log(f"saved lane WIP to stash {label}" + (f" and {out}/{label}.patch" if patch and out else ""))
-    except (OSError, RuntimeError) as e:
+            log(f"saved lane WIP to stash {label} and {path}")
+        else:
+            log(f"saved lane WIP to stash {label}")
+    except OSError as e:
         log(f"warn: could not save lane WIP: {e}")
 
 def gh_repo(url):
