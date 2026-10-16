@@ -37,7 +37,7 @@ It keeps the upstream control plane, worker model and executors. Everything belo
 
 - Retries inject the previous attempt's transcript into the next coder prompt
 - Job timeouts with failure alerts
-- Lane checkouts are fetched fresh before each run
+- Lane checkouts are fetched fresh before each run; a dirty lane is stashed with a patch instead of failing the job
 
 **Review**
 

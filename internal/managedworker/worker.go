@@ -28,9 +28,17 @@ type Worker struct {
 	stderr         io.Writer
 	heartbeatTicks <-chan time.Time
 	executeRun     func(context.Context, protocol.RunSpec) protocol.Completion
+	// pausedUntil stops this lane claiming more runs after a checkout it could
+	// not clean, so one broken lane cannot drain the whole queue (MACH-59).
+	pausedUntil time.Time
 }
 
 const heartbeatInterval = 10 * time.Second
+
+// lanePauseCooldown is how long a lane stops claiming runs after it fails to
+// save and clean a dirty checkout, giving an operator time to fix the lane
+// instead of failing every queued job behind it.
+const lanePauseCooldown = 5 * time.Minute
 
 func New(workerConfig config.Worker, stdout, stderr io.Writer) (*Worker, error) {
 	if strings.TrimSpace(workerConfig.Name) == "" {
@@ -57,7 +65,15 @@ func New(workerConfig config.Worker, stdout, stderr io.Writer) (*Worker, error) 
 }
 
 func (w *Worker) Run(ctx context.Context) error {
+	// Drop any stale marker left by a previous process so the lane starts idle.
+	w.clearLaneBusy()
 	for {
+		if until := w.pausedUntil; !until.IsZero() && time.Now().Before(until) {
+			if !wait(ctx, time.Second) {
+				return nil
+			}
+			continue
+		}
 		run, err := w.poll(ctx)
 		if err != nil {
 			if !wait(ctx, time.Second) {
@@ -72,8 +88,19 @@ func (w *Worker) Run(ctx context.Context) error {
 			}
 			continue
 		}
+		// Mark the lane busy for the whole run, including the final steps, so
+		// a restart-when-idle never restarts it mid-final-step (MACH-59).
+		w.markLaneBusy(run.ID)
 		completion := w.executeWithHeartbeats(ctx, *run)
-		if err := w.deliverWithHeartbeats(ctx, *run, completion); err != nil {
+		if laneCheckoutUnrecoverable(completion) {
+			// MACH-59: pause this lane instead of claiming the next queued job
+			// and failing it the same way.
+			w.pausedUntil = time.Now().Add(lanePauseCooldown)
+			fmt.Fprintf(w.stderr, "machinist: lane %s paused for %s after an unsavable dirty checkout\n", w.config.Name, lanePauseCooldown)
+		}
+		err = w.deliverWithHeartbeats(ctx, *run, completion)
+		w.clearLaneBusy()
+		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
@@ -84,6 +111,33 @@ func (w *Worker) Run(ctx context.Context) error {
 			}
 			return err
 		}
+	}
+}
+
+// laneLockPath is the lane's in-flight marker. A restart-when-idle script
+// checks it so it never restarts the worker during a job's final steps.
+func (w *Worker) laneLockPath() string {
+	if strings.TrimSpace(w.config.DataDirectory) == "" {
+		return ""
+	}
+	return filepath.Join(w.config.DataDirectory, "lane.lock")
+}
+
+// markLaneBusy records the in-flight run so the lane is not seen as idle.
+func (w *Worker) markLaneBusy(runID string) {
+	path := w.laneLockPath()
+	if path == "" {
+		return
+	}
+	_ = os.MkdirAll(filepath.Dir(path), 0o700)
+	_ = os.WriteFile(path, []byte(runID+"\n"), 0o600)
+}
+
+// clearLaneBusy removes the in-flight marker once the run and its final steps
+// are done, so the lane is idle again.
+func (w *Worker) clearLaneBusy() {
+	if path := w.laneLockPath(); path != "" {
+		_ = os.Remove(path)
 	}
 }
 
@@ -155,6 +209,18 @@ func stopLiveEvents(err error) bool {
 	}
 	return false
 }
+
+// laneCheckoutUnrecoverable reports whether a run failed because the lane
+// checkout was dirty and could not be saved and cleaned (MACH-59). The runner
+// reports this as text in the completion, so the worker pauses that lane
+// rather than claiming the next queued job and failing it the same way.
+func laneCheckoutUnrecoverable(completion protocol.Completion) bool {
+	return strings.Contains(completion.Error, "lane checkout is dirty")
+}
+
+// completionReportTimeout bounds how long a finished run keeps trying to report
+// its completion after shutdown was requested.
+const completionReportTimeout = 2 * time.Minute
 
 // readCompleteLines reads from offset and returns only bytes up to the last
 // complete line, plus the offset to resume from. It returns the original
@@ -282,7 +348,11 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 		}
 	}
 	if spec.Task != nil && result.EventsPath != "" {
-		ids, err := w.publishOutputs(ctx, spec, filepath.Join(filepath.Dir(result.EventsPath), "outputs"))
+		// Publishing the run outputs is part of the job's final steps, so a
+		// shutdown must not abandon it (MACH-59).
+		publishCtx, cancelPublish := context.WithTimeout(context.WithoutCancel(ctx), completionReportTimeout)
+		ids, err := w.publishOutputs(publishCtx, spec, filepath.Join(filepath.Dir(result.EventsPath), "outputs"))
+		cancelPublish()
 		completion.Artifacts = ids
 		if err != nil {
 			completion.PublicationError = err.Error()
@@ -295,6 +365,11 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 }
 
 func (w *Worker) deliver(ctx context.Context, runID string, completion protocol.Completion) error {
+	// The completion report is the run's final step, so a shutdown (e.g. a
+	// restart-when-idle) must not abandon it: detach it from cancellation and
+	// bound how long it may keep retrying (MACH-59).
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), completionReportTimeout)
+	defer cancel()
 	backoff := 250 * time.Millisecond
 	for {
 		err := w.client.Post(ctx, "/api/v1/runs/"+url.PathEscape(runID)+"/complete", completion, nil)

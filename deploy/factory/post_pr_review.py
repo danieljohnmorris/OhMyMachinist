@@ -20,6 +20,7 @@ import shlex
 import shutil
 import sys
 import tempfile
+import time
 from typing import Any
 
 if __package__ in {None, ""}:
@@ -346,6 +347,74 @@ def push_branch(repo: Path, branch: str, timeout: int) -> CommandResult:
     return run_git(repo, ["push", "origin", f"HEAD:refs/heads/{branch}"], timeout)
 
 
+# MACH-59: the review runs in the lane checkout (docs pass, amend rounds). An
+# edit left behind makes the final branch switch fail and then fails every
+# queued job behind it, so before switching we commit the wanted edits or stash
+# them with a labelled stash plus a patch in the run artifacts.
+WIP_STASH_PREFIX = "machinist-review-wip"
+
+
+def review_artifact_dir() -> Path | None:
+    """Run artifacts directory (MACHINIST_OUTPUT_DIR) when the worker set one."""
+    out = os.environ.get("MACHINIST_OUTPUT_DIR")
+    return Path(out) if out else None
+
+
+def current_branch(repo: Path, timeout: int) -> str:
+    result = run_git(repo, ["rev-parse", "--abbrev-ref", "HEAD"], timeout)
+    return result.stdout.strip() if result.ok else ""
+
+
+def save_lane_wip(
+    repo: Path,
+    timeout: int,
+    *,
+    message: str,
+    label: str | None = None,
+    artifact_dir: Path | None = None,
+    prefer_stash: bool = False,
+) -> dict[str, Any]:
+    """Commit wanted edits, else stash them with a labelled stash and patch.
+
+    Returns a report with the committed/stashed paths and, when the work was
+    stashed, the patch written next to the run artifacts. The lane is left
+    clean either way so the branch switch cannot fail on a dirty checkout.
+    ``prefer_stash`` skips the commit for leftovers that may include unrelated
+    build output, so only the docs/fix passes ever push to the PR branch.
+    """
+    report: dict[str, Any] = {"committed": [], "stashed": [], "stash": None, "patch": None, "error": None}
+    paths = changed_paths(repo, timeout)
+    if not paths:
+        return report
+    if not prefer_stash and not any(core.is_secret_path(path) for path in paths):
+        # Wanted edits go back to the PR branch; a commit is the cleanest exit.
+        if commit_allowed(repo, paths, message, timeout):
+            report["committed"] = paths
+            branch = current_branch(repo, timeout)
+            if not branch or not push_branch(repo, branch, timeout).ok:
+                report["error"] = "committed review changes but could not push them"
+            return report
+    name = label or f"{WIP_STASH_PREFIX}-{time.strftime('%Y%m%d-%H%M%S')}"
+    stash = run_git(repo, ["stash", "push", "--include-untracked", "-m", name], timeout)
+    if not stash.ok:
+        report["error"] = f"could not stash review changes: {stash.output}"
+        return report
+    report["stash"] = name
+    report["stashed"] = paths
+    patch = run_git(repo, ["stash", "show", "--patch", "--include-untracked", "stash@{0}"], timeout)
+    if patch.ok and patch.stdout:
+        target = artifact_dir or review_artifact_dir()
+        if target is not None:
+            try:
+                target.mkdir(parents=True, exist_ok=True)
+                patch_path = target / f"{name}.patch"
+                patch_path.write_text(patch.stdout, encoding="utf-8")
+                report["patch"] = str(patch_path)
+            except OSError as error:
+                report["error"] = f"could not write review WIP patch: {error}"
+    return report
+
+
 def rerun_new_failures(
     repo: Path,
     checks: list[profile_mod.ReviewCheck],
@@ -514,17 +583,23 @@ def run_docs(
         return docs, []
     docs["ran"] = True
     after = set(changed_paths(repo, timeout))
-    allowed = set(files) or {"README.md", "CLAUDE.md", "AGENTS.md"}
-    docs_changed = sorted((after - before) & allowed)
+    # MACH-59: every file the docs pass touched is a wanted edit, not just the
+    # configured files list (the incident edit was deploy/factory/README.md).
+    docs_changed = sorted(after - before)
     docs["changed"] = docs_changed
     stale_line = next((line for line in result.stdout.splitlines() if line.startswith("PR_DESCRIPTION_STALE:")), "")
     docs["pr_description_stale"] = "yes" in stale_line.lower()
     if docs_changed and not dry_run:
-        branch = metadata["headRefName"]
-        if not commit_allowed(repo, docs_changed, "Update docs from PR review", timeout):
-            docs["error"] = "could not commit documentation changes"
-        elif not push_branch(repo, branch, timeout).ok:
-            docs["error"] = "could not push documentation changes"
+        saved = save_lane_wip(
+            repo,
+            timeout,
+            message="Update docs from PR review",
+            label=f"{WIP_STASH_PREFIX}-docs-{time.strftime('%Y%m%d-%H%M%S')}",
+            artifact_dir=review_artifact_dir(),
+        )
+        docs["saved"] = {key: saved[key] for key in ("committed", "stashed", "stash", "patch")}
+        if saved["error"]:
+            docs["error"] = saved["error"]
     suggested = parse_suggested_body(result.stdout)
     if docs.get("pr_description_stale") and suggested and docs_config.get("update_pr_description", True):
         docs["suggested_pr_body"] = suggested
@@ -952,6 +1027,19 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
             )
         return EXIT_CODES[status], summary
     finally:
+        # MACH-59: never leave the lane dirty before switching back. The docs
+        # pass and amend rounds run here; anything they left behind is
+        # committed or stashed so the switch (and the next queued job) works.
+        if not options.dry_run:
+            wip = save_lane_wip(
+                options.repo,
+                options.timeout,
+                message="Save review work in progress",
+                artifact_dir=review_artifact_dir(),
+                prefer_stash=True,
+            )
+            if wip.get("error"):
+                print(f"post-pr review warning: {wip['error']}", file=sys.stderr)
         restore_branch(options.repo, starting_branch, options.timeout)
 
 

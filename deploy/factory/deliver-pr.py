@@ -10,7 +10,7 @@ origin is OUR fork (push target) and <remote> is the third-party upstream (never
   machinist.upstreamPr=manual (default): push branch to fork, open a REVIEW PR inside the fork
      (fork main synced to upstream main first); log upstream compare URL. Upstream is not touched.
   machinist.upstreamPr=draft: also open a DRAFT PR fork:branch -> upstream (only after Daniel opts in)."""
-import argparse, fnmatch, json, os, re, subprocess, sys
+import argparse, fnmatch, json, os, re, subprocess, sys, time
 
 ALLOWED_OWNERS = {"danieljohnmorris", "omacom"}          # owners we may PUSH to
 UPSTREAM_PR_OWNERS = {"MiaAI-Lab"}                     # third-party: PR target only, never pushed
@@ -187,6 +187,30 @@ def slug(s, n=40):
     s = re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")
     return s[:n].strip("-") or "change"
 
+def save_wip(repo):
+    """Stash a dirty lane so the final branch switch cannot fail (MACH-59).
+
+    The built-in review runs in this checkout; if it leaves edits behind the
+    switch at the end of delivery would fail and strand the job. Stash them
+    with a labelled stash plus a patch next to the run artifacts, then switch
+    on a clean tree. Never raises: a delivery must not fail because of this.
+    """
+    def git(*c): return run("git", *NOHOOKS, *c, cwd=repo, check=False)
+    try:
+        if not git("status", "--porcelain"):
+            return
+        label = "machinist-deliver-wip-" + time.strftime("%Y%m%d-%H%M%S")
+        git("stash", "push", "--include-untracked", "-m", label)
+        patch = git("stash", "show", "--patch", "--include-untracked", "stash@{0}")
+        out = os.environ.get("MACHINIST_OUTPUT_DIR")
+        if patch and out:
+            os.makedirs(out, exist_ok=True)
+            with open(os.path.join(out, label + ".patch"), "w") as handle:
+                handle.write(patch + "\n")
+        log(f"saved lane WIP to stash {label}" + (f" and {out}/{label}.patch" if patch and out else ""))
+    except (OSError, RuntimeError) as e:
+        log(f"warn: could not save lane WIP: {e}")
+
 def gh_repo(url):
     m = re.search(r"github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?$", url)
     if not m: raise RuntimeError(f"not a GitHub repo: {url}")
@@ -282,6 +306,7 @@ def main():
             result["review_status"] = review_status(out)
             json.dump(result, open(os.path.join(out, "pr.json"), "w"))
         if a.start_branch and a.start_branch != "HEAD":
+            save_wip(repo)
             g("switch", "-q", a.start_branch)
         return rc
 

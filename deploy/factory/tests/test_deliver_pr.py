@@ -2,8 +2,12 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
+import subprocess
+import tempfile
 import unittest
+from unittest import mock
 
 _SPEC = Path(__file__).resolve().parents[1] / "deliver-pr.py"
 _spec = importlib.util.spec_from_file_location("deliver_pr", _SPEC)
@@ -110,6 +114,50 @@ class SecretLikeTests(unittest.TestCase):
         bad = deliver.secret_like([".env", ".env.local"])
         msg = f"refusing to commit: {'secret-like files ' + str(bad) if bad else 'too many'}; left on branch some-branch"
         self.assertEqual(msg, "refusing to commit: secret-like files ['.env', '.env.local']; left on branch some-branch")
+
+
+def _git(repo: Path, *args: str) -> str:
+    result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise AssertionError(f"git {args}: {result.stderr or result.stdout}")
+    return result.stdout.strip()
+
+
+def _dirty_repo(root: Path) -> Path:
+    repo = root / "repo"
+    repo.mkdir()
+    _git(repo, "init", "--quiet")
+    _git(repo, "config", "user.name", "test")
+    _git(repo, "config", "user.email", "test@example.com")
+    (repo / "README.md").write_text("seed\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-m", "seed", "--quiet")
+    (repo / "README.md").write_text("edited by the review\n", encoding="utf-8")
+    return repo
+
+
+class LaneWipTests(unittest.TestCase):
+    """MACH-59: deliver-pr switches back to the start branch at the end; a
+    review edit left in the lane must be stashed (with a patch) first."""
+
+    def test_save_wip_stashes_a_dirty_lane_and_writes_a_patch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = _dirty_repo(root)
+            artifacts = root / "artifacts"
+            with mock.patch.dict(os.environ, {"MACHINIST_OUTPUT_DIR": str(artifacts)}):
+                deliver.save_wip(str(repo))
+            self.assertEqual(_git(repo, "status", "--porcelain"), "")
+            self.assertEqual(len(list(artifacts.glob("*.patch"))), 1)
+
+    def test_save_wip_is_a_noop_on_a_clean_lane(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = _dirty_repo(root)
+            _git(repo, "checkout", "--", "README.md")
+            with mock.patch.dict(os.environ, {"MACHINIST_OUTPUT_DIR": str(root / "artifacts")}):
+                deliver.save_wip(str(repo))
+            self.assertEqual(_git(repo, "stash", "list"), "")
 
 
 if __name__ == "__main__":

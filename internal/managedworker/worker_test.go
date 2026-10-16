@@ -500,6 +500,203 @@ func TestManagedWorkerStopsHeartbeatLoopWhenTerminated(t *testing.T) {
 	ticks <- time.Time{}
 }
 
+func TestManagedWorkerPausesLaneAfterUnsavableDirtyCheckout(t *testing.T) {
+	directory := t.TempDir()
+	definitionPath := filepath.Join(directory, "config.toml")
+	if err := os.WriteFile(definitionPath, []byte("[commands.plan]\nexecutor=\"test\"\nprompt_file=\"plan.md\"\ntimeout=\"5s\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "plan.md"), []byte("{{machinist.prompt}}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := controlplane.OpenStore(filepath.Join(directory, "machinist.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	command := config.ResolvedCommand{Name: "plan", Executor: "test", Command: []string{"/bin/sh", "-c", "true"}, Timeout: time.Second, Definition: "test", Hash: "hash"}
+	for _, prompt := range []string{"first", "second"} {
+		if _, err := store.CreateJob(t.Context(), prompt, "repo", "plan", command); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server, err := controlplane.NewServer(store, definitionPath, "secret", 0, config.AuthTokens)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	tokenPath := filepath.Join(directory, "token")
+	if err := os.WriteFile(tokenPath, []byte("secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	worker, err := New(config.Worker{
+		Name:          "lane-1",
+		DataDirectory: filepath.Join(directory, "worker-data"),
+		ControlPlane:  config.ControlPlane{URL: httpServer.URL, TokenFile: tokenPath},
+		Executors:     map[string]config.Executor{"test": {Command: []string{"/bin/sh", "-c", "true"}}},
+		Repositories:  map[string]config.Repository{"repo": {Path: directory}},
+	}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker.executeRun = func(_ context.Context, spec protocol.RunSpec) protocol.Completion {
+		return protocol.Completion{InstanceID: worker.instanceID, LeaseToken: spec.LeaseToken, State: "failed", ExitCode: 1,
+			Error: "lane checkout is dirty and could not be saved: boom"}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- worker.Run(ctx) }()
+
+	countRuns := func() (failed, queued int) {
+		snapshot, err := store.Snapshot(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, job := range snapshot.Jobs {
+			for _, run := range job.Runs {
+				switch run.State {
+				case "failed":
+					failed++
+				case "queued":
+					queued++
+				}
+			}
+		}
+		return failed, queued
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if failed, _ := countRuns(); failed == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the first run did not fail")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	// MACH-59: the lane pauses on an unsavable dirty checkout instead of
+	// claiming and failing the next queued job.
+	time.Sleep(1500 * time.Millisecond)
+	failed, queued := countRuns()
+	if failed != 1 || queued != 1 {
+		t.Fatalf("lane drained the queue: failed=%d queued=%d", failed, queued)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWorkerLaneLockTracksTheFinalSteps(t *testing.T) {
+	directory := t.TempDir()
+	definitionPath := filepath.Join(directory, "config.toml")
+	if err := os.WriteFile(definitionPath, []byte("[commands.plan]\nexecutor=\"test\"\nprompt_file=\"plan.md\"\ntimeout=\"5s\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "plan.md"), []byte("{{machinist.prompt}}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := controlplane.OpenStore(filepath.Join(directory, "machinist.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	command := config.ResolvedCommand{Name: "plan", Executor: "test", Command: []string{"/bin/sh", "-c", "true"}, Timeout: time.Second, Definition: "test", Hash: "hash"}
+	if _, err := store.CreateJob(t.Context(), "one", "repo", "plan", command); err != nil {
+		t.Fatal(err)
+	}
+	server, err := controlplane.NewServer(store, definitionPath, "secret", 0, config.AuthTokens)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	tokenPath := filepath.Join(directory, "token")
+	if err := os.WriteFile(tokenPath, []byte("secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dataDirectory := filepath.Join(directory, "worker-data")
+	worker, err := New(config.Worker{
+		Name:          "lane-1",
+		DataDirectory: dataDirectory,
+		ControlPlane:  config.ControlPlane{URL: httpServer.URL, TokenFile: tokenPath},
+		Executors:     map[string]config.Executor{"test": {Command: []string{"/bin/sh", "-c", "true"}}},
+		Repositories:  map[string]config.Repository{"repo": {Path: directory}},
+	}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockPath := filepath.Join(dataDirectory, "lane.lock")
+	seenBusy := make(chan bool, 1)
+	worker.executeRun = func(_ context.Context, spec protocol.RunSpec) protocol.Completion {
+		_, statErr := os.Stat(lockPath)
+		seenBusy <- statErr == nil
+		return protocol.Completion{InstanceID: worker.instanceID, LeaseToken: spec.LeaseToken, State: "succeeded"}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- worker.Run(ctx) }()
+
+	select {
+	case busy := <-seenBusy:
+		if !busy {
+			t.Fatal("lane lock missing while the run executes")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not start")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		snapshot, err := store.Snapshot(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snapshot.Jobs) == 1 && snapshot.Jobs[0].State == "succeeded" {
+			if _, statErr := os.Stat(lockPath); !os.IsNotExist(statErr) {
+				t.Fatalf("lane lock not cleared after the final steps: %v", statErr)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("run did not complete")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCompletionReportSurvivesShutdown(t *testing.T) {
+	// MACH-59: the completion report is the run's final step, so a
+	// restart-when-idle must not abandon it. deliver() detaches from ctx.
+	received := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/complete") {
+			select {
+			case received <- struct{}{}:
+			default:
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	worker := &Worker{client: newClient(server.URL, "secret", server.Client()), stderr: io.Discard, instanceID: "worker"}
+	if err := worker.deliver(ctx, "run_0123456789abcdef01234567", protocol.Completion{InstanceID: "worker", LeaseToken: "lease", State: "succeeded"}); err != nil {
+		t.Fatalf("deliver after shutdown: %v", err)
+	}
+	select {
+	case <-received:
+	case <-time.After(2 * time.Second):
+		t.Fatal("completion was not reported after shutdown")
+	}
+}
+
 func TestWorkflowStopsProcessAfterLeaseRejection(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusConflict) }))
 	defer server.Close()
