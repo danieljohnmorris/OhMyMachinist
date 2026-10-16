@@ -63,3 +63,21 @@ timeout = "120m"
 # glm = "https://api.example-glm-host/v1/models"
 # sparks = "https://sparks.internal/healthz"
 # pipsqueek = "https://pipsqueek.internal/healthz"
+
+# Per-project auto-merge + deploy policy (MACH-24). Seeds ship with MACH
+# (OhMyMachinist: rebuild + restart the control plane) and SPARK (sparkDash on
+# spark2) on; every other project is off until configured. An entry replaces
+# the seed for that project; the Settings UI writes the same shapes into the
+# "plane.merge_policies" / "plane.merge_policy.<PROJECT>" settings, which are
+# layered on top of this file.
+# [plane.merge_policies.MYPROJECT]
+# auto_merge = true
+# merge_method = "squash"          # squash (default) | merge | rebase
+# deploy_command = "./deploy.sh"
+# rollback_command = "./rollback.sh"
+# deploy_timeout = "15m"
+# [plane.merge_policies.MYPROJECT.health_check]
+# command = "curl -fsS http://127.0.0.1:8080/healthz"   # or url = …
+# url = "http://10.0.0.5:5555/"
+# status = 200                     # URL checks; default 200
+# expect = "healthy"               # substring; {sha} becomes the merge SHA

@@ -147,6 +147,19 @@ export function TaskDetail({
                       job.metadata.healing.exhausted ? "Retry budget exhausted." : ""
                     }`.trim(),
                 ],
+                [
+                  "Auto-merge",
+                  job.metadata?.automerge &&
+                    [
+                      `#${job.metadata.automerge.pr_number || ""} ${job.metadata.automerge.state}`.trim(),
+                      job.metadata.automerge.merge_sha && `merged ${job.metadata.automerge.merge_sha}`,
+                      job.metadata.automerge.deploy_result && `deploy: ${job.metadata.automerge.deploy_result}`,
+                      job.metadata.automerge.health_result && `health: ${job.metadata.automerge.health_result}`,
+                      job.metadata.automerge.reason,
+                    ]
+                      .filter(Boolean)
+                      .join(" · "),
+                ],
                 ["Status", stateLabel(job.state)],
                 ["Created", formatTimestamp(job.created_at)],
                 ["Updated", formatTimestamp(job.updated_at)],

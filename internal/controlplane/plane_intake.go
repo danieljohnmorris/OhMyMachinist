@@ -59,6 +59,17 @@ type planeConfig struct {
 	// ProjectPrompts overrides the prompt template per Machinist repository,
 	// from the "plane.prompt_template.<repository>" settings.
 	ProjectPrompts map[string]string
+	// MergePolicies is the per-project auto-merge + deploy policy (MACH-24):
+	// seed defaults layered with [plane.merge_policies] and the
+	// "plane.merge_policy.<PROJECT>" / "plane.merge_policies" settings.
+	MergePolicies map[string]config.MergePolicy
+}
+
+// PolicyFor returns the merge policy for a ticket key's project identifier.
+func (c planeConfig) PolicyFor(key string) (config.MergePolicy, bool) {
+	identifier := strings.ToUpper(strings.SplitN(key, "-", 2)[0])
+	policy, ok := c.MergePolicies[identifier]
+	return policy, ok
 }
 
 // promptTemplateFor returns the prompt template for a repository, preferring a
@@ -83,7 +94,17 @@ type PlaneIntake struct {
 	client          *plane.Client
 	clientKey       string
 	commandResolver commandResolver
-	logf            func(string, ...any)
+	// autoMergeQueue is installed by the control plane: factory PRs for
+	// auto-merge projects are queued for merge + deploy (MACH-24).
+	autoMergeQueue func(context.Context, PlaneSyncCandidate, string) error
+	// testPolicies, when non-nil, pins the resolved merge policies in tests.
+	testPolicies map[string]config.MergePolicy
+	logf         func(string, ...any)
+}
+
+// SetAutoMergeQueue installs the auto-merge enqueue hook.
+func (p *PlaneIntake) SetAutoMergeQueue(hook func(context.Context, PlaneSyncCandidate, string) error) {
+	p.autoMergeQueue = hook
 }
 
 // NewPlaneIntake builds an intake driver for a control-plane store.
@@ -187,6 +208,18 @@ func (p *PlaneIntake) config(ctx context.Context) (planeConfig, error) {
 			resolved.ProjectPrompts[repository] = value
 		}
 	}
+	configured, err := config.MergePoliciesFromSettings(setting(settings, "plane.merge_policies"), settings)
+	if err != nil {
+		return planeConfig{}, err
+	}
+	for project, policy := range base.MergePolicies {
+		configured[project] = policy
+	}
+	if p.testPolicies != nil {
+		resolved.MergePolicies = p.testPolicies
+		return resolved, nil
+	}
+	resolved.MergePolicies = config.ResolveMergePolicies(configured)
 	return resolved, nil
 }
 
@@ -646,6 +679,11 @@ func (p *PlaneIntake) Sync(ctx context.Context) error {
 				p.recordShadow(ctx, "pr-notify", candidate.IssueKey, map[string]any{"job_id": candidate.JobID, "pr": pr})
 			} else {
 				p.notifyPROpened(ctx, cfg, candidate, pr)
+				if p.autoMergeQueue != nil {
+					if err := p.autoMergeQueue(ctx, candidate, pr); err != nil {
+						p.logf("plane intake: queue auto-merge %s: %v", candidate.IssueKey, err)
+					}
+				}
 			}
 			record.Notified = "queued"
 		}

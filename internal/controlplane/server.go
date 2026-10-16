@@ -60,6 +60,8 @@ type Server struct {
 	health               config.Health
 	healthChecker        *healthChecker
 	healingEvery         time.Duration
+	autoMergeEvery       time.Duration
+	deployRunner         shellRunner
 	planeIntake          *PlaneIntake
 	planePollEvery       time.Duration
 	planeSyncEvery       time.Duration
@@ -189,6 +191,8 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 		health:            definition.Health,
 		healthChecker:     &healthChecker{alerts: &failAlertWriter{directory: alertsDirectory}, timeout: 10 * time.Second, now: time.Now},
 		healingEvery:      30 * time.Second,
+		autoMergeEvery:    defaultAutoMergeEvery,
+		deployRunner:      bashRunner{},
 		maxConcurrentJobs: maxConcurrentJobs, workerToken: workerToken, csrfToken: csrfToken,
 		authMode:             authMode,
 		reviewDefaultProfile: definition.Review.DefaultProfile,
@@ -207,6 +211,7 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 	if err := planeIntake.ImportState(context.Background()); err != nil {
 		return nil, fmt.Errorf("import plane intake state: %w", err)
 	}
+	planeIntake.SetAutoMergeQueue(server.queueAutoMerge)
 	server.planeIntake = planeIntake
 	if resolved, err := planeIntake.config(context.Background()); err == nil {
 		server.planePollEvery = resolved.PollEvery
@@ -328,6 +333,7 @@ func (s *Server) runScheduler(ctx context.Context) error {
 	if s.planeIntake != nil {
 		loop(s.planePollEvery, true, s.planePoll)
 		loop(s.planeSyncEvery, true, s.planeSync)
+		loop(s.autoMergeEvery, true, s.autoMergePass)
 	}
 	<-ctx.Done()
 	schedulers.Wait()

@@ -159,6 +159,18 @@ func (c *constantGitHubCLI) MergedPullRequests(context.Context, string, int) ([]
 	return c.pullRequests, c.err
 }
 
+func (c *constantGitHubCLI) PullRequestStatus(context.Context, string, int) (PullRequestStatus, error) {
+	return PullRequestStatus{}, nil
+}
+
+func (c *constantGitHubCLI) UpdatePullRequestBranch(context.Context, string, int) error {
+	return nil
+}
+
+func (c *constantGitHubCLI) MergePullRequest(context.Context, string, int, string) (string, error) {
+	return "", nil
+}
+
 func TestTicketKeyExtraction(t *testing.T) {
 	cases := []struct {
 		name string

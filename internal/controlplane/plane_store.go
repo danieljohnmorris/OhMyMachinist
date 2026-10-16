@@ -262,6 +262,9 @@ func (s *Store) ImportPlaneState(ctx context.Context, machinistHome string) (boo
 	} else if fileExists(filepath.Join(machinistHome, "plane-repos.json")) {
 		imported = true
 	}
+	if err := s.importPlanePolicies(ctx, filepath.Join(machinistHome, "plane-repos.json")); err != nil {
+		return imported, err
+	}
 	if err := s.importPlaneMapSetting(ctx, filepath.Join(machinistHome, "plane-supervisors.json"), "plane.supervisors"); err != nil {
 		return imported, err
 	} else if fileExists(filepath.Join(machinistHome, "plane-supervisors.json")) {
@@ -360,6 +363,33 @@ func (s *Store) ImportPlaneState(ctx context.Context, machinistHome string) (boo
 // importPlaneMapSetting stores a legacy JSON map under one or two setting keys.
 // keys may be given as "setting" (whole object) or "setting@field" for one
 // sub-object such as _identifiers.
+// importPlanePolicies imports the optional "_merge_policies" object of
+// plane-repos.json (MACH-24) into the "plane.merge_policies" setting, once:
+// the per-project keys map Plane project identifiers to MergePolicy objects.
+func (s *Store) importPlanePolicies(ctx context.Context, path string) error {
+	body, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	var object struct {
+		MergePolicies map[string]any `json:"_merge_policies"`
+	}
+	if err := json.Unmarshal(body, &object); err != nil || len(object.MergePolicies) == 0 {
+		return nil
+	}
+	if _, empty := s.settingIfEmpty(ctx, "plane.merge_policies"); !empty {
+		return nil
+	}
+	encoded, err := json.Marshal(object.MergePolicies)
+	if err != nil {
+		return err
+	}
+	return s.PutSetting(ctx, "plane.merge_policies", string(encoded))
+}
+
 func (s *Store) importPlaneMapSetting(ctx context.Context, path string, settings ...string) error {
 	body, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {

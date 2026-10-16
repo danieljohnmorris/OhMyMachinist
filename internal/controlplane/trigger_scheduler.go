@@ -23,6 +23,9 @@ type githubTriggerClient interface {
 	Permission(context.Context, string, string) (string, error)
 	AcknowledgeRequest(context.Context, string, int, string, string, bool) error
 	MergedPullRequests(context.Context, string, int) ([]GitHubPullRequest, error)
+	PullRequestStatus(context.Context, string, int) (PullRequestStatus, error)
+	UpdatePullRequestBranch(context.Context, string, int) error
+	MergePullRequest(context.Context, string, int, string) (string, error)
 }
 
 func (s *Server) processManagedTrigger(ctx context.Context, trigger config.ResolvedTrigger) error {

@@ -27,18 +27,19 @@ type JobScreenshot struct {
 }
 
 type JobMetadata struct {
-	Project          string          `json:"project,omitempty"`
-	IssueURL         string          `json:"issue_url,omitempty"`
-	Branch           string          `json:"branch,omitempty"`
-	PRURL            string          `json:"pr_url,omitempty"`
-	PreviewURL       string          `json:"preview_url,omitempty"`
-	ReviewVerdict    string          `json:"review_verdict,omitempty"`
-	ReviewSummary    string          `json:"review_summary,omitempty"`
-	IntakeSource     string          `json:"intake_source,omitempty"`
-	IntakeDeliveryID string          `json:"intake_delivery_id,omitempty"`
-	IntakeSpecHash   string          `json:"intake_spec_hash,omitempty"`
-	Healing          *healingRecord  `json:"healing,omitempty"`
-	Screenshots      []JobScreenshot `json:"screenshots,omitempty"`
+	Project          string           `json:"project,omitempty"`
+	IssueURL         string           `json:"issue_url,omitempty"`
+	Branch           string           `json:"branch,omitempty"`
+	PRURL            string           `json:"pr_url,omitempty"`
+	PreviewURL       string           `json:"preview_url,omitempty"`
+	ReviewVerdict    string           `json:"review_verdict,omitempty"`
+	ReviewSummary    string           `json:"review_summary,omitempty"`
+	IntakeSource     string           `json:"intake_source,omitempty"`
+	IntakeDeliveryID string           `json:"intake_delivery_id,omitempty"`
+	IntakeSpecHash   string           `json:"intake_spec_hash,omitempty"`
+	Healing          *healingRecord   `json:"healing,omitempty"`
+	Automerge        *AutoMergeRecord `json:"automerge,omitempty"`
+	Screenshots      []JobScreenshot  `json:"screenshots,omitempty"`
 }
 
 var ErrJobMetadataInvalid = errors.New("invalid job metadata")
@@ -97,7 +98,7 @@ func NormalizeJobMetadata(raw map[string]any) (*JobMetadata, error) {
 	if metadata.IssueURL == "" && metadata.Branch == "" && metadata.PRURL == "" && metadata.PreviewURL == "" &&
 		metadata.ReviewVerdict == "" && metadata.ReviewSummary == "" && len(metadata.Screenshots) == 0 &&
 		metadata.IntakeSource == "" && metadata.IntakeDeliveryID == "" && metadata.IntakeSpecHash == "" &&
-		metadata.Healing == nil {
+		metadata.Healing == nil && metadata.Automerge == nil {
 		if metadata.Project == "" {
 			return nil, nil
 		}
