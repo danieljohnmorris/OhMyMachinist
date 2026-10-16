@@ -75,6 +75,10 @@ reviewers:
     skills: ["pr-review-toolkit:pr-test-analyzer"]
     parallel: true
     read_only: true
+  - name: secret-scan
+    skills: [trufflehog]
+    parallel: true
+    read_only: true
   - name: ts-review
     lanes: [typescript]
     skills: [typescript-code-review, typescript-jsdoc]
@@ -88,7 +92,7 @@ reviewers:
     read_only: true
     optional: true
 routing:
-  fallback: [code-reviewer, silent-failure-hunter, test-analyzer]
+  fallback: [code-reviewer, silent-failure-hunter, test-analyzer, secret-scan]
 reconcile:
   dedupe: true
   verify_against_code: true

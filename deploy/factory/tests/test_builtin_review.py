@@ -211,7 +211,10 @@ class EndToEndAmendLoopTests(unittest.TestCase):
         # ruff would be "blocked" with the tool missing; provide a passing
         # stub so the check runs and passes.
         (bin_dir / "ruff").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        for name in ("git", "gh", "review-executor", "ruff"):
+        # The built-in secret scan needs trufflehog on PATH; the stub reports
+        # no credentials so it neither blocks nor marks the review incomplete.
+        (bin_dir / "trufflehog").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        for name in ("git", "gh", "review-executor", "ruff", "trufflehog"):
             os.chmod(bin_dir / name, 0o755)
         return bin_dir, repo
 
@@ -229,6 +232,10 @@ class EndToEndAmendLoopTests(unittest.TestCase):
                 "EXEC_LOG": str(exec_count),
             }
         )
+        # Resolve the shipped default profile, not a control plane that may be
+        # running on the host (which would serve its own embedded copy).
+        env.pop("MACHINIST_CONTROL_PLANE_URL", None)
+        env.pop("MACHINIST_CONTROL_PLANE_TOKEN", None)
         with mock.patch.dict(os.environ, env, clear=True):
             code = post.main(
                 [
@@ -259,8 +266,8 @@ class EndToEndAmendLoopTests(unittest.TestCase):
             summary = self._run(root, bin_dir, ["--amend-rounds", "3"])
             self.assertEqual(summary["exit_code"], 0)
             self.assertEqual(summary["status"], "PASS")
-            # 3 reviewer passes + 1 amend + 3 re-review passes + 1 docs pass.
-            self.assertEqual(summary["executor_calls"], 8)
+            # 4 reviewer passes + 1 amend + 4 re-review passes + 1 docs pass.
+            self.assertEqual(summary["executor_calls"], 10)
             self.assertEqual(summary["amend_rounds"], {"used": 1, "limit": 3})
             self.assertNotIn("push", summary["git_log"])
 
@@ -272,8 +279,8 @@ class EndToEndAmendLoopTests(unittest.TestCase):
             self.assertEqual(summary["exit_code"], 2)
             self.assertEqual(summary["status"], "BLOCKED")
             self.assertTrue(summary["blocking"])
-            # 3 reviewer passes + 1 docs pass; no amend.
-            self.assertEqual(summary["executor_calls"], 4)
+            # 4 reviewer passes + 1 docs pass; no amend.
+            self.assertEqual(summary["executor_calls"], 5)
             self.assertEqual(summary["amend_rounds"], {"used": 0, "limit": 0})
 
 

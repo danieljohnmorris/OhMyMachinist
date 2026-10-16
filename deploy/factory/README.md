@@ -19,6 +19,11 @@ runs as a plain script, with the skills available to the machinist user):
     sudo -u machinist deploy/factory/install-review-skills.sh
     sudo install -m755 deploy/factory/omp-glm deploy/factory/omp-glm-pr /usr/local/lib/machinist-factory/
 
+`install-review-skills.sh` also installs the pinned, checksum-verified TruffleHog
+binary the review uses for its secret scan (`MACHINIST_TOOL_DIR` overrides the
+destination; default `/usr/local/bin` when writable, else `~/.local/bin`). If
+`trufflehog` is already on `PATH` the installer leaves it alone.
+
 ## omp executors (omp-glm, omp-glm-pr)
 
 `omp-glm` is the sandboxed omp executor (`omp-glm <low|medium>`, prompt on
@@ -62,6 +67,14 @@ reviewers rerun. Each amend round counts against the retry budget:
 `--amend-rounds`, default `MACHINIST_REVIEW_AMEND_ROUNDS`, default 3. A PR still
 blocking after the budget is exhausted exits `2` (BLOCKED) and `deliver-pr.py`
 propagates it, so the run is not eligible for auto-merge.
+
+The review also runs `trufflehog git` over the pull request range
+(`--since-commit=<base> --branch=<head>`) as a built-in secret scan. A verified
+live credential (`--results=verified`) is a blocking finding that fails
+`machinist/review` and prevents auto-merge; unverified/unknown detections are
+listed in the review comment but do not block. Secret values are never echoed,
+only TruffleHog's redacted form. A missing `trufflehog` binary or a failed scan
+makes the review INCOMPLETE (it never silently passes).
 
 Per-project review configuration lives in the control plane
 (`project_review_settings` table) and is edited per project in Settings as a

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -162,15 +164,19 @@ class EndToEndDryRunTests(unittest.TestCase):
             )
             (bin_dir / "review-executor").write_text("#!/bin/sh\ncat >/dev/null\nprintf 'NO FINDINGS\\n'\n", encoding="utf-8")
             (bin_dir / "ruff").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (bin_dir / "trufflehog").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             os.chmod(bin_dir / "gh", 0o755)
             os.chmod(bin_dir / "git", 0o755)
             os.chmod(bin_dir / "review-executor", 0o755)
             os.chmod(bin_dir / "ruff", 0o755)
+            os.chmod(bin_dir / "trufflehog", 0o755)
             gh_log = root / "gh.log"
             git_log = root / "git.log"
             json_out = root / "summary.json"
             env = os.environ.copy()
             env.update({"PATH": f"{bin_dir}:{env['PATH']}", "TEMP_GH_LOG": str(gh_log), "TEMP_GIT_LOG": str(git_log)})
+            env.pop("MACHINIST_CONTROL_PLANE_URL", None)
+            env.pop("MACHINIST_CONTROL_PLANE_TOKEN", None)
             with mock.patch.dict(os.environ, env, clear=True):
                 code = post.main(
                     [
@@ -195,6 +201,251 @@ class EndToEndDryRunTests(unittest.TestCase):
             git_calls = git_log.read_text(encoding="utf-8") if git_log.exists() else ""
             self.assertNotIn("push", git_calls)
             self.assertNotIn("commit", git_calls)
+
+
+_FIXTURE = Path(__file__).parent / "fixtures" / "trufflehog.jsonl"
+
+
+def _fake_trufflehog(root: Path) -> Path:
+    """A trufflehog stub that emits the verified fixture line for the blocking
+    scan and the unverified line for the reporting scan."""
+    bin_dir = root / "bin"
+    bin_dir.mkdir()
+    script = bin_dir / "trufflehog"
+    script.write_text(
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        '  *"--results=verified"*) sed -n \'1p\' "$TH_FIXTURE" ;;\n'
+        '  *"--results=unverified,unknown"*) sed -n \'2p\' "$TH_FIXTURE" ;;\n'
+        "esac\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    os.chmod(script, 0o755)
+    return bin_dir
+
+
+def _payloads() -> list[dict]:
+    return core.parse_trufflehog_output(_FIXTURE.read_text(encoding="utf-8"))
+
+
+class SecretScanTests(unittest.TestCase):
+    """MACH-41: the built-in review runs trufflehog over the PR range. Verified
+    credentials block; unverified findings are reported but never block, and
+    the raw secret is never published."""
+
+    def test_scan_splits_verified_from_unverified(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bin_dir = _fake_trufflehog(root)
+            env = os.environ.copy()
+            env.update({"PATH": f"{bin_dir}:{env['PATH']}", "TH_FIXTURE": str(_FIXTURE)})
+            with mock.patch.dict(os.environ, env, clear=True):
+                scan = post.run_secret_scan(root, "base", "feature", 5)
+        self.assertTrue(scan["ran"])
+        self.assertIsNone(scan["error"])
+        self.assertEqual([finding["location"] for finding in scan["verified"]], ["src/config.py:12"])
+        self.assertEqual([finding["location"] for finding in scan["unverified"]], ["docs/example.md:3"])
+        self.assertTrue(scan["verified"][0]["blocking"])
+        self.assertFalse(scan["unverified"][0]["blocking"])
+
+    def test_failed_reporting_scan_reports_an_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            script = bin_dir / "trufflehog"
+            script.write_text(
+                "#!/bin/sh\n"
+                'case "$*" in\n'
+                '  *"--results=verified"*) sed -n \'1p\' "$TH_FIXTURE" ;;\n'
+                '  *"--results=unverified,unknown"*) exit 3 ;;\n'
+                "esac\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            os.chmod(script, 0o755)
+            env = os.environ.copy()
+            env.update({"PATH": f"{bin_dir}:{env['PATH']}", "TH_FIXTURE": str(_FIXTURE)})
+            with mock.patch.dict(os.environ, env, clear=True):
+                scan = post.run_secret_scan(root, "base", "feature", 5)
+        self.assertFalse(scan["ran"])
+        self.assertTrue(scan["error"])
+        # The verified pass still reported its blocking credential.
+        self.assertEqual([finding["location"] for finding in scan["verified"]], ["src/config.py:12"])
+        body = post.render_comment(
+            "BLOCKED", [], [], {"ran": True, "changed": []}, _resolved_profile(), [], "headsha", [], scan
+        )
+        self.assertIn("1 verified credential(s) — blocking", body)
+        self.assertIn(f"- not run: {scan['error']}", body)
+
+    def test_unparseable_reporting_scan_reports_an_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            script = bin_dir / "trufflehog"
+            script.write_text(
+                "#!/bin/sh\n"
+                'case "$*" in\n'
+                '  *"--results=verified"*) sed -n \'1p\' "$TH_FIXTURE" ;;\n'
+                '  *"--results=unverified,unknown"*) printf \'{"SourceID":1}\\n\' ;;\n'
+                "esac\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            os.chmod(script, 0o755)
+            env = os.environ.copy()
+            env.update({"PATH": f"{bin_dir}:{env['PATH']}", "TH_FIXTURE": str(_FIXTURE)})
+            with mock.patch.dict(os.environ, env, clear=True):
+                scan = post.run_secret_scan(root, "base", "feature", 5)
+        self.assertFalse(scan["ran"])
+        self.assertIn("result missing detector metadata", scan["error"])
+        self.assertEqual([finding["location"] for finding in scan["verified"]], ["src/config.py:12"])
+
+    def test_missing_binary_reports_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            env = os.environ.copy()
+            env["PATH"] = temp
+            with mock.patch.dict(os.environ, env, clear=True):
+                scan = post.run_secret_scan(Path(temp), "base", "feature", 5)
+        self.assertFalse(scan["ran"])
+        self.assertIn("not installed", scan["error"])
+
+    def test_comment_lists_findings_and_never_the_raw_secret(self) -> None:
+        verified, unverified = _payloads()
+        scan = {
+            "ran": True,
+            "verified": [core.trufflehog_finding(verified, True)],
+            "unverified": [core.trufflehog_finding(unverified, False)],
+            "error": None,
+        }
+        body = post.render_comment(
+            "BLOCKED", [], [], {"ran": True, "changed": []}, _resolved_profile(), [], "headsha", [], scan
+        )
+        self.assertIn("## Secret scan (TruffleHog)", body)
+        self.assertIn("AKIA****", body)
+        self.assertIn("1 unverified finding(s) — not blocking", body)
+        self.assertNotIn("cGxhY2Vob2xkZXI=", body)
+        self.assertNotIn("placeholder", body)
+
+    def test_comment_reports_a_skipped_scan(self) -> None:
+        scan = {"ran": False, "verified": [], "unverified": [], "error": "trufflehog not installed; secret scan skipped"}
+        body = post.render_comment("INCOMPLETE", [], [], {"ran": True, "changed": []}, _resolved_profile(), [], "headsha", [], scan)
+        self.assertIn("- not run: trufflehog not installed", body)
+
+
+class SecretScanEndToEndTests(unittest.TestCase):
+    """MACH-41 acceptance: a verified credential in the PR range makes the
+    review BLOCKED (status failure, exit 2); unverified findings are reported
+    but the review still PASSes."""
+
+    def _repo(self, root: Path) -> Path:
+        repo = root / "repo"
+        repo.mkdir()
+        return repo
+
+    def _bins(self, root: Path, trufflehog_body: str | None) -> Path:
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "git").write_text(
+            "#!/bin/sh\n"
+            'case "$*" in\n'
+            '  *"remote get-url"*) printf \'https://github.com/owner/repo.git\\n\' ;;\n'
+            '  *"rev-parse --abbrev-ref"*) printf \'feature\\n\' ;;\n'
+            "  *) : ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        (bin_dir / "gh").write_text(
+            "#!/bin/sh\n"
+            'case "$*" in\n'
+            '  *"pr view"*) printf \'{"headRefName":"feature","headRefOid":"head","baseRefName":"main","baseRefOid":"base","body":"body","url":"url"}\\n\' ;;\n'
+            '  *"--name-only"*) printf \'src/app.py\\n\' ;;\n'
+            '  *) printf \'diff --git a/src/app.py b/src/app.py\\n\' ;;\n'
+            "esac\n",
+            encoding="utf-8",
+        )
+        (bin_dir / "review-executor").write_text("#!/bin/sh\ncat >/dev/null\nprintf 'NO FINDINGS\\n'\n", encoding="utf-8")
+        (bin_dir / "ruff").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        os.chmod(bin_dir / "git", 0o755)
+        os.chmod(bin_dir / "gh", 0o755)
+        os.chmod(bin_dir / "review-executor", 0o755)
+        os.chmod(bin_dir / "ruff", 0o755)
+        if trufflehog_body is not None:
+            (bin_dir / "trufflehog").write_text(trufflehog_body, encoding="utf-8")
+            os.chmod(bin_dir / "trufflehog", 0o755)
+        return bin_dir
+
+    def _run(self, root: Path, bin_dir: Path) -> tuple[int, dict, str]:
+        json_out = root / "summary.json"
+        env = os.environ.copy()
+        env.update({"PATH": f"{bin_dir}:{env['PATH']}", "TH_FIXTURE": str(_FIXTURE)})
+        env.pop("MACHINIST_CONTROL_PLANE_URL", None)
+        env.pop("MACHINIST_CONTROL_PLANE_TOKEN", None)
+        buffer = io.StringIO()
+        with mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(buffer):
+            code = post.main(
+                [
+                    "--repo", str(root / "repo"),
+                    "--pr", "owner/repo#1",
+                    "--executor-cmd", str(bin_dir / "review-executor"),
+                    "--timeout-seconds", "5",
+                    "--dry-run",
+                    "--json-out", str(json_out),
+                ]
+            )
+        return code, json.loads(json_out.read_text(encoding="utf-8")), buffer.getvalue()
+
+    def test_verified_credential_blocks_the_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = self._repo(root)
+            bin_dir = self._bins(
+                root,
+                "#!/bin/sh\n"
+                'case "$*" in\n'
+                '  *"--results=verified"*) sed -n \'1p\' "$TH_FIXTURE" ;;\n'
+                "esac\n"
+                "exit 0\n",
+            )
+            code, summary, output = self._run(root, bin_dir)
+        self.assertEqual(code, 2)
+        self.assertEqual(summary["status"], "BLOCKED")
+        self.assertTrue(summary["blocking"])
+        self.assertEqual(len(summary["secret_scan"]["verified"]), 1)
+        self.assertIn("## Secret scan (TruffleHog)", output)
+        self.assertNotIn("cGxhY2Vob2xkZXI=", output)
+
+    def test_unverified_finding_does_not_block(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._repo(root)
+            bin_dir = self._bins(
+                root,
+                "#!/bin/sh\n"
+                'case "$*" in\n'
+                '  *"--results=unverified,unknown"*) sed -n \'2p\' "$TH_FIXTURE" ;;\n'
+                "esac\n"
+                "exit 0\n",
+            )
+            code, summary, output = self._run(root, bin_dir)
+        self.assertEqual(code, 0)
+        self.assertEqual(summary["status"], "PASS")
+        self.assertFalse(summary["blocking"])
+        self.assertEqual(len(summary["secret_scan"]["unverified"]), 1)
+        self.assertIn("not blocking", output)
+
+    def test_missing_trufflehog_is_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._repo(root)
+            bin_dir = self._bins(root, None)
+            code, summary, _ = self._run(root, bin_dir)
+        self.assertEqual(code, 0)
+        self.assertEqual(summary["status"], "INCOMPLETE")
+        self.assertFalse(summary["blocking"])
+        self.assertIn("not installed", summary["secret_scan"]["error"])
 
 
 if __name__ == "__main__":

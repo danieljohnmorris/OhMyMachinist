@@ -101,6 +101,22 @@ jobs:
           tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
           /tmp/gitleaks detect --source . --no-git --redact --verbose
 
+  trufflehog:
+    name: Secret scan (TruffleHog)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Scan for verified credentials with TruffleHog
+        run: |
+          curl -fsSL -o /tmp/trufflehog.tar.gz https://github.com/trufflesecurity/trufflehog/releases/download/v3.99.2/trufflehog_3.99.2_linux_amd64.tar.gz
+          echo "3c7b0d1dc4278294269bfdd7594bca8bb28c78da0a4a06ad202ded37b48deca4  /tmp/trufflehog.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/trufflehog.tar.gz -C /tmp trufflehog
+          /tmp/trufflehog git "file://$GITHUB_WORKSPACE" --results=verified --fail --no-update --no-color
+
   check:
     name: check
     if: always()
@@ -108,6 +124,7 @@ jobs:
       - linux
       - macos
       - secrets
+      - trufflehog
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
