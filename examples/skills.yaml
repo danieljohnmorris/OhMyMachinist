@@ -1,0 +1,21 @@
+# Minimal worked example: an ordered skills list. Install as
+# .machinist/skills.yaml in the repository (read at the base ref) or paste the
+# same list into Settings as the skills.project.<project> or skills.default
+# setting. The repo file composes first, then the project setting, then the
+# global setting; each layer de-duplicates by name and a higher layer can
+# disable an inherited entry with enabled: false.
+#
+# Every entry needs a name (optionally name@version to pin an installed
+# version). applies_to defaults to both build and review. rule text is appended
+# to the agent's RULES.md (omp) or the review prompt. required: true fails the
+# run when the skill is not installed; otherwise a missing skill only warns.
+skills:
+  - name: feature-dev:code-reviewer
+  - name: rust-review
+    applies_to: [review]
+    rule: Check unsafe blocks and panics.
+    required: true
+  - name: typescript-jsdoc
+    applies_to: [build, review]
+  - name: docs-reviewer
+    enabled: false

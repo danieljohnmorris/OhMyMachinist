@@ -766,6 +766,59 @@ def write_json(path: str, summary: dict[str, Any]) -> None:
     target.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 
 
+def publish_review(
+    options: ReviewOptions,
+    owner: str,
+    name: str,
+    number: str,
+    head_sha: str,
+    resolved: profile_mod.ResolvedProfile,
+    status: str,
+    comment: str,
+) -> str | None:
+    """Post the review comment and commit status, returning the comment URL.
+
+    Publishing is the review's only externally visible effect, so every result
+    that reaches the end of ``review`` — including an INCOMPLETE one that never
+    ran the reviewers — goes through here, leaving the ``machinist/review``
+    status on the head commit reflecting that result instead of a stale green.
+    """
+    output = resolved.body.get("output") or {}
+    commit_status = str(output.get("commit_status", "machinist/review"))
+    if options.dry_run:
+        print("Planned command: gh pr comment ... --body-file -")
+        print(f"Planned command: gh api repos/{owner}/{name}/statuses/{head_sha} ...")
+        return None
+    comment_url = None
+    comment_result = CommandResult((), 0, "", "")
+    if output.get("pr_comment", True):
+        comment_result = run_gh(
+            options.repo,
+            ["pr", "comment", number, "--repo", f"{owner}/{name}", "--body-file", "-"],
+            options.timeout,
+            stdin=comment,
+        )
+        if comment_result.ok:
+            comment_url = comment_result.stdout.strip().splitlines()[-1]
+    status_result = run_gh(
+        options.repo,
+        [
+            "api",
+            f"repos/{owner}/{name}/statuses/{head_sha}",
+            "-f",
+            f"state={STATUS_STATES[status]}",
+            "-f",
+            f"context={commit_status}",
+            "-f",
+            "description=Machinist review " + status,
+        ],
+        options.timeout,
+    )
+    if not status_result.ok or (output.get("pr_comment", True) and not comment_result.ok):
+        raise ReviewError(f"could not publish review: {comment_result.output} {status_result.output}")
+    return comment_url
+
+
 def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
     if not options.repo.is_dir():
         raise ReviewError(f"repository path does not exist: {options.repo}")
@@ -807,11 +860,58 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
             if resolved is None:
                 resolved = profile_mod.resolve_profile(options.repo, "", options.timeout, run_git)
         head_sha = metadata["headRefOid"]
+        # MACH-50: resolve the ordered skills list once (repo config, project
+        # setting, global setting) so reviewer passes and the summary share it.
+        skill_library.configure(repo_dir=str(options.repo), base_sha=base_sha, project=os.environ.get("MACHINIST_PROJECT"), kind="review")
         summary["profile"] = {
             "name": resolved.name,
             "source": resolved.source,
             "skills": profile_mod.skill_versions(resolved.body),
         }
+        try:
+            loaded = skill_library.loaded_skills()
+        except skill_library.RequiredSkillError as error:
+            # A required skill that is not installed must fail the review
+            # visibly: publish an INCOMPLETE (error) status and comment so the
+            # machinist/review check does not stay green, then exit 0 like any
+            # other INCOMPLETE result (MACH-31). Otherwise the missing skill
+            # would leave the review silently unrun behind a stale green status.
+            failure_notes = [f"the review did not run: {error}"]
+            summary.update(
+                {
+                    "status": "INCOMPLETE",
+                    "skills": [],
+                    "skill_warnings": [],
+                    "notes": failure_notes,
+                    "error": str(error),
+                }
+            )
+            comment = (
+                "\n".join(
+                    [
+                        "Machinist PR review",
+                        "Status: INCOMPLETE",
+                        "",
+                        f"Profile: {resolved.name or '(unnamed)'} (source: {resolved.source})",
+                        f"Head SHA: {head_sha}",
+                        "",
+                        "## Notes",
+                        f"- {error}",
+                    ]
+                ).rstrip()
+                + "\n"
+            )
+            print(comment)
+            summary["comment_url"] = publish_review(
+                options, owner, name, number_text, head_sha, resolved, "INCOMPLETE", comment
+            )
+            print(
+                "post-pr review warning: review incomplete; exiting 0 so the delivery job does not fail",
+                file=sys.stderr,
+            )
+            return EXIT_CODES["INCOMPLETE"], summary
+        summary["skills"] = loaded["skills"]
+        summary["skill_warnings"] = loaded["warnings"]
         files, files_readable = changed_file_list(
             options.repo, owner, name, number_text, metadata, options.base, options.timeout
         )
@@ -1022,38 +1122,9 @@ def review(options: ReviewOptions) -> tuple[int, dict[str, Any]]:
         )
         comment = render_comment(status, checks, reviewers, docs, resolved, merged, summary["head_sha"], notes, secret_scan)
         print(comment)
-        state = STATUS_STATES[status]
-        commit_status = str((resolved.body.get("output") or {}).get("commit_status", "machinist/review"))
-        if options.dry_run:
-            print("Planned command: gh pr comment ... --body-file -")
-            print(f"Planned command: gh api repos/{owner}/{name}/statuses/{head_sha} ...")
-        else:
-            comment_result = CommandResult((), 0, "", "")
-            if (resolved.body.get("output") or {}).get("pr_comment", True):
-                comment_result = run_gh(
-                    options.repo,
-                    ["pr", "comment", number_text, "--repo", f"{owner}/{name}", "--body-file", "-"],
-                    options.timeout,
-                    stdin=comment,
-                )
-                if comment_result.ok:
-                    summary["comment_url"] = comment_result.stdout.strip().splitlines()[-1]
-            status_result = run_gh(
-                options.repo,
-                [
-                    "api",
-                    f"repos/{owner}/{name}/statuses/{head_sha}",
-                    "-f",
-                    f"state={state}",
-                    "-f",
-                    f"context={commit_status}",
-                    "-f",
-                    "description=Machinist review " + status,
-                ],
-                options.timeout,
-            )
-            if not status_result.ok or ((resolved.body.get("output") or {}).get("pr_comment", True) and not comment_result.ok):
-                raise ReviewError(f"could not publish review: {comment_result.output} {status_result.output}")
+        summary["comment_url"] = publish_review(
+            options, owner, name, number_text, head_sha, resolved, status, comment
+        )
         if status == "INCOMPLETE":
             print(
                 "post-pr review warning: review incomplete; exiting 0 so the delivery job does not fail",

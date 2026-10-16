@@ -18,6 +18,7 @@ import (
 	"github.com/owainlewis/machinist/internal/config"
 	"github.com/owainlewis/machinist/internal/protocol"
 	"github.com/owainlewis/machinist/internal/runner"
+	"github.com/owainlewis/machinist/internal/skills"
 )
 
 type Worker struct {
@@ -307,6 +308,106 @@ func (w *Worker) reviewEnv() []string {
 	return env
 }
 
+// ompAgentDirEnv points the omp executor wrapper at the per-run skills agent
+// directory: skills/<name>/SKILL.md, RULES.md, and an omp config overlay.
+const ompAgentDirEnv = "MACHINIST_OMP_AGENT_DIR"
+
+// skillsSettingsResponse mirrors GET /api/v1/settings.
+type skillsSettingsResponse struct {
+	Settings map[string]string `json:"settings"`
+}
+
+// prepareSkills composes the run's skills from the repo at the base ref, the
+// project setting skills.project.<project>, and the global setting
+// skills.default, then injects them for the executor. omp gets a per-run agent
+// directory; every other executor gets the SKILL.md text appended to its
+// prompt. It returns the extra environment and the list recorded on the run.
+// A required skill that cannot resolve fails the run; the optional layers
+// degrade to the repo-scoped skills when the control plane is unreachable.
+func (w *Worker) prepareSkills(ctx context.Context, spec protocol.RunSpec, command *config.ResolvedCommand, repository string) ([]string, *protocol.RunSkills, error) {
+	bundle, err := skills.LoadRepoBundle(ctx, repository, "HEAD")
+	if err != nil {
+		return nil, nil, fmt.Errorf("read repository skills: %w", err)
+	}
+	var project, global []skills.Entry
+	var settings skillsSettingsResponse
+	if w.client != nil {
+		if err := w.client.Get(ctx, "/api/v1/settings", &settings); err != nil {
+			fmt.Fprintf(w.stderr, "machinist: run %s: read skill settings: %v\n", spec.ID, err)
+		} else {
+			if raw := strings.TrimSpace(settings.Settings["skills.default"]); raw != "" {
+				if global, err = skills.ParseConfig([]byte(raw)); err != nil {
+					return nil, nil, err
+				}
+			}
+			if spec.Project != "" {
+				if raw := strings.TrimSpace(settings.Settings["skills.project."+spec.Project]); raw != "" {
+					if project, err = skills.ParseConfig([]byte(raw)); err != nil {
+						return nil, nil, err
+					}
+				}
+			}
+		}
+	}
+	if len(bundle.Entries) == 0 && len(project) == 0 && len(global) == 0 {
+		return nil, nil, nil
+	}
+	library, err := skills.Open("")
+	if err != nil {
+		fmt.Fprintf(w.stderr, "machinist: run %s: open skills library: %v\n", spec.ID, err)
+	}
+	resolver := &skills.Resolver{
+		Library: library,
+		Warn:    func(message string) { fmt.Fprintf(w.stderr, "machinist: run %s: %s\n", spec.ID, message) },
+	}
+	resolution, err := resolver.Resolve(skills.ResolveRequest{
+		Project:        spec.Project,
+		Kind:           skillKind(spec),
+		Repo:           bundle.Entries,
+		ProjectEntries: project,
+		Global:         global,
+		Bundle:         bundle,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(resolution.Skills) == 0 && len(resolution.Warnings) == 0 {
+		return nil, nil, nil
+	}
+	recorded := &protocol.RunSkills{Warnings: resolution.Warnings}
+	if len(resolution.Skills) == 0 {
+		return nil, recorded, nil
+	}
+	if strings.TrimSpace(w.config.DataDirectory) == "" {
+		return nil, recorded, nil
+	}
+	native := runner.IsOmpExecutor(spec.Executor, command.Command)
+	agentDir := filepath.Join(w.config.DataDirectory, "runs", spec.ID, "agent")
+	injected, err := skills.BuildInjection(resolution, agentDir, native)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, skill := range injected.Skills {
+		recorded.Skills = append(recorded.Skills, protocol.LoadedSkill{
+			Name: skill.Name, Version: skill.Version, Scope: skill.Scope, Method: skill.Method,
+		})
+	}
+	if native {
+		return []string{ompAgentDirEnv + "=" + agentDir}, recorded, nil
+	}
+	command.Prompt = strings.TrimRight(command.Prompt, "\n") + "\n\n" + injected.Prompt
+	return nil, recorded, nil
+}
+
+// skillKind classifies a run as a build or a review from its command and
+// executor so an entry's applies_to list can select it.
+func skillKind(spec protocol.RunSpec) string {
+	if strings.Contains(strings.ToLower(spec.Command+" "+spec.Executor), "review") {
+		return "review"
+	}
+	return "build"
+}
+
 func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Completion {
 	completion := protocol.Completion{InstanceID: w.instanceID, LeaseToken: spec.LeaseToken, State: "failed", ExitCode: 1}
 	repository, err := w.config.ResolveRepository(spec.Repository)
@@ -326,6 +427,14 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 		completion.Error = err.Error()
 		return completion
 	}
+	extraEnv := w.reviewEnv()
+	skillsEnv, runSkills, err := w.prepareSkills(ctx, spec, &command, repository)
+	if err != nil {
+		completion.Error = err.Error()
+		return completion
+	}
+	completion.Skills = runSkills
+	extraEnv = append(extraEnv, skillsEnv...)
 	result, runErr := runner.Execute(ctx, runner.Options{
 		Revision: spec.Revision,
 		Workflow: spec.Workflow, JobID: spec.JobID,
@@ -334,7 +443,7 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 		ArtifactKey:   spec.LeaseToken,
 		Command:       command,
 		Repository:    repository,
-		ExtraEnv:      w.reviewEnv(),
+		ExtraEnv:      extraEnv,
 		DataDirectory: w.config.DataDirectory,
 		Stdout:        w.stdout,
 		Stderr:        w.stderr,

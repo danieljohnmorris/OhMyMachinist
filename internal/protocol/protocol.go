@@ -32,9 +32,25 @@ type RunSpec struct {
 	Executor        string              `json:"executor"`
 	Model           string              `json:"model,omitempty"`
 	Repository      string              `json:"repository"`
+	Project         string              `json:"project,omitempty"`
 	RenderedPrompt  string              `json:"rendered_prompt"`
 	TimeoutMillis   int64               `json:"timeout_millis"`
 	LeaseToken      string              `json:"lease_token"`
+}
+
+// LoadedSkill is one skill a run loaded, recorded so the API can show what the
+// agent and reviewers had available. It never carries skill content.
+type LoadedSkill struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	Scope   string `json:"scope"`
+	Method  string `json:"method"`
+}
+
+// RunSkills is the ordered skills a run loaded, with any load warnings.
+type RunSkills struct {
+	Skills   []LoadedSkill `json:"skills"`
+	Warnings []string      `json:"warnings,omitempty"`
 }
 
 type Heartbeat struct {
@@ -53,6 +69,7 @@ type LiveEvents struct {
 type Completion struct {
 	Artifacts        []string        `json:"artifacts,omitempty"`
 	PublicationError string          `json:"publication_error,omitempty"`
+	Skills           *RunSkills      `json:"skills,omitempty"`
 	InstanceID       string          `json:"instance_id"`
 	LeaseToken       string          `json:"lease_token"`
 	State            string          `json:"state"`

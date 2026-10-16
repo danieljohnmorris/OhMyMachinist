@@ -12,7 +12,7 @@ import unittest
 from unittest import mock
 
 import deploy.factory.post_pr_review as post
-from deploy.factory.review import core, profile as profile_mod
+from deploy.factory.review import core, profile as profile_mod, skill_library
 from deploy.factory.review.runner import CommandResult
 
 
@@ -202,6 +202,71 @@ class EndToEndDryRunTests(unittest.TestCase):
             git_calls = git_log.read_text(encoding="utf-8") if git_log.exists() else ""
             self.assertNotIn("push", git_calls)
             self.assertNotIn("commit", git_calls)
+
+
+class RequiredSkillTests(unittest.TestCase):
+    """MACH-50: a required skill that is not installed must publish an error
+    status and comment instead of exiting silently behind a stale green
+    machinist/review check."""
+
+    def test_required_skill_failure_publishes_error_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            (bin_dir / "git").write_text(
+                "#!/bin/sh\n"
+                'case "$*" in\n'
+                '  *"remote get-url"*) printf \'https://github.com/owner/repo.git\\n\' ;;\n'
+                "  *) : ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            (bin_dir / "gh").write_text(
+                "#!/bin/sh\n"
+                'printf \'%s\\n\' "$*" >> "$TEMP_GH_LOG"\n'
+                'case "$*" in\n'
+                '  *"pr view"*) printf \'{"headRefName":"feature","headRefOid":"head","baseRefName":"main","baseRefOid":"base","body":"body","url":"url"}\\n\' ;;\n'
+                '  *"pr comment"*) printf \'https://github.com/owner/repo/pull/1#issuecomment-1\\n\' ;;\n'
+                "  *) : ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            os.chmod(bin_dir / "git", 0o755)
+            os.chmod(bin_dir / "gh", 0o755)
+            gh_log = root / "gh.log"
+            json_out = root / "summary.json"
+            env = os.environ.copy()
+            env.update({"PATH": f"{bin_dir}:{env['PATH']}", "TEMP_GH_LOG": str(gh_log)})
+            env.pop("MACHINIST_CONTROL_PLANE_URL", None)
+            env.pop("MACHINIST_CONTROL_PLANE_TOKEN", None)
+            error = skill_library.RequiredSkillError('required skill "missing" is not installed')
+            with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(
+                post.skill_library, "loaded_skills", side_effect=error
+            ):
+                code = post.main(
+                    [
+                        "--repo",
+                        str(repo),
+                        "--pr",
+                        "owner/repo#1",
+                        "--timeout-seconds",
+                        "5",
+                        "--json-out",
+                        str(json_out),
+                    ]
+                )
+            summary = json.loads(json_out.read_text(encoding="utf-8"))
+            gh_calls = gh_log.read_text(encoding="utf-8") if gh_log.exists() else ""
+        self.assertEqual(code, 0)
+        self.assertEqual(summary["status"], "INCOMPLETE")
+        self.assertEqual(summary["error"], str(error))
+        self.assertIn("pr comment", gh_calls)
+        self.assertIn("statuses/head", gh_calls)
+        self.assertIn("state=error", gh_calls)
+        self.assertIn("context=machinist/review", gh_calls)
 
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "trufflehog.jsonl"
