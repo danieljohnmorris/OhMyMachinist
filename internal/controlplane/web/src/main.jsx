@@ -422,9 +422,8 @@ function RunCard({ job, priors = [], onCancelJob, onMoveToQueue }) {
       </div>
       {resolution && <p className="text-xs text-success">{resolution}</p>}
       {priors.length === 0 && attemptBadges(job)}
-    </a><RunCardLinks job={job} />{priors.length > 0 && <div className="flex flex-wrap items-center gap-1.5 border-t border-border px-4 py-2.5">
-      <Badge tone="surface" aria-label={`${attemptCount} attempts`}>{attemptCount} attempts</Badge>
-      {priors.map((prior) => <a key={prior.id} href={`#/runs/${encodeURIComponent(prior.id)}`} className="text-xs text-muted-foreground underline hover:text-foreground" aria-label={`Open prior attempt ${stateLabel(prior.state)} ${relativeTime(attemptTime(prior))}`}>{stateLabel(prior.state)} · {relativeTime(attemptTime(prior))}</a>)}
+    </a><RunCardLinks job={job} />{priors.length > 0 && <div className="flex items-center border-t border-border px-4 py-2.5">
+      <Badge tone="surface" tabIndex={0} aria-label={`${attemptCount} attempts: ${priors.map((prior) => `${stateLabel(prior.state)} ${relativeTime(attemptTime(prior))}`).join(", ")}`} title={[...priors].reverse().map((prior) => `${stateLabel(prior.state)} · ${relativeTime(attemptTime(prior))}`).join("\n")}>{attemptCount} attempts</Badge>
     </div>}{canCancelJob(job) && <div className="flex justify-end px-4 pb-4"><Button size="sm" variant="outline" aria-label={`Cancel run ${title}`} onClick={() => onCancelJob(job)}>Cancel</Button></div>}{canMoveToQueue(job) && <div className="flex justify-end px-4 pb-4"><MoveToQueueButton job={job} onMoveToQueue={onMoveToQueue} /></div>}</Card>;
 }
 
