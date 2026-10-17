@@ -1406,7 +1406,7 @@ func (s *Store) Complete(ctx context.Context, runID string, completion protocol.
 		if err != nil {
 			return err
 		}
-		if err := completeBuiltinTicket(ctx, tx, jobID, now); err != nil {
+		if err := completeBuiltinTicket(ctx, tx, jobID, now, completion.Result); err != nil {
 			return err
 		}
 		return tx.Commit()
@@ -1443,7 +1443,7 @@ func (s *Store) Complete(ctx context.Context, runID string, completion protocol.
 			}
 		}
 	}
-	if err := completeBuiltinTicket(ctx, tx, jobID, now); err != nil {
+	if err := completeBuiltinTicket(ctx, tx, jobID, now, completion.Result); err != nil {
 		return err
 	}
 	return tx.Commit()

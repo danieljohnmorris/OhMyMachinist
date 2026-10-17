@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -295,8 +296,27 @@ func (s *Store) approveTicket(ctx context.Context, key string, command config.Re
 	return jobID, true, tx.Commit()
 }
 
+var githubPullRequestURL = regexp.MustCompile(`https://github\.com/[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+/pull/\d+`)
+
+// pullRequestFromResult finds the pull request a run opened. The runner's
+// result carries no structured metadata, so the agent's final message is the
+// only record; the last URL in it is the one the agent reported delivering.
+func pullRequestFromResult(result json.RawMessage) string {
+	var parsed struct {
+		FinalMessage string `json:"final_message"`
+	}
+	if len(result) == 0 || json.Unmarshal(result, &parsed) != nil {
+		return ""
+	}
+	matches := githubPullRequestURL.FindAllString(parsed.FinalMessage, -1)
+	if len(matches) == 0 {
+		return ""
+	}
+	return matches[len(matches)-1]
+}
+
 // Called inside completion's transaction, so feedback cannot be lost on restart.
-func completeBuiltinTicket(ctx context.Context, tx *sql.Tx, jobID, now string) error {
+func completeBuiltinTicket(ctx context.Context, tx *sql.Tx, jobID, now string, result json.RawMessage) error {
 	var key, ticketState, jobState string
 	err := tx.QueryRowContext(ctx, `SELECT t.key,t.state,j.state FROM ticket_jobs tj JOIN tickets t ON t.key=tj.ticket_key JOIN jobs j ON j.id=tj.job_id WHERE j.id=?`, jobID).Scan(&key, &ticketState, &jobState)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -327,6 +347,15 @@ func completeBuiltinTicket(ctx context.Context, tx *sql.Tx, jobID, now string) e
 	var metadata JobMetadata
 	if err = json.Unmarshal([]byte(raw), &metadata); err != nil {
 		return err
+	}
+	if metadata.PRURL == "" && jobState == "succeeded" {
+		if found := pullRequestFromResult(result); found != "" {
+			// Persist on the job too so the board card and run page link it.
+			if err = saveJobMetadata(ctx, tx, jobID, map[string]any{"pr_url": found}); err != nil {
+				return err
+			}
+			metadata.PRURL = found
+		}
 	}
 	body := "Factory run " + jobState + ": #/runs/" + jobID
 	if metadata.PRURL != "" {
