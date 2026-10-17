@@ -123,6 +123,15 @@ func (s *Store) MoveToQueue(ctx context.Context, jobID string) (string, error) {
 	if _, err := tx.ExecContext(ctx, `INSERT INTO job_metadata(job_id,metadata) SELECT ?,metadata FROM job_metadata WHERE job_id=?`, newJobID, jobID); err != nil {
 		return "", fmt.Errorf("carry job metadata: %w", err)
 	}
+	// A built-in ticket follows its newest attempt: completion feedback, the
+	// dispatch state change and resolution all look the job up through the
+	// ticket link.
+	if _, err := tx.ExecContext(ctx, `INSERT INTO ticket_jobs(job_id,ticket_key) SELECT ?,ticket_key FROM ticket_jobs WHERE job_id=?`, newJobID, jobID); err != nil {
+		return "", fmt.Errorf("link requeued job to ticket: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE tickets SET job_id=?,state=CASE WHEN state='in_progress' THEN 'approved' ELSE state END,updated_at=? WHERE job_id=?`, newJobID, now, jobID); err != nil {
+		return "", fmt.Errorf("repoint ticket to requeued job: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return "", fmt.Errorf("commit move to queue: %w", err)
 	}

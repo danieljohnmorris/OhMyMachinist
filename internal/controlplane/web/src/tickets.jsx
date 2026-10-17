@@ -30,15 +30,16 @@ export function TicketsPage({ csrfToken, repositories = [], jobs = [], ticketKey
     setSelected(null);
     if (ticketKey) setTracker("builtin");
     async function refresh() {
-      try {
-        const [items, providers, detail] = await Promise.all([listTickets(), loadTrackers(), ticketKey ? getTicket(ticketKey) : null]);
-        if (cancelled) return;
-        setTickets(items); setTrackers(providers.trackers); setProjects(providers.projects); setSelected(detail);
-        setTracker(current => current || providers.default);
-        setError(""); setLoaded(true);
-      } catch (failure) {
-        if (!cancelled) { setError(failure.message); setLoaded(true); }
+      const [items, providers, detail] = await Promise.allSettled([listTickets(), loadTrackers(), ticketKey ? getTicket(ticketKey) : Promise.resolve(null)]);
+      if (cancelled) return;
+      const failures = [items, providers, detail].filter(result => result.status === "rejected");
+      if (items.status === "fulfilled") setTickets(items.value);
+      if (providers.status === "fulfilled") {
+        setTrackers(providers.value.trackers); setProjects(providers.value.projects);
+        setTracker(current => current || providers.value.default);
       }
+      if (detail.status === "fulfilled") setSelected(detail.value);
+      setError(failures.length ? failures[0].reason.message : ""); setLoaded(true);
       if (!cancelled) timer = setTimeout(refresh, 5000);
     }
     refresh();

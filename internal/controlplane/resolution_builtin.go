@@ -40,6 +40,11 @@ func (s *Store) resolveBuiltinTicket(ctx context.Context, key string, pullReques
 			if _, err = tx.ExecContext(ctx, `INSERT INTO ticket_comments(ticket_key,body,created_at) VALUES(?,?,?)`, key, builtinResolutionComment(*pullRequest), now); err != nil {
 				return 0, err
 			}
+			if pullRequest.URL != "" {
+				if _, err = tx.ExecContext(ctx, `UPDATE tickets SET pr_url=? WHERE key=? AND pr_url=''`, pullRequest.URL, key); err != nil {
+					return 0, err
+				}
+			}
 		}
 	case state != "done":
 		return 0, nil

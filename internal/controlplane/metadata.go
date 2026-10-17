@@ -101,7 +101,8 @@ func NormalizeJobMetadata(raw map[string]any) (*JobMetadata, error) {
 	if metadata.Project != "" && !projectKeyPattern.MatchString(metadata.Project) {
 		return nil, fmt.Errorf("%w: project must match [A-Z][A-Z0-9]{1,9}", ErrJobMetadataInvalid)
 	}
-	if metadata.IssueURL == "" && metadata.Branch == "" && metadata.PRURL == "" && metadata.PreviewURL == "" &&
+	if metadata.Tracker == "" && metadata.TicketKey == "" && len(metadata.Labels) == 0 &&
+		metadata.IssueURL == "" && metadata.Branch == "" && metadata.PRURL == "" && metadata.PreviewURL == "" &&
 		metadata.ReviewVerdict == "" && metadata.ReviewSummary == "" && len(metadata.Screenshots) == 0 &&
 		metadata.IntakeSource == "" && metadata.IntakeDeliveryID == "" && metadata.IntakeSpecHash == "" &&
 		metadata.Healing == nil && metadata.Automerge == nil {

@@ -1504,6 +1504,12 @@ func (s *Store) DeleteJob(ctx context.Context, jobID string) error {
 	if _, err := tx.ExecContext(ctx, `UPDATE github_trigger_requests SET job_id=NULL,updated_at=? WHERE job_id=?`, now, jobID); err != nil {
 		return fmt.Errorf("clear deleted job trigger links: %w", err)
 	}
+	if err := releaseBuiltinTickets(ctx, tx, now, "The factory run was deleted.", `id=?`, jobID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE tickets SET job_id='',updated_at=? WHERE job_id=?`, now, jobID); err != nil {
+		return fmt.Errorf("clear deleted job ticket link: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM runs WHERE job_id=?`, jobID); err != nil {
 		return fmt.Errorf("delete job runs: %w", err)
 	}

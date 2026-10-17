@@ -9,10 +9,12 @@ import { Button } from "@/components/ui/button";
 
 export function WorkersPage({ workers, loaded, error, csrfToken, onChanged }) {
   const [removing, setRemoving] = useState("");
+  const [removeError, setRemoveError] = useState("");
 
   async function remove(worker) {
     if (!window.confirm(`Remove worker ${worker.name || worker.instance_id}? Its repositories are forgotten; a running job loses dispatch.`)) return;
     setRemoving(worker.instance_id);
+    setRemoveError("");
     try {
       const response = await fetch(`/api/v1/workers/${encodeURIComponent(worker.instance_id)}`, {
         method: "DELETE",
@@ -23,12 +25,14 @@ export function WorkersPage({ workers, loaded, error, csrfToken, onChanged }) {
         throw new Error(body.error || `Remove failed (${response.status})`);
       }
       await onChanged?.();
+    } catch (failure) {
+      setRemoveError(failure.message);
     } finally {
       setRemoving("");
     }
   }
 
-  return <Page title="Workers" description="The machines available to pick up and execute work.">{error && <Failure value={error} />}{!loaded && !error ? <Loading description="Checking live worker status." /> : loaded && (workers.length ? <Card className="overflow-hidden">{workers.map((worker) => <article key={worker.instance_id} className="grid gap-4 border-b border-border p-4 last:border-b-0 sm:grid-cols-[minmax(12rem,1fr)_minmax(12rem,1fr)_10rem] sm:items-center sm:px-5">
+  return <Page title="Workers" description="The machines available to pick up and execute work.">{(error || removeError) && <Failure value={error || removeError} />}{!loaded && !error ? <Loading description="Checking live worker status." /> : loaded && (workers.length ? <Card className="overflow-hidden">{workers.map((worker) => <article key={worker.instance_id} className="grid gap-4 border-b border-border p-4 last:border-b-0 sm:grid-cols-[minmax(12rem,1fr)_minmax(12rem,1fr)_10rem] sm:items-center sm:px-5">
     <div className="min-w-0"><div className="flex items-center gap-2"><Server className="size-4 text-muted-foreground" /><h2 className="truncate text-sm font-medium">{worker.name}</h2></div><p className="mt-1 truncate font-mono text-xs text-muted-foreground">{worker.instance_id}</p></div>
     <div className="flex flex-wrap gap-1.5">{worker.repositories?.length ? worker.repositories.map((repository) => <Badge key={repository} className="font-mono">{repository}</Badge>) : <span className="text-xs text-muted-foreground">No repositories</span>}</div>
     <div className="flex flex-col items-end gap-1.5"><Badge tone={worker.connected ? "success" : "neutral"} dot>{worker.connected ? "Connected" : "Disconnected"}</Badge><div className="flex items-center gap-2"><time className="text-xs text-muted-foreground sm:text-right" dateTime={worker.last_seen_at} title={new Date(worker.last_seen_at).toLocaleString()}>Last seen {relativeTime(worker.last_seen_at)}</time><Button size="sm" variant="ghost" className="text-danger" disabled={removing === worker.instance_id} onClick={() => remove(worker)} aria-label={`Remove worker ${worker.name || worker.instance_id}`}>{removing === worker.instance_id ? "Removing…" : "Remove"}</Button></div></div>

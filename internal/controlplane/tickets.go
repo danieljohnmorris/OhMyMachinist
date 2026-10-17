@@ -85,6 +85,27 @@ func (s *Store) ticket(ctx context.Context, key string) (Ticket, error) {
 	return t, rows.Err()
 }
 
+type ticketExecer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// releaseBuiltinTickets returns built-in tickets whose active attempt was
+// cancelled or deleted outside the completion path to the planning state, with
+// one comment, so they can be approved again. jobsWhere selects the affected
+// jobs. Tickets already in review, done or cancelled are left alone.
+func releaseBuiltinTickets(ctx context.Context, ex ticketExecer, now, reason, jobsWhere string, args ...any) error {
+	scope := `job_id IN (SELECT id FROM jobs WHERE ` + jobsWhere + `) AND state IN ('approved','in_progress')`
+	commentArgs := append([]any{reason, now}, args...)
+	if _, err := ex.ExecContext(ctx, `INSERT INTO ticket_comments(ticket_key,body,created_at) SELECT key,?||' Approve again to start a new run.',? FROM tickets WHERE `+scope, commentArgs...); err != nil {
+		return fmt.Errorf("comment on released tickets: %w", err)
+	}
+	updateArgs := append([]any{now}, args...)
+	if _, err := ex.ExecContext(ctx, `UPDATE tickets SET job_id='',state='todo',updated_at=? WHERE `+scope, updateArgs...); err != nil {
+		return fmt.Errorf("release tickets: %w", err)
+	}
+	return nil
+}
+
 // Dispatched tickets retain their delivery history; only drafts can be deleted.
 func (s *Store) deleteTicket(ctx context.Context, key string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -96,7 +117,11 @@ func (s *Store) deleteTicket(ctx context.Context, key string) error {
 	if err := tx.QueryRowContext(ctx, `SELECT job_id FROM tickets WHERE key=?`, key).Scan(&job); err != nil {
 		return err
 	}
-	if job != "" {
+	var linked int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM ticket_jobs WHERE ticket_key=?`, key).Scan(&linked); err != nil {
+		return err
+	}
+	if job != "" || linked > 0 {
 		return errTicketConflict
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM tickets WHERE key=?`, key); err != nil {

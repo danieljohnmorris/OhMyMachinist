@@ -198,3 +198,95 @@ func TestDeleteWorkerSeparatesMissingFromActive(t *testing.T) {
 		t.Fatalf("second delete error = %v, want sql.ErrNoRows", err)
 	}
 }
+
+func TestOpenStoreUpgradesTicketsFromSchemaVersion12(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "db")
+	store := openTestStore(t, path)
+	if _, err := store.createTicket(t.Context(), Ticket{Title: "Survives upgrade", Repository: "machinist"}, "MM"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`ALTER TABLE tickets DROP COLUMN project; ALTER TABLE tickets DROP COLUMN pr_url; PRAGMA user_version=12;`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	upgraded := openTestStore(t, path)
+	ticket, err := upgraded.ticket(t.Context(), "MM-1")
+	if err != nil || ticket.Title != "Survives upgrade" || ticket.Project != "" || ticket.PRURL != "" {
+		t.Fatalf("upgraded ticket = %#v, %v", ticket, err)
+	}
+	scoped, err := upgraded.createTicket(t.Context(), Ticket{Title: "Scoped", Project: "SPARKS"}, "SPARKS")
+	if err != nil || scoped.Project != "SPARKS" {
+		t.Fatalf("scoped ticket after upgrade = %#v, %v", scoped, err)
+	}
+}
+
+func approvedTicketJob(t *testing.T, store *Store) (Ticket, string) {
+	t.Helper()
+	ticket, err := store.createTicket(t.Context(), Ticket{Title: "Lifecycle", Repository: "machinist"}, "MM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobID, _, err := store.approveTicket(t.Context(), ticket.Key, testAgent("build", "{{machinist.prompt}}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ticket, jobID
+}
+
+func TestTicketFollowsMoveToQueueAttempt(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "db"))
+	ticket, jobID := approvedTicketJob(t, store)
+	if run, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"machinist"})); err != nil || run == nil {
+		t.Fatalf("poll = %v, %v", run, err)
+	}
+	newID, err := store.MoveToQueue(t.Context(), jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.ticket(t.Context(), ticket.Key)
+	if err != nil || got.JobID != newID || got.State != "approved" {
+		t.Fatalf("ticket after move = %#v, %v (new job %s)", got, err, newID)
+	}
+	// The new attempt dispatches and completes through the ticket link.
+	run, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"machinist"}))
+	if err != nil || run == nil {
+		t.Fatalf("second poll = %v, %v", run, err)
+	}
+	if got, _ = store.ticket(t.Context(), ticket.Key); got.State != "in_progress" {
+		t.Fatalf("ticket state after dispatch = %q", got.State)
+	}
+}
+
+func TestCancelledAndDeletedRunsReleaseTheirTicket(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "db"))
+	ticket, jobID := approvedTicketJob(t, store)
+	if err := store.WorkflowAction(t.Context(), jobID, "", "cancel", false); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.ticket(t.Context(), ticket.Key)
+	if err != nil || got.State != "todo" || got.JobID != "" {
+		t.Fatalf("ticket after cancel = %#v, %v", got, err)
+	}
+	again, created, err := store.approveTicket(t.Context(), ticket.Key, testAgent("build", "{{machinist.prompt}}"))
+	if err != nil || !created || again == jobID {
+		t.Fatalf("re-approval = %s %v %v", again, created, err)
+	}
+	if err := store.deleteTicket(t.Context(), ticket.Key); !errors.Is(err, errTicketConflict) {
+		t.Fatalf("ticket with delivery history deleted: %v", err)
+	}
+	if err := store.CancelRunningJobs(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = store.ticket(t.Context(), ticket.Key); got.State != "approved" {
+		t.Fatalf("queued ticket changed by factory stop: %#v", got)
+	}
+}
