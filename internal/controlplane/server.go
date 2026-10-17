@@ -928,11 +928,10 @@ func (s *Server) validBrowserRequest(request *http.Request) bool {
 		return false
 	}
 	origin, err := url.Parse(request.Header.Get("Origin"))
-	if err != nil || origin.Scheme != "http" || !strings.EqualFold(origin.Host, request.Host) {
-		return false
-	}
-	hostname := origin.Hostname()
-	return hostname == "localhost" || net.ParseIP(hostname) != nil && net.ParseIP(hostname).IsLoopback()
+	// A same-host Origin is the same-origin defense; any host the listener is
+	// reached by (loopback, a tailnet IP or name) is fine, a different host or
+	// port is not. The listener is loopback or Tailscale bound.
+	return err == nil && origin.Scheme == "http" && strings.EqualFold(origin.Host, request.Host)
 }
 
 // validBrowserWriteRequest is the write-path browser check. Browsers attach

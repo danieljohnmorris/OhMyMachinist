@@ -41,7 +41,7 @@ export class TicketAPIError extends Error {
 async function request(path, { method = "GET", body, csrfToken, fallback }) {
   const headers = { Accept: "application/json" };
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  if (method !== "GET") headers["X-Machinist-CSRF"] = csrfToken || "";
+  if (csrfToken) headers["X-Machinist-CSRF"] = csrfToken;
   let response;
   try {
     response = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -58,13 +58,13 @@ async function request(path, { method = "GET", body, csrfToken, fallback }) {
   return payload;
 }
 
-export async function listTickets() {
-  const payload = await request("/api/v1/tickets", { fallback: "Unable to load tickets" });
+export async function listTickets(csrfToken) {
+  const payload = await request("/api/v1/tickets", { fallback: "Unable to load tickets", csrfToken });
   return Array.isArray(payload.tickets) ? payload.tickets : [];
 }
 
-export async function loadTrackers() {
-  const payload = await request("/api/v1/trackers", { fallback: "Unable to load trackers" });
+export async function loadTrackers(csrfToken) {
+  const payload = await request("/api/v1/trackers", { fallback: "Unable to load trackers", csrfToken });
   return {
     default: payload.default || "builtin",
     trackers: Array.isArray(payload.trackers) ? payload.trackers : [],
@@ -76,8 +76,8 @@ function ticketPath(key, suffix = "") {
   return `/api/v1/tickets/${encodeURIComponent(key)}${suffix}`;
 }
 
-export function getTicket(key) {
-  return request(ticketPath(key), { fallback: `Unable to load ${key}` });
+export function getTicket(key, csrfToken) {
+  return request(ticketPath(key), { fallback: `Unable to load ${key}`, csrfToken });
 }
 
 export function createTicket(csrfToken, fields) {

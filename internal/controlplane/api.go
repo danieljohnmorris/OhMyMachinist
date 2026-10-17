@@ -78,8 +78,13 @@ func (s *Server) authorizeTokenList(next http.HandlerFunc) http.HandlerFunc {
 // and forbid pages from setting it.
 func (s *Server) authorize(next http.HandlerFunc, required string) http.HandlerFunc {
 	browserCheck := s.validBrowserRequest
-	if required == TokenScopeWrite {
+	switch required {
+	case TokenScopeWrite:
 		browserCheck = s.validBrowserWriteRequest
+	case TokenScopeRead:
+		// Browsers omit the Origin header on same-origin GET requests, so the
+		// read defense is the artifact-read one: valid CSRF, no cross-site mark.
+		browserCheck = s.validBrowserReadRequest
 	}
 	return s.authorizeWithBrowser(next, required, browserCheck)
 }

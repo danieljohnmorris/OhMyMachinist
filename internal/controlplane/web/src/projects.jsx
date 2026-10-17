@@ -26,7 +26,7 @@ export function ProjectsPage({ repositories = [], commands = [], csrfToken }) {
 
   const refresh = async (signal) => {
     const current = ++sequence.current;
-    const [trackers, settings] = await Promise.all([loadTrackers(signal), loadSettings(signal)]);
+    const [trackers, settings] = await Promise.all([loadTrackers(signal, csrfToken), loadSettings(signal, csrfToken)]);
     if (sequence.current !== current) return;
     setProjects(mergeProjects(trackers.projects || {}, settings));
     setLoaded(true);
@@ -216,8 +216,10 @@ function ProjectForm({ project, repositories, commands, busy, existing, onChange
 
 // loadTrackers reads the resolved tracker configuration, which already merges
 // the config file with any tracker.projects settings the server applied.
-async function loadTrackers(signal) {
-  const response = await fetch("/api/v1/trackers", { headers: { Accept: "application/json" }, signal });
+async function loadTrackers(signal, csrfToken) {
+  const headers = { Accept: "application/json" };
+  if (csrfToken) headers["X-Machinist-CSRF"] = csrfToken;
+  const response = await fetch("/api/v1/trackers", { headers, signal });
   if (!response.ok) throw new Error(`Trackers request failed (${response.status})`);
   const body = await response.json().catch(() => ({}));
   return body && typeof body === "object" ? body : {};
