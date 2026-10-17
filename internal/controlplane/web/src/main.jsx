@@ -6,11 +6,12 @@ import { State, friendlyName, relativeTime, stateLabel } from "./task-display.js
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "@fontsource-variable/manrope";
-import { Activity, BarChart3, Bot, Factory, GitBranch, LayoutDashboard, Moon, Play, Plus, Server, Settings, Sparkles, Sun, Table2, Ticket, TimerReset, X } from "lucide-react";
+import { Activity, BarChart3, Bot, Factory, FolderGit2, GitBranch, LayoutDashboard, Moon, Play, Plus, Server, Settings, Sparkles, Sun, Table2, Ticket, TimerReset, X } from "lucide-react";
 import { Analytics } from "@/analytics";
 import { CommandsPage, WorkersPage } from "@/catalog";
 import { FactoryControls, FactoryPage } from "@/factory";
 import { SettingsPage } from "@/settings";
+import { ProjectsPage } from "@/projects";
 import { SkillsPage } from "@/skills.jsx";
 import { Badge } from "@/components/ui/badge";
 import { Alert } from "@/components/ui/alert";
@@ -257,6 +258,7 @@ function App() {
         <nav className="ml-4 flex flex-1 gap-1 overflow-x-auto md:ml-0 md:mt-9 md:block md:overflow-visible" aria-label="Primary">
           <a href="#/runs" aria-current={view === "runs" || view === "task" ? "page" : undefined} className={cn("nav-item", (view === "runs" || view === "task") && "nav-item-active")}><Activity className="size-4" /><span>Runs</span><span className="ml-auto text-xs text-muted-foreground">{counts.all}</span></a>
           <a href="#/tickets" aria-current={view === "tickets" ? "page" : undefined} className={cn("nav-item", view === "tickets" && "nav-item-active")}><Ticket className="size-4" /><span>Tickets</span></a>
+          <a href="#/projects" aria-current={view === "projects" ? "page" : undefined} className={cn("nav-item", view === "projects" && "nav-item-active")}><FolderGit2 className="size-4" /><span>Projects</span></a>
           <a href="#/analytics" aria-current={view === "analytics" ? "page" : undefined} className={cn("nav-item", view === "analytics" && "nav-item-active")}><BarChart3 className="size-4" /><span>Analytics</span></a>
           <a href="#/workers" aria-current={view === "workers" ? "page" : undefined} className={cn("nav-item", view === "workers" && "nav-item-active")}><Server className="size-4" /><span>Workers</span></a>
           <a href="#/triggers" aria-current={view === "triggers" ? "page" : undefined} className={cn("nav-item", view === "triggers" && "nav-item-active")}><TimerReset className="size-4" /><span>Triggers</span><span className="ml-auto text-xs text-muted-foreground">{status.triggers?.length || 0}</span></a>
@@ -277,7 +279,7 @@ function App() {
       </aside>
 
       <main className="workshop min-w-0 flex-1">
-        {view === "tickets" ? <TicketsPage csrfToken={status.csrf_token} repositories={status.repositories} jobs={status.jobs} ticketKey={route.ticketKey} onChanged={refreshStatus} /> : view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={displayJob} jobs={status.jobs} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} onCancelJob={cancelJob} onMoveToQueue={moveJobToQueue} onAttemptChange={selectTaskAttempt} tab={route.tab} onTabChange={selectTaskTab} /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : view === "workers" ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} csrfToken={status.csrf_token} onChanged={refreshStatus} /> : view === "factory" ? <FactoryPage factory={status.factory} csrfToken={status.csrf_token} onChanged={refreshStatus} loaded={statusLoaded} error={statusError} /> : view === "triggers" ? <TriggersPage triggers={status.triggers || []} loaded={statusLoaded} error={statusError} /> : view === "skills" ? <SkillsPage csrfToken={status.csrf_token} /> : view === "settings" ? <SettingsPage repositories={status.repositories || []} csrfToken={status.csrf_token} /> : ["commands", "workflows"].includes(view) ? <CommandsPage /> : <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
+        {view === "projects" ? <ProjectsPage repositories={repositories} commands={status.commands} csrfToken={status.csrf_token} /> : view === "tickets" ? <TicketsPage csrfToken={status.csrf_token} repositories={status.repositories} jobs={status.jobs} ticketKey={route.ticketKey} onChanged={refreshStatus} /> : view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={displayJob} jobs={status.jobs} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} onCancelJob={cancelJob} onMoveToQueue={moveJobToQueue} onAttemptChange={selectTaskAttempt} tab={route.tab} onTabChange={selectTaskTab} /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : view === "workers" ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} csrfToken={status.csrf_token} onChanged={refreshStatus} /> : view === "factory" ? <FactoryPage factory={status.factory} csrfToken={status.csrf_token} onChanged={refreshStatus} loaded={statusLoaded} error={statusError} /> : view === "triggers" ? <TriggersPage triggers={status.triggers || []} loaded={statusLoaded} error={statusError} /> : view === "skills" ? <SkillsPage csrfToken={status.csrf_token} /> : view === "settings" ? <SettingsPage repositories={status.repositories || []} csrfToken={status.csrf_token} /> : ["commands", "workflows"].includes(view) ? <CommandsPage /> : <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
           <PageHeading title="Runs" description="Describe the work. Review the result.">
             <div className="flex items-center gap-2">
               <Button className="text-xs!" onClick={() => setComposerOpen(true)}><Plus className="size-4" />New run</Button>

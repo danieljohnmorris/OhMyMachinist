@@ -153,6 +153,14 @@ repository = "sparks-repo"
 command = "task-to-pr"
 ```
 
+Projects can also be added and edited from the control plane's Projects view
+(`#/projects`). Each entry is stored as a `tracker.projects.<NAME>` setting
+holding the table body (`repository`, `command`, `model`); these settings
+overlay the config file's tables the same way a config overlay does — the
+setting wins per project, and the change applies on the next ticket without a
+restart. Per-project skills live in the separate `skills.project.<NAME>`
+setting and are edited on the same page.
+
 The ticket stores the pull request URL reported by its run, and the ticket page
 links to it. Tickets are flat: there are no sub-tickets. Jobs admitted from Plane
 or Linear keep the issue's labels, shown under delivery details on the run.
