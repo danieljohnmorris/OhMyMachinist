@@ -404,7 +404,7 @@ function MoveToQueueButton({ job, onMoveToQueue }) {
   const [busy, setBusy] = useState(false);
   return <Button size="sm" variant="outline" disabled={busy} aria-label={`Move task ${jobDisplayTitle(job)} back to the queue`}
     onClick={async () => { setBusy(true); try { await onMoveToQueue(job); } finally { setBusy(false); } }}>
-    {busy ? "Moving…" : "Move to queue"}
+    {busy ? "Cancelling…" : "Cancel"}
   </Button>;
 }
 
