@@ -2014,7 +2014,6 @@ func (s *Store) MarkJobResolved(ctx context.Context, jobID, kind, detail string,
 	return nil
 }
 
-
 func validateOutcome(state string, exitCode int) error {
 	switch state {
 	case "succeeded":
