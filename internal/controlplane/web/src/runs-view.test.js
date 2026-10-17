@@ -77,12 +77,12 @@ test("runs default to board view and share filters when switching views", async 
 
   const retriedCard = [...document.querySelectorAll(".crafted-card")].find((card) => card.textContent.includes("Retried fixture"));
   assert.ok(retriedCard, "retried job renders a board card");
-  const attemptsRow = retriedCard.querySelector('a[href="#/runs/job_retried_old"]');
-  assert.ok(attemptsRow, "prior attempt link renders");
-  assert.ok(retriedCard.contains(attemptsRow), "attempts row is a descendant of the card element");
-  assert.ok(retriedCard.querySelector('[aria-label="2 attempts"]'), "attempts pill renders in the card");
+  assert.equal(retriedCard.querySelector('a[href="#/runs/job_retried_old"]'), null, "prior attempts are not listed inline");
+  const pill = retriedCard.querySelector('[aria-label^="2 attempts"]');
+  assert.ok(pill, "attempts pill renders in the card");
+  assert.match(pill.getAttribute("title"), /Failed|Cancelled|Succeeded|Timed out/i, "prior attempt outcomes are in the tooltip");
   const singleCard = [...document.querySelectorAll(".crafted-card")].find((card) => card.textContent.includes("Failed fixture"));
-  assert.ok(singleCard && !singleCard.querySelector('[aria-label$=" attempts"]'), "single-attempt cards show no attempts row");
+  assert.ok(singleCard && !singleCard.querySelector('[aria-label*=" attempts"]'), "single-attempt cards show no attempts row");
 
   assert.equal(button("List").getAttribute("aria-pressed"), "false");
 
