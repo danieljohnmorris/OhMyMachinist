@@ -1,5 +1,5 @@
 [Unit]
-Description=Plane webhook intake for Machinist (Tailscale-only, 100.70.205.115:7340)
+Description=Plane webhook intake for Machinist (Tailscale-only, set PLANE_INTAKE_LISTEN)
 After=network-online.target tailscaled.service machinist-control.service
 Wants=network-online.target
 
@@ -13,7 +13,7 @@ Environment=PATH=/home/machinist/.local/share/mise/shims:/home/machinist/.local/
 NoNewPrivileges=yes
 PrivateTmp=yes
 EnvironmentFile=-/home/machinist/.machinist/secrets/plane-intake.env
-Environment=PLANE_INTAKE_LISTEN=100.70.205.115:7340
+Environment=PLANE_INTAKE_LISTEN=<tailscale-ip>:7340
 ExecStart=/usr/bin/python3 /home/machinist/.local/bin/plane-intake.py serve
 Restart=on-failure
 RestartSec=5

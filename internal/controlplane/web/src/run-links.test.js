@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { detectGitHubPullRequest, detectPlaneTicket, runSidebarLinks } from "./run-links.js";
 
-test("detects a Plane ticket from the job title", () => {
+const SERVER_PLANE = { planeBaseURL: "https://plane.example.com", planeWorkspace: "ws" };
+
+test("detects a Plane ticket from the job title using the server base URL", () => {
   const job = { task: { title: "OMM-3: Keep set -e failures fatal under timings" } };
-  assert.deepEqual(detectPlaneTicket(job), {
-    href: "https://plane.danieljohnmorris.com/dan/browse/OMM-3/",
+  assert.deepEqual(detectPlaneTicket(job, null, SERVER_PLANE), {
+    href: "https://plane.example.com/ws/browse/OMM-3/",
     text: "OMM-3",
   });
 });
@@ -14,13 +16,19 @@ test("uses an explicit Plane URL as-is and before a title ticket", () => {
   const job = {
     task: {
       title: "MACH-6: Add sidebar links",
-      spec: "Track at https://plane.danieljohnmorris.com/other-workspace/browse/BLOG-7",
+      spec: "Track at https://plane.example.com/other-workspace/browse/BLOG-7",
     },
   };
-  assert.deepEqual(detectPlaneTicket(job), {
-    href: "https://plane.danieljohnmorris.com/other-workspace/browse/BLOG-7",
+  assert.deepEqual(detectPlaneTicket(job, null, SERVER_PLANE), {
+    href: "https://plane.example.com/other-workspace/browse/BLOG-7",
     text: "BLOG-7",
   });
+});
+
+test("returns no Plane link without a server-provided base URL", () => {
+  const job = { task: { title: "OMM-3: Keep set -e failures fatal under timings" } };
+  assert.equal(detectPlaneTicket(job, null, {}), null);
+  assert.equal(detectPlaneTicket(job, null), null);
 });
 
 test("uses the last GitHub PR URL in the result before instructions", () => {

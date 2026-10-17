@@ -1,8 +1,12 @@
-const PLANE_BASE_URL = "https://plane.danieljohnmorris.com";
-const PLANE_WORKSPACE = "dan";
 const PLANE_TICKET_PATTERN = /\b(OMM|MACH|SPARK|BLOG)-\d+\b/g;
-const PLANE_URL_PATTERN = /https:\/\/plane\.danieljohnmorris\.com\/[^/\s]+\/browse\/([A-Za-z]+-\d+)(?![0-9])\/?/g;
 const GITHUB_PULL_REQUEST_URL_PATTERN = /https:\/\/github\.com\/([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)\/([A-Za-z0-9._-]+)\/pull\/(\d+)(?![0-9])/g;
+
+// planeBrowsePattern builds the Plane browse-URL pattern from the base URL the
+// server provides (config or API); no Plane host is hard-coded here.
+function planeBrowsePattern(baseURL) {
+  const escaped = baseURL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`${escaped}/[^/\\s]+/browse/([A-Za-z]+-\\d+)(?![0-9])/?`, "g");
+}
 
 function matches(text, pattern) {
   if (typeof text !== "string" || !text) return [];
@@ -18,18 +22,22 @@ function planeTicketId(match) {
   return match[1];
 }
 
-export function detectPlaneTicket(job, result) {
+export function detectPlaneTicket(job, result, { planeBaseURL = "", planeWorkspace = "" } = {}) {
   const title = job?.task?.title || job?.github_issue_title || "";
   const instructions = [job?.task?.spec, job?.prompt];
   const resultText = [result?.summary, result?.error];
-  const url = firstMatch([title, ...instructions, ...resultText], PLANE_URL_PATTERN);
-  if (url) return { href: url[0], text: planeTicketId(url) };
+  const texts = [title, ...instructions, ...resultText];
+  if (planeBaseURL) {
+    const url = firstMatch(texts, planeBrowsePattern(planeBaseURL));
+    if (url) return { href: url[0], text: planeTicketId(url) };
+  }
 
-  const ticket = firstMatch([title, ...instructions, ...resultText], PLANE_TICKET_PATTERN);
-  return ticket ? {
-    href: `${PLANE_BASE_URL}/${PLANE_WORKSPACE}/browse/${ticket[0]}/`,
+  const ticket = firstMatch(texts, PLANE_TICKET_PATTERN);
+  if (!ticket || !planeBaseURL) return null;
+  return {
+    href: `${planeBaseURL}/${planeWorkspace}/browse/${ticket[0]}/`,
     text: ticket[0],
-  } : null;
+  };
 }
 
 function isCitedExamplePullRequest(text, match) {
@@ -62,9 +70,9 @@ function pullRequestLink(match) {
   return { href: match[0], text: `${owner}/${repository}#${number}` };
 }
 
-export function runSidebarLinks(job, result) {
+export function runSidebarLinks(job, result, options = {}) {
   return {
-    planeTicket: detectPlaneTicket(job, result),
+    planeTicket: detectPlaneTicket(job, result, options),
     pullRequest: detectGitHubPullRequest(job, result),
   };
 }

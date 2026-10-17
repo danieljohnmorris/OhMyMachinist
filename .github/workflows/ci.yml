@@ -29,6 +29,8 @@ jobs:
           cache-dependency-path: internal/controlplane/web/package-lock.json
       - name: Test issue triage
         run: node --test .github/scripts/issue-triage.test.cjs
+      - name: Check for private hosts and Tailscale addresses
+        run: scripts/check-no-private-hosts.sh
       - name: Confirm toolchain
         run: test "$(go env GOVERSION)" = "go1.26.6"
       - name: Install frontend dependencies

@@ -158,7 +158,7 @@ empty `[plane]` table keeps working:
 
 ```toml
 [plane]
-url = "https://plane.danieljohnmorris.com"
+url = "https://plane.example.com"
 workspace = "dan"
 trigger_label = "factory"
 approve_label = "approved"
