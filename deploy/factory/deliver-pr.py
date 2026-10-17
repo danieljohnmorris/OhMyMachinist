@@ -492,17 +492,10 @@ def main():
             break
         pushed = push_branch()
     if pushed.returncode != 0:
+        # A rejection that survives the rebase loop (rebase failed or retries
+        # exhausted) means this attempt's commit is NOT on the remote, so the
+        # open job PR does not carry it: fail the run, never report success.
         detail = (pushed.stderr or pushed.stdout).strip()[-500:]
-        job_pr = (find_job_pr(full, job_prefix) if job_prefix and is_push_rejection(pushed.stderr + pushed.stdout) else None)
-        if job_pr:
-            # The job's delivered work is already on an open PR: finish as
-            # already delivered instead of failing the run (MACH-71).
-            log(f"already delivered: {job_pr['url']} (could not push {branch}: {detail})")
-            mark_already_delivered(branch, job_pr["url"])
-            if a.start_branch and a.start_branch != "HEAD":
-                save_wip(repo)
-                g("switch", "-q", a.start_branch)
-            return 0
         raise RuntimeError(f"push to {branch} failed: {detail}")
     sha = g("rev-parse", "--short", "HEAD")
     log(f"pushed {branch} @ {sha} to {full}")

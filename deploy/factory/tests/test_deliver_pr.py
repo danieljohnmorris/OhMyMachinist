@@ -378,6 +378,66 @@ class DeliveryReuseTests(unittest.TestCase):
             self.assertEqual(_git(repo, "show", f"origin/{_JOB_BRANCH}:app.py"), "second attempt")
             self.assertEqual(_git(repo, "show", f"origin/{_JOB_BRANCH}:other.py"), "first attempt")
 
+    def test_push_failure_after_failed_rebase_fails_the_run(self) -> None:
+        """A rejection that survives a failed rebase means this attempt's
+        commit never reached the remote: the run fails instead of finishing
+        as already delivered against a PR that lacks the work."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, brief = self._setup(root)
+            self._first_attempt(root, root / "origin.git")
+            out = root / "outputs"
+            out.mkdir()
+            created: list[list[str]] = []
+            lookups = 0
+
+            def canned(cmd):
+                # The open job PR shows up only after the push was rejected,
+                # so the branch-reuse path is skipped and the rejection path
+                # sees it.
+                nonlocal lookups
+                cmd = list(cmd)
+                if cmd[:1] != ["gh"]:
+                    return None
+                if "create" in cmd:
+                    created.append(cmd)
+                    return subprocess.CompletedProcess(cmd, 0, stdout=_PR_URL + "\n", stderr="")
+                if any("headRefName" in str(argument) for argument in cmd):
+                    lookups += 1
+                    body = "[]" if lookups == 1 else json.dumps([{"headRefName": _JOB_BRANCH, "url": _PR_URL}])
+                    return subprocess.CompletedProcess(cmd, 0, stdout=body, stderr="")
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+            def fake_run(*cmd, **kwargs):
+                cmd = list(cmd)
+                response = canned(cmd)
+                if response is not None:
+                    return response.stdout.strip()
+                if cmd[:2] == ["git", "ls-remote"] and "--heads" in cmd:
+                    return ""
+                return _REAL_RUN(*cmd, **kwargs)
+
+            def fake_subprocess(cmd, *args, **kwargs):
+                response = canned(cmd)
+                if response is not None:
+                    return response
+                return _REAL_SUBPROCESS(cmd, *args, **kwargs)
+
+            with self._env(root), mock.patch.dict(os.environ, {"MACHINIST_OUTPUT_DIR": str(out)}), self._argv(repo, brief):
+                with mock.patch.object(deliver, "run", fake_run), \
+                     mock.patch.object(deliver.subprocess, "run", fake_subprocess), \
+                     mock.patch.object(deliver, "gh_repo", lambda url: ("test", "repo")), \
+                     mock.patch.object(deliver, "ALLOWED_OWNERS", {"test"}):
+                    # Conflicts with other.py from the first attempt, so the
+                    # rebase onto the job branch fails and the rejection stands.
+                    (repo / "other.py").write_text("conflicting second attempt\n", encoding="utf-8")
+                    with self.assertRaises(RuntimeError):
+                        deliver.main()
+            self.assertEqual(created, [], "no PR is opened for a failed delivery")
+            self.assertFalse((out / "pr.json").exists(), "no already-delivered pr.json is written")
+            _git(repo, "fetch", "-q", "origin", _JOB_BRANCH)
+            self.assertEqual(_git(repo, "show", f"origin/{_JOB_BRANCH}:other.py"), "first attempt")
+
     def test_no_changes_with_open_pr_finishes_as_already_delivered(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
