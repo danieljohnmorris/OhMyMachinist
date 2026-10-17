@@ -405,9 +405,25 @@ class PushRejectionHelpersTests(unittest.TestCase):
 
     def test_find_job_pr_matches_head_branch_prefix(self) -> None:
         with mock.patch.object(deliver, "run", return_value='[{"headRefName":"factory/MACH-71-x-aaaaaa","url":"u1"}]'):
-            self.assertEqual(deliver.find_job_pr("test/repo", "factory/MACH-71-")["url"], "u1")
+            self.assertEqual(deliver.find_job_pr("test/repo", "factory/MACH-71-x-")["url"], "u1")
         with mock.patch.object(deliver, "run", return_value=""):
-            self.assertIsNone(deliver.find_job_pr("test/repo", "factory/MACH-71-"))
+            self.assertIsNone(deliver.find_job_pr("test/repo", "factory/MACH-71-x-"))
+
+    def test_find_job_pr_rejects_extended_slug_branches(self) -> None:
+        # A distinct job whose slug extends this one's ("Test thing" vs
+        # "Test thing 2") must not be picked up as this job's PR.
+        with mock.patch.object(deliver, "run", return_value='[{"headRefName":"factory/MACH-71-test-thing-2-aaaaaa","url":"u2"}]'):
+            self.assertIsNone(deliver.find_job_pr("test/repo", "factory/MACH-71-test-thing-"))
+        with mock.patch.object(deliver, "run", return_value='[{"headRefName":"factory/MACH-71-test-thing-123456","url":"u1"}]'):
+            self.assertEqual(deliver.find_job_pr("test/repo", "factory/MACH-71-test-thing-")["url"], "u1")
+
+    def test_is_job_branch_requires_run_id_tail(self) -> None:
+        self.assertTrue(deliver.is_job_branch("factory/MACH-71-test-thing-123456", "factory/MACH-71-test-thing-"))
+        self.assertTrue(deliver.is_job_branch("factory/MACH-71-test-thing-manual", "factory/MACH-71-test-thing-"))
+        self.assertFalse(deliver.is_job_branch("factory/MACH-71-test-thing-2-123456", "factory/MACH-71-test-thing-"))
+        self.assertFalse(deliver.is_job_branch("factory/MACH-71-test-thing-1234567", "factory/MACH-71-test-thing-"))
+        self.assertFalse(deliver.is_job_branch("factory/MACH-71-test-thing-extra", "factory/MACH-71-test-thing-"))
+        self.assertFalse(deliver.is_job_branch("factory/MACH-72-test-thing-123456", "factory/MACH-71-test-thing-"))
 
     def test_find_job_branch_matches_remote_prefix(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -426,7 +442,12 @@ class PushRejectionHelpersTests(unittest.TestCase):
             _git(repo, "push", "-q", "origin", "main")
             _git(repo, "push", "-q", "origin", "main:refs/heads/" + _JOB_BRANCH)
             _git(repo, "push", "-q", "origin", "main:refs/heads/factory/OTHER-job-999999")
-            self.assertEqual(deliver.find_job_branch(str(repo), "factory/MACH-71-"), _JOB_BRANCH)
+            _git(repo, "push", "-q", "origin", "main:refs/heads/factory/MACH-71-test-thing-2-999999")
+            self.assertEqual(deliver.find_job_branch(str(repo), "factory/MACH-71-test-thing-"), _JOB_BRANCH)
+            # A longer slug from another job ("Test thing 2") leaves extra text
+            # before the run-id tail, so it is not this job's branch; the "-2-"
+            # prefix case is covered by test_is_job_branch_requires_run_id_tail.
+            self.assertIsNone(deliver.find_job_branch(str(repo), "factory/MACH-71-"))
             self.assertIsNone(deliver.find_job_branch(str(repo), "factory/MACH-72-"))
 
 

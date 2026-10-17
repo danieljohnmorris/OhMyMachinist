@@ -313,13 +313,29 @@ def gh_repo(url):
 
 PUSH_REJECTED_RE = re.compile(r"(?i)(non-fast-forward|fetch first|failed to push some refs)")
 
+# A job's branch is its slug prefix plus a run-id tail: the last 6 hex chars of
+# run_<24 hex> (internal/runner runner.go validRunID), or "manual" when
+# MACHINIST_RUN_ID is unset.
+RUN_ID_TAIL_RE = re.compile(r"[0-9a-f]{6}|manual", re.IGNORECASE)
+
+def is_job_branch(branch, prefix):
+    """True if the branch was cut for this job: the name starts with the job's
+    slug prefix and the remainder is a bare run-id tail. A distinct job whose
+    slug only extends this one's (SPEC titles "Test thing" vs "Test thing 2"
+    give branches ...-test-thing-<runid> and ...-test-thing-2-<runid>) must
+    not match: its remainder carries the extra slug text before the run id."""
+    if not branch.startswith(prefix):
+        return False
+    return bool(RUN_ID_TAIL_RE.fullmatch(branch[len(prefix):]))
+
 def is_push_rejection(output):
     """True if a git push failure was a non-fast-forward rejection (MACH-71)."""
     return bool(PUSH_REJECTED_RE.search(output or ""))
 
 def find_job_pr(repo_full, prefix):
     """The open PR whose head branch was cut for this job (MACH-71). The
-    branch name embeds the run id, so a retried run looks the job up by prefix."""
+    branch name embeds the run id, so a retried run looks the job up by slug
+    prefix plus a run-id tail; a longer slug from another job cannot match."""
     out = run("gh", "pr", "list", "--repo", repo_full, "--state", "open",
               "--json", "headRefName,url", check=False)
     try:
@@ -328,7 +344,7 @@ def find_job_pr(repo_full, prefix):
         return None
     for pull in pulls or []:
         head = pull.get("headRefName") or ""
-        if head.startswith(prefix):
+        if is_job_branch(head, prefix):
             return {"branch": head, "url": pull.get("url", "")}
     return None
 
@@ -337,7 +353,7 @@ def find_job_branch(repo, prefix):
     out = run("git", "ls-remote", "--heads", "origin", f"{prefix}*", cwd=repo, check=False)
     for line in out.splitlines():
         ref = line.split("\t", 1)[-1].strip()
-        if ref.startswith("refs/heads/") and ref[len("refs/heads/"):].startswith(prefix):
+        if ref.startswith("refs/heads/") and is_job_branch(ref[len("refs/heads/"):], prefix):
             return ref[len("refs/heads/"):]
     return None
 
