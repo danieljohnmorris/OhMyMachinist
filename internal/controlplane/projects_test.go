@@ -110,3 +110,31 @@ func TestMalformedProjectSettingFailsLoudly(t *testing.T) {
 		t.Fatalf("error = %q, want it to name the malformed setting", body.Error)
 	}
 }
+
+func TestPutMalformedProjectSettingIsRejected(t *testing.T) {
+	directory := t.TempDir()
+	definitionPath := filepath.Join(directory, "config.toml")
+	if err := os.WriteFile(definitionPath, []byte("[commands.plan]\nexecutor = \"test\"\nprompt_file = \"plan.md\"\ntimeout = \"1m\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := openTestStore(t, filepath.Join(directory, "machinist.db"))
+	server, err := NewServer(store, definitionPath, "secret", 0, config.AuthTokens)
+	if err != nil {
+		t.Fatal(err)
+	}
+	webServer := httptest.NewServer(server.Handler())
+	defer webServer.Close()
+
+	response := authRequest(t, http.MethodPut, webServer.URL+"/api/v1/settings/tracker.projects.SPARKS", "secret", map[string]string{"value": "repository = [broken"})
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("put status = %d, want 400 for a malformed project table", response.StatusCode)
+	}
+	settings, err := store.Settings(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := settings["tracker.projects.SPARKS"]; ok {
+		t.Fatal("malformed project setting was stored")
+	}
+}

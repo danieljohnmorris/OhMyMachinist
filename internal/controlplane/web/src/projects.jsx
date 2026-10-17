@@ -133,7 +133,7 @@ export function ProjectsPage({ repositories = [], commands = [], csrfToken }) {
           </tbody>
         </table>
       </div>
-      <p className="border-t border-border px-4 py-3 text-xs text-muted-foreground">Select a row to manage its per-project skills. A project marked <span className="font-mono">setting</span> overlays its <span className="font-mono">[tracker.projects]</span> table in config.toml.</p>
+      <p className="border-t border-border px-4 py-3 text-xs text-muted-foreground">Select a row to manage its per-project skills. A project marked <span className="font-mono">override</span> overlays its <span className="font-mono">[tracker.projects]</span> table in config.toml.</p>
     </Card>}
 
     {!loaded && <QuietState title="Loading projects" description="Reading the resolved tracker configuration." role="status" />}

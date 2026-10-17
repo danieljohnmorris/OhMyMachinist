@@ -41,3 +41,21 @@ func (s *Server) applyProjectOverrides(ctx context.Context, c *config.Config) er
 	}
 	return nil
 }
+
+// validateProjectSetting rejects a tracker.projects.<NAME> value that is not a
+// valid project table, so one bad write from the Projects view cannot make
+// every ticket create and approve fail until someone deletes the setting.
+func validateProjectSetting(key, value string) error {
+	name, ok := strings.CutPrefix(key, projectSettingPrefix)
+	if !ok {
+		return nil
+	}
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("setting %q: project name is empty", key)
+	}
+	var project config.TrackerProject
+	if err := toml.Unmarshal([]byte(value), &project); err != nil {
+		return fmt.Errorf("setting %q: %w", key, err)
+	}
+	return nil
+}
