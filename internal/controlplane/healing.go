@@ -378,8 +378,10 @@ func (s *Server) HealRun(ctx context.Context, runID string) {
 	}
 	// Each queued run is one attempt; the budget counts retries after the
 	// first, so the cap on total runs is budget+1.
-	giveUp := func(reason string) {
-		s.finishHealing(ctx, job.ID, job, diagnosis, budget, attempts, true, time.Time{})
+	// exhausted is true only when the retry budget is actually spent; spec
+	// and secret causes stop immediately with budget remaining.
+	giveUp := func(reason string, exhausted bool) {
+		s.finishHealing(ctx, job.ID, job, diagnosis, budget, attempts, exhausted, time.Time{})
 		s.spoolFailAlert(ctx, runID, &HealingAlert{
 			Cause: diagnosis.Cause, Summary: diagnosis.Summary,
 			Fix: healingFixDescription(diagnosis.Cause, diagnosis.Files),
@@ -387,12 +389,12 @@ func (s *Server) HealRun(ctx context.Context, runID string) {
 		}, string(diagnosis.Cause))
 	}
 	if attempts >= budget+1 {
-		giveUp("retry budget exhausted")
+		giveUp("retry budget exhausted", true)
 		return
 	}
 	switch diagnosis.Cause {
 	case CauseSpec, CauseSecret:
-		giveUp("needs a human: " + healingFixDescription(diagnosis.Cause, diagnosis.Files))
+		giveUp("needs a human: "+healingFixDescription(diagnosis.Cause, diagnosis.Files), false)
 	case CauseInfra:
 		backoff := s.healingBackoff(attempts)
 		retryAfter := s.now().UTC().Add(backoff)
