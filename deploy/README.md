@@ -91,6 +91,21 @@ The `machinist-drift-check.timer` runs it hourly. Both it and `install.sh`
 warn when the server config has no `[alerts]` section (MACH-70): failed runs
 then alert nowhere — no spool file, no webhook.
 
+## Delivery reuse across restarts and retries (MACH-71)
+
+`deliver-pr.py` derives the branch from the job's SPEC line, so a redelivered
+run or a self-heal retry can find work that is already delivered. Before the
+agent starts, `omp-glm-pr` looks up a branch already pushed for the job
+(`deliver-pr.py --find-branch`) and checks it out; at delivery the script
+reuses that branch and its open PR instead of opening a second one. If a push
+to the job's own branch is rejected as non-fast-forward (another attempt got
+there first), the script fetches, rebases onto the remote branch and pushes
+again — it never fails the run on that rejection. When there is nothing new
+to deliver and the job's PR is already open, the run finishes as already
+delivered with `pr.json` linking the PR. Self-healing classifies a push
+rejection on the job's own branch as a stale checkout (fetch and rebase),
+never as infra, so it cannot schedule a from-scratch infra retry.
+
 ## Optional external dependencies
 
 These are host-specific and deliberately not managed here:

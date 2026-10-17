@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/owainlewis/machinist/internal/config"
@@ -327,7 +328,32 @@ func (s *Store) cancelPlainJob(ctx context.Context, tx *sql.Tx, job, action stri
 	return tx.Commit()
 }
 
-func reclaimLeases(ctx context.Context, tx *sql.Tx, now time.Time) (int64, error) {
+// reclaimLeases marks runs whose lease lapsed as interrupted (workflow jobs)
+// or back to queued (plain runs). During the post-restart grace window
+// (MACH-71) nothing is reclaimed: a lease that lapsed while the control plane
+// was down still belongs to its worker, which can re-attach by heartbeat.
+func (s *Store) reclaimLeases(ctx context.Context, tx *sql.Tx, now time.Time) (int64, error) {
+	if s.inLeaseGrace(now) {
+		return 0, nil
+	}
+	// Name the runs being redelivered so restart recovery is visible in the log.
+	lapsed, err := tx.QueryContext(ctx, `SELECT id,COALESCE(worker_instance,'') FROM runs WHERE state='running' AND (lease_expires_at IS NULL OR lease_expires_at<=?) AND job_id NOT IN (SELECT job_id FROM workflow_jobs)`, now.UnixNano())
+	if err != nil {
+		return 0, err
+	}
+	var redeliveries []string
+	for lapsed.Next() {
+		var id, worker string
+		if err := lapsed.Scan(&id, &worker); err != nil {
+			lapsed.Close()
+			return 0, err
+		}
+		redeliveries = append(redeliveries, fmt.Sprintf("%s (worker %s)", id, worker))
+	}
+	lapsed.Close()
+	if err := lapsed.Err(); err != nil {
+		return 0, err
+	}
 	// A workflow may have performed external effects. Never silently replay it.
 	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET state='interrupted',updated_at=? WHERE id IN (SELECT job_id FROM runs WHERE state='running' AND (lease_expires_at IS NULL OR lease_expires_at<=?) AND job_id IN (SELECT job_id FROM workflow_jobs))`, now.Format(time.RFC3339Nano), now.UnixNano()); err != nil {
 		return 0, err
@@ -342,6 +368,9 @@ func reclaimLeases(ctx context.Context, tx *sql.Tx, now time.Time) (int64, error
 		return 0, err
 	}
 	n, err := res.RowsAffected()
+	for _, redelivery := range redeliveries {
+		log.Printf("lease: run %s expired with no heartbeat; redelivering", redelivery)
+	}
 	return n + interrupted, err
 }
 

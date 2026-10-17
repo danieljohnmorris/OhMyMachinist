@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -246,6 +247,268 @@ class LaneWipTests(unittest.TestCase):
                 deliver.save_wip(str(repo))
             self.assertEqual(list(scratch.glob("*.patch")) if scratch.exists() else [], [])
             self.assertIn("machinist-earlier", _git(repo, "stash", "list"))
+
+
+_JOB_BRANCH = "factory/MACH-71-test-thing-123456"
+_PR_URL = "https://github.com/test/repo/pull/85"
+_REAL_RUN = deliver.run
+_REAL_SUBPROCESS = subprocess.run
+
+
+def _stub_gh(open_pulls: str, head_lookup: str):
+    """Stub gh in deliver-pr: the MACH-71 job lookup (`pr list --json
+    headRefName,url`) returns open_pulls; other `pr list` calls return
+    head_lookup; `pr create` is recorded, never run. Git runs for real."""
+    created: list[list[str]] = []
+
+    def canned(cmd):
+        """Canned gh responses, or None to run for real."""
+        cmd = list(cmd)
+        if cmd[:1] != ["gh"]:
+            return None
+        if "create" in cmd:
+            created.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout=_PR_URL + "\n", stderr="")
+        if any("headRefName" in str(argument) for argument in cmd):
+            return subprocess.CompletedProcess(cmd, 0, stdout=open_pulls, stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout=head_lookup, stderr="")
+
+    def fake_run(*cmd, **kwargs):
+        cmd = list(cmd)
+        response = canned(cmd)
+        if response is not None:
+            return response.stdout.strip()
+        if cmd[:2] == ["git", "ls-remote"] and "--heads" in cmd:
+            # Simulate the branch appearing between the lookup and the push.
+            return ""
+        return _REAL_RUN(*cmd, **kwargs)
+
+    def fake_subprocess(cmd, *args, **kwargs):
+        response = canned(cmd)
+        if response is not None:
+            return response
+        return _REAL_SUBPROCESS(cmd, *args, **kwargs)
+
+    patches = [
+        mock.patch.object(deliver, "run", fake_run),
+        mock.patch.object(deliver.subprocess, "run", fake_subprocess),
+        mock.patch.object(deliver, "gh_repo", lambda url: ("test", "repo")),
+        mock.patch.object(deliver, "ALLOWED_OWNERS", {"test"}),
+    ]
+    return patches, created
+
+
+class DeliveryReuseTests(unittest.TestCase):
+    """MACH-71: redelivery and retries reuse the job's existing branch or PR
+    and never fail on a non-fast-forward push to the job's own branch."""
+
+    def _setup(self, root: Path):
+        origin = root / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+        repo = root / "repo"
+        repo.mkdir()
+        _git(repo, "init", "-q", "-b", "main")
+        _git(repo, "config", "user.name", "Test")
+        _git(repo, "config", "user.email", "test@example.com")
+        (repo / "app.py").write_text("base\n", encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "base")
+        _git(repo, "remote", "add", "origin", str(origin))
+        _git(repo, "push", "-q", "origin", "main")
+        brief = root / "brief.txt"
+        brief.write_text("--- SPEC: MACH-71 Test thing ---\n--- END SPEC ---\n", encoding="utf-8")
+        return repo, str(brief)
+
+    def _first_attempt(self, root: Path, origin: Path):
+        """Another lane already cut the job's branch (no fast-forward base)."""
+        lane = root / "lane"
+        subprocess.run(["git", "clone", "-q", str(origin), str(lane)], check=True)
+        _git(lane, "config", "user.name", "Test")
+        _git(lane, "config", "user.email", "test@example.com")
+        _git(lane, "switch", "-q", "-c", _JOB_BRANCH)
+        (lane / "other.py").write_text("first attempt\n", encoding="utf-8")
+        _git(lane, "add", "-A")
+        _git(lane, "commit", "-q", "-m", "first attempt")
+        _git(lane, "push", "-q", "origin", _JOB_BRANCH)
+
+    def _argv(self, repo: Path, brief: str, extra=()):
+        return mock.patch("sys.argv", ["deliver-pr.py", "--repo", str(repo), "--brief", brief,
+                                       "--start-branch", "main", *extra])
+
+    def _env(self, root: Path):
+        return mock.patch.dict(os.environ, {
+            "MACHINIST_RUN_ID": "run_000000123456",
+            "MACHINIST_SCRATCH_DIR": str(root / "scratch"),
+            "MACHINIST_REVIEW_SCRIPT": str(root / "no-review-here.py"),
+        })
+
+    def test_retry_reuses_existing_branch_and_pr(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, brief = self._setup(root)
+            self._first_attempt(root, repo / ".." / "origin.git")
+            out = root / "outputs"
+            out.mkdir()
+            patches, created = _stub_gh(json.dumps([{"headRefName": _JOB_BRANCH, "url": _PR_URL}]), _PR_URL)
+            with self._env(root), mock.patch.dict(os.environ, {"MACHINIST_OUTPUT_DIR": str(out)}), self._argv(repo, brief):
+                with patches[0], patches[1], patches[2], patches[3]:
+                    (repo / "app.py").write_text("second attempt\n", encoding="utf-8")
+                    self.assertEqual(deliver.main(), 0)
+            self.assertEqual(created, [], "a second PR must not be opened")
+            _git(repo, "fetch", "-q", "origin", _JOB_BRANCH)
+            self.assertEqual(_git(repo, "show", f"origin/{_JOB_BRANCH}:app.py"), "second attempt")
+            self.assertEqual(_git(repo, "show", f"origin/{_JOB_BRANCH}:other.py"), "first attempt")
+            self.assertEqual(_git(repo, "rev-parse", "--abbrev-ref", "HEAD"), "main")
+            result = json.loads((out / "pr.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["pr"], _PR_URL)
+            self.assertEqual(result["branch"], _JOB_BRANCH)
+
+    def test_push_rejection_rebases_onto_job_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, brief = self._setup(root)
+            self._first_attempt(root, root / "origin.git")
+            patches, created = _stub_gh("[]", "")
+            with self._env(root), self._argv(repo, brief):
+                with patches[0], patches[1], patches[2], patches[3]:
+                    (repo / "app.py").write_text("second attempt\n", encoding="utf-8")
+                    self.assertEqual(deliver.main(), 0)
+            self.assertEqual(len(created), 1, "exactly one PR after the rebase")
+            _git(repo, "fetch", "-q", "origin", _JOB_BRANCH)
+            self.assertEqual(_git(repo, "show", f"origin/{_JOB_BRANCH}:app.py"), "second attempt")
+            self.assertEqual(_git(repo, "show", f"origin/{_JOB_BRANCH}:other.py"), "first attempt")
+
+    def test_push_failure_after_failed_rebase_fails_the_run(self) -> None:
+        """A rejection that survives a failed rebase means this attempt's
+        commit never reached the remote: the run fails instead of finishing
+        as already delivered against a PR that lacks the work."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, brief = self._setup(root)
+            self._first_attempt(root, root / "origin.git")
+            out = root / "outputs"
+            out.mkdir()
+            created: list[list[str]] = []
+            lookups = 0
+
+            def canned(cmd):
+                # The open job PR shows up only after the push was rejected,
+                # so the branch-reuse path is skipped and the rejection path
+                # sees it.
+                nonlocal lookups
+                cmd = list(cmd)
+                if cmd[:1] != ["gh"]:
+                    return None
+                if "create" in cmd:
+                    created.append(cmd)
+                    return subprocess.CompletedProcess(cmd, 0, stdout=_PR_URL + "\n", stderr="")
+                if any("headRefName" in str(argument) for argument in cmd):
+                    lookups += 1
+                    body = "[]" if lookups == 1 else json.dumps([{"headRefName": _JOB_BRANCH, "url": _PR_URL}])
+                    return subprocess.CompletedProcess(cmd, 0, stdout=body, stderr="")
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+            def fake_run(*cmd, **kwargs):
+                cmd = list(cmd)
+                response = canned(cmd)
+                if response is not None:
+                    return response.stdout.strip()
+                if cmd[:2] == ["git", "ls-remote"] and "--heads" in cmd:
+                    return ""
+                return _REAL_RUN(*cmd, **kwargs)
+
+            def fake_subprocess(cmd, *args, **kwargs):
+                response = canned(cmd)
+                if response is not None:
+                    return response
+                return _REAL_SUBPROCESS(cmd, *args, **kwargs)
+
+            with self._env(root), mock.patch.dict(os.environ, {"MACHINIST_OUTPUT_DIR": str(out)}), self._argv(repo, brief):
+                with mock.patch.object(deliver, "run", fake_run), \
+                     mock.patch.object(deliver.subprocess, "run", fake_subprocess), \
+                     mock.patch.object(deliver, "gh_repo", lambda url: ("test", "repo")), \
+                     mock.patch.object(deliver, "ALLOWED_OWNERS", {"test"}):
+                    # Conflicts with other.py from the first attempt, so the
+                    # rebase onto the job branch fails and the rejection stands.
+                    (repo / "other.py").write_text("conflicting second attempt\n", encoding="utf-8")
+                    with self.assertRaises(RuntimeError):
+                        deliver.main()
+            self.assertEqual(created, [], "no PR is opened for a failed delivery")
+            self.assertFalse((out / "pr.json").exists(), "no already-delivered pr.json is written")
+            _git(repo, "fetch", "-q", "origin", _JOB_BRANCH)
+            self.assertEqual(_git(repo, "show", f"origin/{_JOB_BRANCH}:other.py"), "first attempt")
+
+    def test_no_changes_with_open_pr_finishes_as_already_delivered(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo, brief = self._setup(root)
+            out = root / "outputs"
+            out.mkdir()
+            patches, created = _stub_gh(json.dumps([{"headRefName": _JOB_BRANCH, "url": _PR_URL}]), _PR_URL)
+            with self._env(root), mock.patch.dict(os.environ, {"MACHINIST_OUTPUT_DIR": str(out)}), self._argv(repo, brief):
+                with patches[0], patches[1], patches[2], patches[3]:
+                    self.assertEqual(deliver.main(), 0)
+            self.assertEqual(created, [])
+            self.assertEqual(_git(repo, "rev-parse", "--abbrev-ref", "HEAD"), "main")
+            self.assertEqual(json.loads((out / "pr.json").read_text(encoding="utf-8"))["pr"], _PR_URL)
+            # Nothing was pushed: the remote tip is still the bare seed.
+            self.assertEqual(_git(repo, "ls-remote", "origin", "refs/heads/main").split("\t")[0],
+                             _git(repo, "rev-parse", "main"))
+
+
+class PushRejectionHelpersTests(unittest.TestCase):
+    def test_is_push_rejection_matches_rejections_only(self) -> None:
+        self.assertTrue(deliver.is_push_rejection("! [rejected] main -> main (non-fast-forward)"))
+        self.assertTrue(deliver.is_push_rejection("error: failed to push some refs to 'origin'"))
+        self.assertFalse(deliver.is_push_rejection("remote: protected branch hook declined"))
+        self.assertFalse(deliver.is_push_rejection(""))
+
+    def test_find_job_pr_matches_head_branch_prefix(self) -> None:
+        with mock.patch.object(deliver, "run", return_value='[{"headRefName":"factory/MACH-71-x-aaaaaa","url":"u1"}]'):
+            self.assertEqual(deliver.find_job_pr("test/repo", "factory/MACH-71-x-")["url"], "u1")
+        with mock.patch.object(deliver, "run", return_value=""):
+            self.assertIsNone(deliver.find_job_pr("test/repo", "factory/MACH-71-x-"))
+
+    def test_find_job_pr_rejects_extended_slug_branches(self) -> None:
+        # A distinct job whose slug extends this one's ("Test thing" vs
+        # "Test thing 2") must not be picked up as this job's PR.
+        with mock.patch.object(deliver, "run", return_value='[{"headRefName":"factory/MACH-71-test-thing-2-aaaaaa","url":"u2"}]'):
+            self.assertIsNone(deliver.find_job_pr("test/repo", "factory/MACH-71-test-thing-"))
+        with mock.patch.object(deliver, "run", return_value='[{"headRefName":"factory/MACH-71-test-thing-123456","url":"u1"}]'):
+            self.assertEqual(deliver.find_job_pr("test/repo", "factory/MACH-71-test-thing-")["url"], "u1")
+
+    def test_is_job_branch_requires_run_id_tail(self) -> None:
+        self.assertTrue(deliver.is_job_branch("factory/MACH-71-test-thing-123456", "factory/MACH-71-test-thing-"))
+        self.assertTrue(deliver.is_job_branch("factory/MACH-71-test-thing-manual", "factory/MACH-71-test-thing-"))
+        self.assertFalse(deliver.is_job_branch("factory/MACH-71-test-thing-2-123456", "factory/MACH-71-test-thing-"))
+        self.assertFalse(deliver.is_job_branch("factory/MACH-71-test-thing-1234567", "factory/MACH-71-test-thing-"))
+        self.assertFalse(deliver.is_job_branch("factory/MACH-71-test-thing-extra", "factory/MACH-71-test-thing-"))
+        self.assertFalse(deliver.is_job_branch("factory/MACH-72-test-thing-123456", "factory/MACH-71-test-thing-"))
+
+    def test_find_job_branch_matches_remote_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            origin = root / "origin.git"
+            subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+            repo = root / "repo"
+            repo.mkdir()
+            _git(repo, "init", "-q", "-b", "main")
+            _git(repo, "config", "user.name", "Test")
+            _git(repo, "config", "user.email", "test@example.com")
+            (repo / "app.py").write_text("base\n", encoding="utf-8")
+            _git(repo, "add", "-A")
+            _git(repo, "commit", "-q", "-m", "base")
+            _git(repo, "remote", "add", "origin", str(origin))
+            _git(repo, "push", "-q", "origin", "main")
+            _git(repo, "push", "-q", "origin", "main:refs/heads/" + _JOB_BRANCH)
+            _git(repo, "push", "-q", "origin", "main:refs/heads/factory/OTHER-job-999999")
+            _git(repo, "push", "-q", "origin", "main:refs/heads/factory/MACH-71-test-thing-2-999999")
+            self.assertEqual(deliver.find_job_branch(str(repo), "factory/MACH-71-test-thing-"), _JOB_BRANCH)
+            # A longer slug from another job ("Test thing 2") leaves extra text
+            # before the run-id tail, so it is not this job's branch; the "-2-"
+            # prefix case is covered by test_is_job_branch_requires_run_id_tail.
+            self.assertIsNone(deliver.find_job_branch(str(repo), "factory/MACH-71-"))
+            self.assertIsNone(deliver.find_job_branch(str(repo), "factory/MACH-72-"))
 
 
 if __name__ == "__main__":

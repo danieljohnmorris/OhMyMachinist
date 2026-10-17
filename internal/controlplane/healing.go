@@ -74,6 +74,11 @@ type healingRecord struct {
 var (
 	// Infra: dead GLM URL, offline hosts, refused or reset connections, DNS.
 	healInfraPattern = regexp.MustCompile(`(?i)(connection refused|connection reset|no such host|network is unreachable|i/o timeout|dial tcp|econnrefused|502 bad gateway|503 service unavailable|api\.openai\.com|glm|endpoints? (is|are) (dead|down|offline)|host (is )?unreachable)`)
+	// Push rejection on the job's own branch (MACH-71): deliver-pr already
+	// fetches and rebases onto it, so a retry from scratch would redo
+	// delivered work. Ranked above infra so a rejection is never mistaken
+	// for an outage and scheduled as one.
+	healPushRejectionPattern = regexp.MustCompile(`(?i)(non-fast-forward|fetch first|divergent branches|failed to push some refs)`)
 	// Stale checkout: the base moved under the lane.
 	healStalePattern = regexp.MustCompile(`(?i)(non-fast-forward|fetch first|divergent branches|behind (its )?remote|your branch is behind|stale checkout|needs rebase|failed to push some refs)`)
 	// Test or code failure: the fix is an amend on the same branch.
@@ -91,13 +96,20 @@ var (
 )
 
 // classifyFailure maps failure text to a cause, in priority order: a secret
-// refusal outranks infra noise in the same log, infra outranks a stale
+// refusal outranks everything, a push rejection on the job's own branch
+// outranks infra noise in the same log (MACH-71), infra outranks a stale
 // checkout, and everything else defaults to a test/code failure — the most
 // common recoverable case. The second result lists offending files for a
 // secret refusal.
 func classifyFailure(text string) (HealCause, []string) {
 	if healSecretPattern.MatchString(text) {
 		return CauseSecret, healOffendingFiles(text)
+	}
+	if healPushRejectionPattern.MatchString(text) {
+		// MACH-71: a non-fast-forward rejection on the job's own branch is
+		// not an outage; deliver-pr rebases and an infra retry from scratch
+		// would redo delivered work.
+		return CauseStale, nil
 	}
 	if healInfraPattern.MatchString(text) {
 		return CauseInfra, nil
