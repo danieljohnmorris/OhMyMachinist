@@ -75,9 +75,9 @@ test("cancel is offered for plain queued jobs and POSTs to the cancel endpoint",
   mountedRoot = (await server.ssrLoadModule("/src/main.jsx")).appRoot;
   await eventually(() => assert.match(document.body.textContent, /Plain queued fixture/));
 
-  const plainCancel = [...document.querySelectorAll("button")].find((el) => el.getAttribute("aria-label") === "Cancel task Plain queued fixture");
+  const plainCancel = [...document.querySelectorAll("button")].find((el) => el.getAttribute("aria-label") === "Cancel run Plain queued fixture");
   assert.ok(plainCancel, "plain queued job card shows a cancel button");
-  assert.equal([...document.querySelectorAll("button")].find((el) => el.getAttribute("aria-label") === "Cancel task Workflow queued fixture"), undefined, "workflow job card shows no cancel button");
+  assert.equal([...document.querySelectorAll("button")].find((el) => el.getAttribute("aria-label") === "Cancel run Workflow queued fixture"), undefined, "workflow job card shows no cancel button");
 
   plainCancel.click();
   await eventually(() => assert.equal(cancelRequests.length, 1));
@@ -87,11 +87,11 @@ test("cancel is offered for plain queued jobs and POSTs to the cancel endpoint",
 
   window.location.hash = "#/runs/job_workflow_queued";
   await eventually(() => assert.match(document.body.textContent, /Workflow queued fixture/));
-  assert.equal([...document.querySelectorAll("button")].find((el) => el.getAttribute("aria-label") === "Cancel task Workflow queued fixture"), undefined, "workflow job detail shows no cancel button");
+  assert.equal([...document.querySelectorAll("button")].find((el) => el.getAttribute("aria-label") === "Cancel run Workflow queued fixture"), undefined, "workflow job detail shows no cancel button");
 
   window.location.hash = "#/runs/job_detail_cancel";
   await eventually(() => assert.match(document.body.textContent, /Detail cancel fixture/));
-  const detailCancel = [...document.querySelectorAll("button")].find((el) => el.getAttribute("aria-label") === "Cancel task Detail cancel fixture");
+  const detailCancel = [...document.querySelectorAll("button")].find((el) => el.getAttribute("aria-label") === "Cancel run Detail cancel fixture");
   assert.ok(detailCancel, "plain queued job detail shows a cancel button");
   detailCancel.click();
   await eventually(() => assert.equal(cancelRequests.length, 2));

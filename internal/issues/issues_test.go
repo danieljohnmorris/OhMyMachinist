@@ -73,6 +73,46 @@ func TestPlaneClientFetchesPostsAndPolls(t *testing.T) {
 	}
 }
 
+func TestPlaneClientPollUsesHumanKeysAndSkipsClosedTickets(t *testing.T) {
+	var projectLookups, stateLookups int
+	handler := func(request *http.Request) *http.Response {
+		switch {
+		case request.URL.Path == "/api/v1/workspaces/platform/projects/platform-project/issues/":
+			if request.URL.Query().Get("labels") != "factory" || !strings.Contains(request.URL.Query().Get("expand"), "state") {
+				return nil
+			}
+			return fixtureResponse(`{"results":[
+				{"id":"uuid-open","sequence_id":5,"name":"Open","labels":[{"name":"factory"}],"state":{"id":"s-started","name":"In Progress","group":"started"}},
+				{"id":"uuid-done","sequence_id":6,"name":"Shipped","labels":[{"name":"factory"}],"state":{"id":"s-shipped","name":"Shipped","group":"completed"}},
+				{"id":"uuid-cancelled","sequence_id":7,"name":"Dropped","state":"s-cancelled"},
+				{"id":"uuid-backlog","sequence_id":8,"name":"Queued","state":"s-backlog"}
+			]}`)
+		case request.URL.Path == "/api/v1/workspaces/platform/projects/platform-project/":
+			projectLookups++
+			return fixtureResponse(`{"id":"platform-project","identifier":"MACH"}`)
+		case request.URL.Path == "/api/v1/workspaces/platform/projects/platform-project/states/":
+			stateLookups++
+			return fixtureResponse(`{"results":[{"id":"s-cancelled","name":"Won't do","group":"cancelled"},{"id":"s-backlog","name":"Backlog","group":"backlog"}]}`)
+		default:
+			return nil
+		}
+	}
+	client := &PlaneClient{config: PlaneConfig{URL: "https://plane.example", Workspace: "platform", ProjectID: "platform-project", APIKey: "key"}, client: &http.Client{Transport: fixtureTransport{handler: handler}}}
+	found, err := client.IssuesWithLabel(t.Context(), "factory")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found) != 2 || found[0].Key != "MACH-5" || found[0].ID != "uuid-open" || found[1].Key != "MACH-8" {
+		t.Fatalf("poll = %#v, want open MACH-5 and MACH-8 only", found)
+	}
+	if found[0].URL != "https://plane.example/platform/browse/MACH-5/" {
+		t.Fatalf("url = %q, want browse URL", found[0].URL)
+	}
+	if projectLookups != 1 || stateLookups != 1 {
+		t.Fatalf("project lookups = %d, state lookups = %d, want one each", projectLookups, stateLookups)
+	}
+}
+
 func TestPlaneClientIssueState(t *testing.T) {
 	handler := func(request *http.Request) *http.Response {
 		switch {
@@ -125,6 +165,8 @@ func TestParseIssueWebhookState(t *testing.T) {
 
 func TestLinearClientFetchesPostsAndPolls(t *testing.T) {
 	var sawAuth bool
+	var stateUpdate map[string]any
+	var pollVariables []map[string]any
 	handler := func(request *http.Request) *http.Response {
 		sawAuth = request.Header.Get("Authorization") == "test-linear-key"
 		var payload struct {
@@ -133,18 +175,36 @@ func TestLinearClientFetchesPostsAndPolls(t *testing.T) {
 		}
 		_ = json.NewDecoder(request.Body).Decode(&payload)
 		switch {
-		case strings.Contains(payload.Query, "query Issue"):
-			return fixtureResponse(`{"data":{"issues":{"nodes":[{"id":"uuid-1","identifier":"ABC-12","title":"Add archive page","description":"Spec","url":"https://linear.example.app/ABC-12","team":{"id":"team-1"},"labels":[{"name":"factory"}]}]}}}`)
-		case strings.Contains(payload.Query, "query Issues"):
-			if payload.Variables["label"] != "factory" || payload.Variables["project"] != "Platform" {
+		case strings.HasPrefix(payload.Query, "query Issue(") && strings.Contains(payload.Query, "states("):
+			// Team states: a renamed completed state must still match "Done".
+			return fixtureResponse(`{"data":{"issue":{"id":"uuid-1","team":{"states":{"nodes":[{"id":"state-started","name":"In Progress","type":"started"},{"id":"state-shipped","name":"Shipped","type":"completed"}]}}}}}`)
+		case strings.HasPrefix(payload.Query, "query Issue("):
+			// The singleton issue(id:) query resolves human identifiers;
+			// IssueFilter.id only compares UUIDs and must not be used.
+			if !strings.Contains(payload.Query, "issue(id: $key)") || strings.Contains(payload.Query, "filter") {
+				return fixtureResponse(`{"errors":[{"message":"unexpected issue lookup"}]}`)
+			}
+			if payload.Variables["key"] != "ABC-12" {
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+					Body: io.NopCloser(strings.NewReader(`{"data":null,"errors":[{"message":"Entity not found: Issue","extensions":{"code":"INVALID_INPUT"}}]}`))}
+			}
+			return fixtureResponse(`{"data":{"issue":{"id":"uuid-1","identifier":"ABC-12","title":"Add archive page","description":"Spec","url":"https://linear.example.app/ABC-12","team":{"id":"team-1"},"labels":{"nodes":[{"name":"factory"}]},"state":{"name":"Shipped","type":"completed"}}}}`)
+		case strings.HasPrefix(payload.Query, "query Issues("):
+			if payload.Variables["label"] != "factory" || payload.Variables["project"] != "Platform" || !strings.Contains(payload.Query, `nin: ["completed", "canceled"]`) {
 				return nil
 			}
-			return fixtureResponse(`{"data":{"issues":{"nodes":[{"id":"uuid-1","identifier":"ABC-12","title":"Add archive page","url":"https://linear.example.app/ABC-12","team":{"id":"team-1"}}]}}}`)
+			pollVariables = append(pollVariables, payload.Variables)
+			if payload.Variables["after"] == nil {
+				return fixtureResponse(`{"data":{"issues":{"nodes":[{"id":"uuid-1","identifier":"ABC-12","title":"Add archive page","url":"https://linear.example.app/ABC-12","team":{"id":"team-1"},"labels":{"nodes":[{"name":"factory"}]}}],"pageInfo":{"hasNextPage":true,"endCursor":"cursor-1"}}}}`)
+			}
+			return fixtureResponse(`{"data":{"issues":{"nodes":[{"id":"uuid-2","identifier":"ABC-13","title":"Second page","url":"https://linear.example.app/ABC-13","team":{"id":"team-1"},"labels":{"nodes":[{"name":"Factory"}]}}],"pageInfo":{"hasNextPage":false,"endCursor":"cursor-2"}}}}`)
 		case strings.Contains(payload.Query, "commentCreate"):
+			if payload.Variables["issue"] != "uuid-1" {
+				return nil
+			}
 			return fixtureResponse(`{"data":{"commentCreate":{"success":true}}}`)
-		case strings.Contains(payload.Query, "workflowStates"):
-			return fixtureResponse(`{"data":{"workflowStates":{"nodes":[{"id":"state-1","name":"Done"}]}}}`)
 		case strings.Contains(payload.Query, "issueUpdate"):
+			stateUpdate = payload.Variables
 			return fixtureResponse(`{"data":{"issueUpdate":{"success":true}}}`)
 		default:
 			return nil
@@ -152,18 +212,64 @@ func TestLinearClientFetchesPostsAndPolls(t *testing.T) {
 	}
 	client := &LinearClient{config: LinearConfig{APIKey: "test-linear-key"}, project: "Platform", endpoint: "linear://fixture", client: &http.Client{Transport: fixtureTransport{handler: handler}}}
 	issue, err := client.FetchIssue(t.Context(), "ABC-12")
-	if err != nil || issue.Key != "ABC-12" || issue.Title != "Add archive page" || issue.TeamID != "team-1" || !sawAuth {
+	if err != nil || issue.Key != "ABC-12" || issue.Title != "Add archive page" || issue.TeamID != "team-1" || !sawAuth ||
+		len(issue.Labels) != 1 || issue.Labels[0] != "factory" {
 		t.Fatalf("issue = %#v, err = %v, auth = %t", issue, err, sawAuth)
+	}
+	state, err := client.IssueState(t.Context(), "ABC-12")
+	if err != nil || !IsCompletedLinearState(state) || state.URL != "https://linear.example.app/ABC-12" {
+		t.Fatalf("state = %#v, err = %v", state, err)
+	}
+	if _, err = client.FetchIssue(t.Context(), "ABC-404"); !errors.Is(err, ErrIssueNotFound) {
+		t.Fatalf("missing issue err = %v, want ErrIssueNotFound", err)
 	}
 	if err = client.PostComment(t.Context(), "ABC-12", "Factory update"); err != nil {
 		t.Fatal(err)
 	}
 	issues, err := client.IssuesWithLabel(t.Context(), "factory", "Platform")
-	if err != nil || len(issues) != 1 || issues[0].Key != "ABC-12" {
+	if err != nil || len(issues) != 2 || issues[0].Key != "ABC-12" || issues[1].Key != "ABC-13" || len(issues[1].Labels) != 1 {
 		t.Fatalf("poll = %#v, err = %v", issues, err)
 	}
-	if err = client.SetState(t.Context(), "ABC-12", "done"); err != nil {
+	if len(pollVariables) != 2 || pollVariables[1]["after"] != "cursor-1" {
+		t.Fatalf("poll pages = %#v", pollVariables)
+	}
+	if err = client.SetState(t.Context(), "ABC-12", CompletedLinearState); err != nil {
 		t.Fatal(err)
+	}
+	if stateUpdate["issue"] != "uuid-1" || stateUpdate["state"] != "state-shipped" {
+		t.Fatalf("state update = %#v", stateUpdate)
+	}
+	if err = client.SetState(t.Context(), "ABC-12", "Nonexistent"); err == nil {
+		t.Fatal("unknown state accepted")
+	}
+}
+
+func TestLinearClientSurfacesGraphQLErrorsAndFailedMutations(t *testing.T) {
+	handler := func(request *http.Request) *http.Response {
+		var payload struct {
+			Query string `json:"query"`
+		}
+		_ = json.NewDecoder(request.Body).Decode(&payload)
+		switch {
+		case strings.HasPrefix(payload.Query, "query Issues("):
+			// Linear reports validation and rate-limit failures as GraphQL errors
+			// with HTTP 200 or 400 and null data.
+			return &http.Response{StatusCode: http.StatusBadRequest, Header: http.Header{"Content-Type": []string{"application/json"}},
+				Body: io.NopCloser(strings.NewReader(`{"data":null,"errors":[{"message":"Rate limit exceeded","extensions":{"code":"RATELIMITED"}}]}`))}
+		case strings.HasPrefix(payload.Query, "query Issue("):
+			return fixtureResponse(`{"data":{"issue":{"id":"uuid-1","identifier":"ABC-12"}}}`)
+		case strings.Contains(payload.Query, "commentCreate"):
+			return fixtureResponse(`{"data":{"commentCreate":{"success":false}}}`)
+		default:
+			return fixtureResponse(`{"errors":[{"message":"Cannot query field"}]}`)
+		}
+	}
+	client := &LinearClient{config: LinearConfig{APIKey: "key"}, endpoint: "linear://fixture", client: &http.Client{Transport: fixtureTransport{handler: handler}}}
+	if _, err := client.IssuesWithLabel(t.Context(), "factory", ""); err == nil || !strings.Contains(err.Error(), "RATELIMITED") {
+		t.Fatalf("poll err = %v, want rate limit error", err)
+	}
+	if err := client.PostComment(t.Context(), "ABC-12", "hello"); err == nil {
+		t.Fatal("unsuccessful commentCreate accepted")
 	}
 }
 

@@ -110,6 +110,57 @@ when the script should own its internal process. See [the task workflow guide](t
 and [workflow configuration](workflows.md). Pre-command databases are
 recreated once because this release intentionally consolidates the schema before active use.
 
+## Built-in project management
+
+The **Tickets** page uses the built-in tracker by default. Tickets and their
+comments live in the control-plane SQLite database; no tracker service or API
+key is required. Configure the command to run when an operator approves work:
+
+```toml
+[tracker]
+default = "builtin" # builtin, plane, or linear; selects the Tickets view
+key_prefix = "MM"
+repository = "my-project"
+command = "task-to-pr" # must name an existing [commands.task-to-pr]
+# model = "optional-model-override"
+```
+
+Create a ticket, choose its repository, then use **Approve for factory**.
+Approval atomically queues one job and stores its ticket link. Repeated approval,
+including after a restart, returns the same job rather than submitting another.
+A missing repository or command prevents approval without losing the draft.
+
+Tickets start in `backlog`; `todo` is an optional planning state. Approval moves
+them to `approved`, worker dispatch to `in_progress`, and successful execution to
+`in_review`—successful execution alone is not delivery. Marking the ticket `done`
+resolves its finished job, including when the ticket was marked done before the
+worker finished. Completion posts feedback with the run link and any returned
+PR URL. Drafts can be deleted; approved tickets retain their delivery history.
+
+### Projects
+
+Define `[tracker.projects.NAME]` tables to group built-in tickets. The name is the
+key prefix (`NAME-1`, `NAME-2`, …) and must be 1–10 uppercase letters or digits
+starting with a letter; lowercase names are normalised to uppercase. A project
+supplies defaults for `repository`, `command` and `model`, falling back to
+`[tracker]` when omitted. The project is chosen when the ticket is created and
+cannot be changed afterwards, because the key derives from it. Approved jobs carry
+the project so the runs board groups them with the same stack.
+
+```toml
+[tracker.projects.sparks]
+repository = "sparks-repo"
+command = "task-to-pr"
+```
+
+The ticket stores the pull request URL reported by its run, and the ticket page
+links to it. Tickets are flat: there are no sub-tickets. Jobs admitted from Plane
+or Linear keep the issue's labels, shown under delivery details on the run.
+
+Plane and Linear remain external trackers: create and edit their tickets in
+those services, and configure the approved-label intake below. Selecting an
+external tracker in Tickets does not migrate built-in tickets or credentials.
+
 ## Issue sources
 
 Issue sources are configured on the server and use environment credentials. A
@@ -138,15 +189,22 @@ Set `source = "linear"` for a Linear trigger. For Plane, set `PLANE_URL`,
 jobs are deduplicated by issue URL or key while active.
 
 Finished jobs whose ticket completes outside the factory move to the green
-`resolved` state. A card becomes resolved when its Plane ticket reaches a
-completed-group state (Done), or when a merged pull request references the
-ticket key in its title or branch, or links the Plane issue. The control plane
-reconciles tickets at startup and then roughly every ten minutes; a merged
-pull request also moves the Plane ticket to Done and posts a comment. Point a
-Plane webhook at `POST /api/v1/webhooks/issues` (HMAC-SHA256 in the
-`X-Signature` header) to resolve cards immediately on state changes. The
-shared secret comes from `issue_sources.webhook_secret` or the
-`MACHINIST_ISSUE_WEBHOOK_SECRET` environment variable.
+`resolved` state. Plane completed-group states and Linear completed-type
+states are recognized; polling excludes completed and cancelled tickets so
+leaving the approval label attached does not admit them again.
+
+The control plane reconciles tickets at startup and roughly every ten minutes.
+A merged pull request can resolve work by ticket key in its title or branch,
+or by an issue link in its body. For external trackers, resolution moves the
+ticket to Done and posts a comment. Built-in tickets are marked Done with a
+comment and their linked finished jobs are resolved in one transaction.
+
+Point issue webhooks at `POST /api/v1/webhooks/issues`. Plane uses HMAC-SHA256
+in `X-Signature`; Linear uses `Linear-Signature` over the raw body and requires
+a `webhookTimestamp` within five minutes of server time. The shared secret
+comes from `issue_sources.webhook_secret` or
+`MACHINIST_ISSUE_WEBHOOK_SECRET`. Native Plane intake uses the separate
+`X-Plane-Signature` path described below.
 
 ## Plane intake
 

@@ -1,0 +1,174 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-16T14:48:13.158298+00:00",
+  "title": "Design System: Machinist",
+  "extensions": {
+    "colorMeta": {
+      "primary": {
+        "role": "primary",
+        "displayName": "Steel Teal",
+        "canonical": "#1d6683"
+      },
+      "success": {
+        "role": "state",
+        "displayName": "Moss",
+        "canonical": "#326b51"
+      },
+      "warning": {
+        "role": "state",
+        "displayName": "Ochre",
+        "canonical": "#8a651b"
+      },
+      "danger": {
+        "role": "state",
+        "displayName": "Brick",
+        "canonical": "#a54237"
+      },
+      "paper": {
+        "role": "neutral",
+        "displayName": "Paper",
+        "canonical": "#f3f4f1"
+      },
+      "paper-surface": {
+        "role": "neutral",
+        "displayName": "Paper Surface",
+        "canonical": "#fafbf8"
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Ink",
+        "canonical": "#1a1d1e"
+      },
+      "hairline": {
+        "role": "neutral",
+        "displayName": "Hairline",
+        "canonical": "#c7cdca"
+      }
+    },
+    "typographyMeta": {
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "PageHeading title, one per view."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Badges, field labels, metadata."
+      },
+      "mono": {
+        "displayName": "Mono",
+        "purpose": "Run IDs, SHAs, paths, durations."
+      }
+    },
+    "shadows": [
+      {
+        "name": "crafted-card",
+        "value": "0 1px 0 color-mix(in srgb, var(--foreground) 6%, transparent), 0 10px 30px color-mix(in srgb, var(--foreground) 3%, transparent)",
+        "purpose": "Card whisper lift."
+      },
+      {
+        "name": "shadow-xs",
+        "value": "0 1px 2px rgb(15 23 42 / .05)",
+        "purpose": "Small controls."
+      },
+      {
+        "name": "focus-ring",
+        "value": "0 0 0 3px color-mix(in srgb, var(--primary) 14%, transparent)",
+        "purpose": "Field focus."
+      }
+    ],
+    "motion": [
+      {
+        "name": "state-transition",
+        "value": ".15s ease",
+        "purpose": "Color/background/border transitions on nav and fields."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "sm",
+        "value": "640px"
+      },
+      {
+        "name": "lg",
+        "value": "1024px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Main action.",
+      "html": "<button class=\"ds-btn\">Start run</button>",
+      "css": ".ds-btn{background:#1d6683;color:#f8fcfd;height:36px;padding:0 14px;border:0;border-radius:8px;font:500 14px 'Manrope Variable',system-ui}.ds-btn:hover{background:rgb(29 102 131/.9)}"
+    },
+    {
+      "name": "Status Badges",
+      "kind": "chip",
+      "refersTo": "badge-active",
+      "description": "State chips via Badge tone.",
+      "html": "<span class=\"b a\"><i></i>Running</span> <span class=\"b s\">Succeeded</span> <span class=\"b w\">Draining</span> <span class=\"b d\">Failed</span> <span class=\"b n\">Queued</span>",
+      "css": ".b{display:inline-flex;gap:6px;align-items:center;border:1px solid;border-radius:9999px;padding:2px 8px;font:600 12px/16px 'Manrope Variable',system-ui}.b i{width:6px;height:6px;border-radius:50%;background:currentColor}.a{color:#1d6683;border-color:rgb(29 102 131/.25);background:rgb(29 102 131/.1)}.s{color:#326b51;border-color:rgb(50 107 81/.25);background:rgb(50 107 81/.1)}.w{color:#8a651b;border-color:rgb(138 101 27/.28);background:rgb(138 101 27/.1)}.d{color:#a54237;border-color:rgb(165 66 55/.25);background:rgb(165 66 55/.1)}.n{color:#626a6b;border-color:#c7cdca;background:#e4e7e4}"
+    },
+    {
+      "name": "Alert",
+      "kind": "custom",
+      "refersTo": "alert",
+      "description": "The single error banner.",
+      "html": "<div class=\"al\" role=\"alert\">Request failed (502)</div>",
+      "css": ".al{color:#a54237;border:1px solid rgb(165 66 55/.35);background:rgb(165 66 55/.1);border-radius:6px;padding:8px 12px;font:14px 'Manrope Variable',system-ui}"
+    },
+    {
+      "name": "Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "Panel container.",
+      "html": "<div class=\"cd\">Workers</div>",
+      "css": ".cd{background:#fafbf8;border:1px solid #c7cdca;border-radius:4px;padding:16px;box-shadow:0 1px 0 rgb(26 29 30/.06),0 10px 30px rgb(26 29 30/.03)}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Factory Floor Logbook",
+    "overview": "Cool paper, graphite ink, one steel-teal accent, hairlines. Outcome first: run state is loudest, chrome quietest.",
+    "keyCharacteristics": [
+      "Cool paper / near-black night",
+      "Single teal accent for actions and in-progress work",
+      "Colour encodes state only",
+      "Flat with hairlines",
+      "Both themes first-class"
+    ],
+    "rules": [
+      {
+        "name": "The State-Only Rule",
+        "body": "Moss, Ochre, Brick appear only as state; tints /25 border, /10 fill, /5 faint.",
+        "section": "colors"
+      },
+      {
+        "name": "The Tone Map Rule",
+        "body": "running/busy\u2192active; succeeded/connected\u2192success; draining\u2192warning; failed/timed_out/paused\u2192danger; queued/cancelled/idle/offline/disabled\u2192neutral.",
+        "section": "colors"
+      },
+      {
+        "name": "The Machine Text Rule",
+        "body": "Machine identifiers use font-mono; counts tabular-nums.",
+        "section": "typography"
+      },
+      {
+        "name": "The Whisper Rule",
+        "body": "Shadows stay at or below 6% ink.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do map every status through Badge tone",
+      "Do use Alert for errors",
+      "Do define new tokens in both themes and update DESIGN.md"
+    ],
+    "donts": [
+      "Don't colour in-progress work success",
+      "Don't add a second accent hue",
+      "Don't exceed the Whisper Rule"
+    ]
+  }
+}

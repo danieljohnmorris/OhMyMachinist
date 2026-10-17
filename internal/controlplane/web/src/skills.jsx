@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { PackagePlus, Pin, RefreshCw, Trash2, Upload } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { PageHeading, QuietState } from "@/components/ui/page-heading";
@@ -126,7 +127,7 @@ export function SkillsPage({ csrfToken }) {
         </label>
         <Button type="submit" variant="outline" disabled={busy !== "" || !file}><Upload className="size-4" />Upload</Button>
       </form>
-      {error && <div role="alert" className="whitespace-pre-wrap rounded-md border border-danger/35 bg-danger/10 px-3 py-2 text-sm text-danger">{error}</div>}
+      {error && <Alert>{error}</Alert>}
       {notice && <div role="status" className="rounded-md border border-success/35 bg-success/10 px-3 py-2 text-sm text-success">{notice}</div>}
     </Card>
 
@@ -155,7 +156,7 @@ export function SkillsPage({ csrfToken }) {
                 </td>
                 <td className="px-4 py-3">
                   {skill.usedBy?.length
-                    ? <span className="flex flex-wrap gap-1">{skill.usedBy.map((usage) => <Badge key={usage} variant="outline" className="border-border bg-muted font-normal text-muted-foreground">{usage}</Badge>)}</span>
+                    ? <span className="flex flex-wrap gap-1">{skill.usedBy.map((usage) => <Badge key={usage} className="font-normal">{usage}</Badge>)}</span>
                     : <span className="text-xs text-muted-foreground">—</span>}
                 </td>
                 <td className="px-4 py-3">

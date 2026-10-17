@@ -104,6 +104,7 @@ type Config struct {
 	Alerts       Alerts              `toml:"alerts"`
 	Review       Review              `toml:"review"`
 	Plane        Plane               `toml:"plane"`
+	Tracker      Tracker             `toml:"tracker"`
 	Healing      Healing             `toml:"healing"`
 	Health       Health              `toml:"health"`
 	path         string

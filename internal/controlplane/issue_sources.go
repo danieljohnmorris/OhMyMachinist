@@ -42,6 +42,19 @@ func (l linearPoller) PostComment(ctx context.Context, key, body string) error {
 	return l.client.PostComment(ctx, key, body)
 }
 
+// issueTracker names the ticket provider behind an issue source; it becomes
+// the tracker recorded in an admitted job's metadata.
+func issueTracker(source issuePoller) string {
+	switch source.(type) {
+	case planePoller:
+		return "plane"
+	case linearPoller:
+		return "linear"
+	default:
+		return ""
+	}
+}
+
 func loadIssueSources(path string) (map[string]issuePoller, map[string]*issues.PlaneClient, error) {
 	definition, err := config.LoadDefinitions(path)
 	if err != nil {

@@ -1,9 +1,11 @@
 export const boardColumns = [
   { id: "queued", title: "Queued", description: "Waiting to start" },
-  { id: "running", title: "In progress", description: "Work underway" },
-  { id: "attention", title: "Needs attention", description: "Approval or input needed" },
-  { id: "finished", title: "Finished", description: "Completed or stopped" },
+  { id: "running", title: "Running", description: "Work underway" },
+  { id: "attention", title: "Needs you", description: "Approval or input needed" },
+  { id: "finished", title: "Done", description: "Completed or stopped" },
 ];
+
+const attentionStates = new Set(["blocked", "awaiting_approval", "interrupted"]);
 
 const activeStates = new Set(["queued", "running"]);
 const failedStates = new Set(["failed", "timed_out"]);
@@ -12,7 +14,7 @@ const succeededStates = new Set(["succeeded", "resolved"]);
 export function boardColumnForState(state) {
   if (state === "queued") return "queued";
   if (state === "running") return "running";
-  if (["blocked", "awaiting_approval", "interrupted"].includes(state)) return "attention";
+  if (attentionStates.has(state)) return "attention";
   return "finished";
 }
 
@@ -33,7 +35,62 @@ export function needsAttention(state) {
   return !activeStates.has(state) && !succeededStates.has(state);
 }
 
+// jobStateTone maps a job or run state onto a Badge tone (DESIGN.md Tone Map):
+// running work is active, outcomes are success/danger, anything waiting on a
+// human is warning, and everything else stays neutral.
+export function jobStateTone(state) {
+  if (state === "running") return "active";
+  if (succeededStates.has(state) || state === "complete") return "success";
+  if (failedStates.has(state)) return "danger";
+  if (attentionStates.has(state)) return "warning";
+  return "neutral";
+}
+
+const dayMillis = 24 * 60 * 60 * 1000;
+
+// boardSummary feeds the runs summary strip. Running and Needs you count the
+// latest attempt of each ticket (a superseded attempt no longer needs anyone);
+// Succeeded and Failed count every attempt that finished in the 24 hours up to
+// `now`, using the same finish timestamp as the board cards.
+export function boardSummary(jobs, now = new Date()) {
+  const end = now.getTime();
+  const start = end - dayMillis;
+  const summary = { running: 0, needsYou: 0, succeeded24h: 0, failed24h: 0 };
+  for (const { latest } of collapseJobsByTicket(jobs)) {
+    if (latest.state === "running") summary.running += 1;
+    if (attentionStates.has(latest.state)) summary.needsYou += 1;
+  }
+  for (const job of jobs) {
+    const finishedAt = Date.parse(boardCardTimestamp(job));
+    if (!Number.isFinite(finishedAt) || finishedAt <= start || finishedAt > end) continue;
+    if (succeededStates.has(job.state)) summary.succeeded24h += 1;
+    if (failedStates.has(job.state)) summary.failed24h += 1;
+  }
+  return summary;
+}
+
+// activeModels lists the distinct models of runs that are executing right now.
+// Idle factories return an empty list; no configured default is invented.
+export function activeModels(jobs) {
+  const models = [];
+  for (const job of jobs) {
+    if (job.state !== "running") continue;
+    for (const run of job.runs || []) {
+      const model = typeof run.model === "string" ? run.model.trim() : "";
+      if (run.state === "running" && model && !models.includes(model)) models.push(model);
+    }
+  }
+  return models;
+}
+
+// jobModel is the model of the run currently representing the job, or "".
+export function jobModel(job) {
+  const model = (job.runs?.length ? currentRun(job) : undefined)?.model;
+  return typeof model === "string" ? model.trim() : "";
+}
+
 export function issueKey(job) {
+  if (job.metadata?.tracker || job.metadata?.issue_url) return jobTicketKey(job);
   const subject = typeof job.trigger_subject === "string" ? job.trigger_subject.trim() : "";
   const source = job.task?.source_url;
   return subject || (typeof source === "string" ? source.trim() : "");
@@ -170,7 +227,7 @@ export function filterJobs(jobs, filter) {
 // tickbox additionally includes succeeded and resolved tickets.
 export function filterBoardJobs(jobs, showSucceeded) {
   if (showSucceeded) return jobs;
-  return jobs.filter((job) => activeStates.has(job.state) || failedStates.has(job.state));
+  return jobs.filter((job) => activeStates.has(job.state) || attentionStates.has(job.state) || failedStates.has(job.state));
 }
 
 // Board filters round-trip through the URL hash query (e.g. #/runs?succeeded=1&range=last7)
@@ -283,19 +340,26 @@ export function attemptTime(job) {
   return job.created_at || job.updated_at || "";
 }
 
-const ticketKeyPattern = /^([A-Z][A-Z0-9]{1,9}-\d+)\b/;
+const ticketKeyPattern = /^([A-Z][A-Z0-9]{0,9}-\d+)\b/;
 
-// Collapse key for one Plane ticket: the issue key leading the displayed title
-// (e.g. SPARK-6), falling back to the persisted source field that identifies
-// the ticket. Empty when the job is not tied to a ticket.
+// Collapse key for one ticket. Canonical identity comes first: the tracker,
+// repository and ticket key the control plane stored on the job, then the
+// ticket URL or task source URL. A key leading the title (e.g. SPARK-6) is the
+// legacy fallback for older jobs and is scoped by repository, so MACH-1 in two
+// trackers or repositories never collapses into one card. Empty when the job
+// is not tied to a ticket.
 export function jobTicketKey(job) {
-  const title = jobDisplayTitle(job);
-  const fromTitle = typeof title === "string" ? title.trim().match(ticketKeyPattern)?.[1] : undefined;
-  if (fromTitle) return `key:${fromTitle}`;
-  for (const source of [job.metadata?.issue_url, job.task?.source_url]) {
+  const metadata = job.metadata || {};
+  const repository = job.repository || "";
+  const tracker = typeof metadata.tracker === "string" ? metadata.tracker.trim() : "";
+  const ticketKey = typeof metadata.ticket_key === "string" ? metadata.ticket_key.trim() : "";
+  for (const source of [metadata.issue_url, job.task?.source_url]) {
     if (typeof source === "string" && source.trim()) return `url:${source.trim()}`;
   }
-  return "";
+  if (tracker && ticketKey) return `ticket:${tracker}\n${repository}\n${ticketKey}`;
+  const title = jobDisplayTitle(job);
+  const fromTitle = typeof title === "string" ? title.trim().match(ticketKeyPattern)?.[1] : undefined;
+  return fromTitle ? `title:${repository}\n${fromTitle}` : "";
 }
 
 // One entry per Plane ticket: the latest attempt as the card and every older

@@ -25,6 +25,7 @@ var (
 	ErrRunState                        = errors.New("run is not active")
 	ErrInvalidCompletion               = errors.New("invalid run completion")
 	ErrJobActive                       = errors.New("active job cannot be deleted")
+	ErrWorkerActive                    = errors.New("worker is running a job and cannot be deleted")
 	ErrTriggerMissing                  = errors.New("trigger state does not exist")
 	ErrTriggerStale                    = errors.New("trigger state configuration changed")
 	ErrTriggerPreviousGenerationActive = errors.New("previous trigger configuration still has active work")
@@ -145,6 +146,12 @@ type TriggerAdmission struct {
 	RequestActor      string
 	RequestLabel      string
 	IssueKey          string
+	// Tracker names the ticket provider (plane, linear) of an issue-family
+	// admission; with IssueKey and the subject URL it becomes job metadata.
+	Tracker string
+	// Labels carries the PM-tool labels of an issue admission so runs and
+	// tickets keep their provenance.
+	Labels []string
 }
 
 type TriggerStatus struct {
@@ -218,7 +225,7 @@ func OpenStore(path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) initialize(ctx context.Context) error {
-	const schemaVersion = 12
+	const schemaVersion = 13
 	var version int
 	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		return fmt.Errorf("read database schema version: %w", err)
@@ -356,7 +363,12 @@ END;`
 			return fmt.Errorf("upgrade database schema to version 12: %w", err)
 		}
 	}
-	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+jobMetadataSchema+planeSchema+autoMergeSchema+"PRAGMA user_version=12;")
+	if version < 13 {
+		if err := s.addTicketProjectColumns(ctx); err != nil {
+			return fmt.Errorf("upgrade database schema to version 13: %w", err)
+		}
+	}
+	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+jobMetadataSchema+planeSchema+autoMergeSchema+ticketSchema+"PRAGMA user_version=13;")
 	return err
 }
 
@@ -372,6 +384,37 @@ func (s *Store) addRunWIP(ctx context.Context) error {
 	}
 	_, err := s.db.ExecContext(ctx, `ALTER TABLE runs ADD COLUMN wip TEXT NOT NULL DEFAULT ''`)
 	return err
+}
+
+// addTicketProjectColumns adds per-ticket project scoping and a stored PR URL.
+// Existing rows keep empty values, so unscoped tickets behave as before.
+func (s *Store) addTicketProjectColumns(ctx context.Context) error {
+	// Legacy and fresh databases create tickets with these columns via
+	// ticketSchema below; only an existing pre-13 table needs the ALTER.
+	var tables int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tickets'`).Scan(&tables); err != nil {
+		return err
+	}
+	if tables == 0 {
+		return nil
+	}
+	for _, column := range []string{
+		"project TEXT NOT NULL DEFAULT ''",
+		"pr_url TEXT NOT NULL DEFAULT ''",
+	} {
+		name, _, _ := strings.Cut(column, " ")
+		var present int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('tickets') WHERE name=?`, name).Scan(&present); err != nil {
+			return err
+		}
+		if present > 0 {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE tickets ADD COLUMN `+column); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // addJobResolution adds the ticket-resolution columns to jobs. Existing rows
@@ -799,6 +842,16 @@ WHERE github_trigger_requests.state='pending'`, admission.Identity, admission.Oc
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO task_inputs(job_id,task) VALUES(?,?)`, jobID, string(raw)); err != nil {
 			return "", false, fmt.Errorf("insert triggered task: %w", err)
+		}
+	}
+	if identity := ticketIdentityMetadata(admission.Tracker, admission.IssueKey, admission.Subject); identity != nil {
+		if len(admission.Labels) > 0 {
+			if identity["labels"] == nil {
+				identity["labels"] = admission.Labels
+			}
+		}
+		if err := saveJobMetadata(ctx, tx, jobID, identity); err != nil {
+			return "", false, fmt.Errorf("store triggered job metadata: %w", err)
 		}
 	}
 	if admission.Family == "github" {
@@ -1270,6 +1323,9 @@ func (s *Store) poll(ctx context.Context, request protocol.PollRequest, maxConcu
 	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET state='running',updated_at=? WHERE id=? AND state='queued'`, now, selected.JobID); err != nil {
 		return nil, err
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE tickets SET state='in_progress',updated_at=? WHERE job_id=? AND state='approved'`, now, selected.JobID); err != nil {
+		return nil, err
+	}
 	if err := s.enrichRun(ctx, tx, &selected); err != nil {
 		return nil, err
 	}
@@ -1350,7 +1406,18 @@ func (s *Store) Complete(ctx context.Context, runID string, completion protocol.
 		if err != nil {
 			return err
 		}
+		if err := completeBuiltinTicket(ctx, tx, jobID, now); err != nil {
+			return err
+		}
 		return tx.Commit()
+	}
+	var result struct {
+		Metadata map[string]any `json:"metadata"`
+	}
+	if len(completion.Result) > 0 && json.Unmarshal(completion.Result, &result) == nil && len(result.Metadata) > 0 {
+		if err := saveJobMetadata(ctx, tx, jobID, result.Metadata); err != nil {
+			return err
+		}
 	}
 	if completion.State == "succeeded" {
 		if _, err := tx.ExecContext(ctx, `UPDATE jobs SET state='succeeded',updated_at=? WHERE id=?`, now, jobID); err != nil {
@@ -1375,6 +1442,9 @@ func (s *Store) Complete(ctx context.Context, runID string, completion protocol.
 				return fmt.Errorf("record trigger failure: %w", err)
 			}
 		}
+	}
+	if err := completeBuiltinTicket(ctx, tx, jobID, now); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
@@ -1434,6 +1504,12 @@ func (s *Store) DeleteJob(ctx context.Context, jobID string) error {
 	if _, err := tx.ExecContext(ctx, `UPDATE github_trigger_requests SET job_id=NULL,updated_at=? WHERE job_id=?`, now, jobID); err != nil {
 		return fmt.Errorf("clear deleted job trigger links: %w", err)
 	}
+	if err := releaseBuiltinTickets(ctx, tx, now, "The factory run was deleted.", `id=?`, jobID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE tickets SET job_id='',updated_at=? WHERE job_id=?`, now, jobID); err != nil {
+		return fmt.Errorf("clear deleted job ticket link: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM runs WHERE job_id=?`, jobID); err != nil {
 		return fmt.Errorf("delete job runs: %w", err)
 	}
@@ -1470,6 +1546,33 @@ WHERE julianday(old.last_seen_at) < julianday(?)
 		return 0, fmt.Errorf("prune superseded workers: %w", err)
 	}
 	return result.RowsAffected()
+}
+
+// DeleteWorker forgets a registered worker instance. Its repositories are
+// removed by the ON DELETE CASCADE; a worker running a job loses dispatch
+// eligibility only if it is not running and not leased to a job.
+func (s *Store) DeleteWorker(ctx context.Context, instanceID string) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM workers
+WHERE instance_id=?
+  AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.worker_instance=? AND r.state='running')`, instanceID, instanceID)
+	if err != nil {
+		return fmt.Errorf("delete worker: %w", err)
+	}
+	removed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if removed == 0 {
+		var exists int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM workers WHERE instance_id=?`, instanceID).Scan(&exists); err != nil {
+			return err
+		}
+		if exists == 0 {
+			return sql.ErrNoRows
+		}
+		return ErrWorkerActive
+	}
+	return nil
 }
 
 func (s *Store) Snapshot(ctx context.Context) (Snapshot, error) {
@@ -1892,10 +1995,15 @@ func terminalJobState(state string) bool {
 // and running jobs wait until they finish; already resolved jobs are skipped.
 const resolutionStates = `('succeeded','failed','timed_out','cancelled')`
 
+// resolutionKinds are the recorded causes of a resolution: a merged pull
+// request, an automatic merge, or a ticket completed in Plane, Linear or the
+// built-in tracker.
+var resolutionKinds = map[string]bool{"pr": true, "plane": true, "linear": true, "ticket": true, "automerge": true}
+
 // MarkJobResolved moves one terminal job into the resolved state and records
 // how it was resolved.
 func (s *Store) MarkJobResolved(ctx context.Context, jobID, kind, detail string, resolvedAt time.Time) error {
-	if kind != "pr" && kind != "plane" && kind != "automerge" {
+	if !resolutionKinds[kind] {
 		return fmt.Errorf("unknown resolution kind %q", kind)
 	}
 	if strings.TrimSpace(detail) == "" {
@@ -1910,25 +2018,6 @@ func (s *Store) MarkJobResolved(ctx context.Context, jobID, kind, detail string,
 		return fmt.Errorf("job %s is not in a resolvable state", jobID)
 	}
 	return nil
-}
-
-// ResolveTicketsForIssue resolves every terminal job tied to an issue key,
-// matched against the stored key, the title or the trigger subject. It returns
-// the number of jobs resolved.
-func (s *Store) ResolveTicketsForIssue(ctx context.Context, key, kind, detail string, resolvedAt time.Time) (int64, error) {
-	if strings.TrimSpace(key) == "" {
-		return 0, errors.New("issue key is required")
-	}
-	if kind != "pr" && kind != "plane" && kind != "automerge" {
-		return 0, fmt.Errorf("unknown resolution kind %q", kind)
-	}
-	now := s.now().UTC()
-	result, err := s.db.ExecContext(ctx, `UPDATE jobs SET state='resolved',resolution_kind=?,resolution_detail=?,resolved_at=?,updated_at=? WHERE state IN `+resolutionStates+` AND resolution_kind='' AND (issue_key=? OR title LIKE ? OR trigger_subject LIKE ?)`,
-		kind, detail, resolvedAt.UTC().Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), key, "%"+key+"%", "%"+key+"%")
-	if err != nil {
-		return 0, fmt.Errorf("resolve tickets for %s: %w", key, err)
-	}
-	return result.RowsAffected()
 }
 
 func validateOutcome(state string, exitCode int) error {
