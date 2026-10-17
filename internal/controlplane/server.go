@@ -139,6 +139,9 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 	if e != nil {
 		return nil, e
 	}
+	if _, err := definition.ResolveTracker(); err != nil {
+		return nil, err
+	}
 	storage, e := definition.ResolveStorage(store.storageConfig.Path)
 	if e != nil {
 		return nil, e
@@ -382,6 +385,14 @@ func (s *Server) routes() (http.Handler, error) {
 		return nil, err
 	}
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/trackers", s.authorizeRead(s.trackersHandler))
+	mux.HandleFunc("GET /api/v1/tickets", s.authorizeRead(s.listTicketsHandler))
+	mux.HandleFunc("POST /api/v1/tickets", s.authorizeSubmission(s.createTicketHandler))
+	mux.HandleFunc("GET /api/v1/tickets/{key}", s.authorizeRead(s.getTicketHandler))
+	mux.HandleFunc("PATCH /api/v1/tickets/{key}", s.authorizeSubmission(s.updateTicketHandler))
+	mux.HandleFunc("DELETE /api/v1/tickets/{key}", s.authorizeSubmission(s.deleteTicketHandler))
+	mux.HandleFunc("POST /api/v1/tickets/{key}/approve", s.authorizeSubmission(s.approveTicketHandler))
+	mux.HandleFunc("POST /api/v1/tickets/{key}/comments", s.authorizeSubmission(s.commentTicketHandler))
 	mux.HandleFunc("PUT /api/v1/runs/{id}/artifacts", s.authorizeWorker(s.uploadArtifact))
 	mux.HandleFunc("GET /api/v1/jobs/{id}/artifacts", s.authorizeArtifact(s.listArtifacts))
 	mux.HandleFunc("GET /api/v1/artifacts/{id}/content", s.authorizeArtifact(s.artifactContent))
@@ -393,6 +404,7 @@ func (s *Server) routes() (http.Handler, error) {
 	mux.HandleFunc("POST /api/v1/jobs", s.authorizeSubmission(s.linkAttemptsAfter(s.submit)))
 	mux.HandleFunc("DELETE /api/v1/jobs/{id}", s.authorizeSubmission(s.deleteJob))
 	mux.HandleFunc("POST /api/v1/workers/poll", s.authorizeWorker(s.poll))
+	mux.HandleFunc("DELETE /api/v1/workers/{instance_id}", s.authorizeSubmission(s.deleteWorkerHandler))
 	mux.HandleFunc("POST /api/v1/webhooks/issues", s.issueWebhook)
 	mux.HandleFunc("GET /api/v1/review-profile", s.getReviewProfile)
 	mux.HandleFunc("GET /api/v1/review-profiles", s.listReviewProfiles)
@@ -659,6 +671,24 @@ func (s *Server) deleteJob(response http.ResponseWriter, request *http.Request) 
 		return
 	}
 	s.recordAudit(request, "jobs.delete", request.PathValue("id"))
+	response.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) deleteWorkerHandler(response http.ResponseWriter, request *http.Request) {
+	err := s.store.DeleteWorker(request.Context(), request.PathValue("instance_id"))
+	if errors.Is(err, ErrWorkerActive) {
+		writeError(response, http.StatusConflict, err)
+		return
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(response, http.StatusNotFound, errors.New("worker not found"))
+		return
+	}
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	s.recordAudit(request, "workers.delete", request.PathValue("instance_id"))
 	response.WriteHeader(http.StatusNoContent)
 }
 

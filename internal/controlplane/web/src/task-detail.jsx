@@ -12,7 +12,7 @@ import { taskPresentation } from "./task-presentation.js";
 import { linkifyText } from "./linkify.js";
 import { Markdown } from "./markdown.js";
 import { jobDisplayTitle, canCancelJob, canMoveToQueue, resolutionLabel, supersededJob, ticketAttempts, attemptStart, attemptDurationMillis } from "./runs-board.js";
-import { runSidebarLinks } from "./run-links.js";
+import { runSidebarLinks, safeExternalURL, trackerNames } from "./run-links.js";
 import { formatDurationMillis, formatTokenUsage } from "./run-metrics.js";
 import { activityRows } from "./run-activity.js";
 import {
@@ -42,27 +42,27 @@ export function TaskDetail({
     return (
       <div className="p-8">
         <a href="#/runs" className="text-sm underline">
-          Back to tasks
+          Back to runs
         </a>
-        <p className="mt-4">{!loaded ? "Loading task…" : "Task not found."}</p>
+        <p className="mt-4">{!loaded ? "Loading run…" : "Run not found."}</p>
         {error && <p role="alert">{error}</p>}
       </div>
     );
-  const terminal = ["succeeded", "failed", "cancelled"].includes(job.state);
+  const terminal = ["succeeded", "failed", "cancelled", "timed_out", "resolved"].includes(job.state);
   const latest = job.runs.at(-1);
   const lastCompleted = job.runs.findLast((run) => run.outcome === "complete");
   const { result, history, stages } = taskPresentation(job);
-  const { planeTicket, pullRequest } = runSidebarLinks(job, result);
+  const { ticket, pullRequest } = runSidebarLinks(job, result);
   const reviewing = job.state === "awaiting_approval";
   const retriedAs = supersededJob(jobs, job);
   const attempts = ticketAttempts(jobs, job);
   return (
-    <div className="mx-auto max-w-[1200px] space-y-7 p-4 sm:p-6 lg:p-8">
+    <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
       <header className="space-y-4">
         <Button asChild variant="ghost" size="sm" className="-ml-3">
           <a href="#/runs">
             <ArrowLeft className="size-4" />
-            Back to tasks
+            Back to runs
           </a>
         </Button>
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -80,6 +80,11 @@ export function TaskDetail({
         <p className="text-sm text-muted-foreground">
           {job.repository} · {friendlyName(job.workflow?.name || job.command)}
         </p>
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
+          {ticket && <a className="text-primary underline" href={ticket.href} target={ticket.external ? "_blank" : undefined} rel={ticket.external ? "noopener noreferrer" : undefined}>{trackerNames[ticket.tracker] || "Ticket"} · {ticket.text}</a>}
+          {pullRequest && <a className="text-primary underline" href={pullRequest.href} target="_blank" rel="noopener noreferrer">{pullRequest.text}</a>}
+          {latest?.model && <span className="font-mono text-xs text-muted-foreground">{latest.model}</span>}
+        </div>
         {retriedAs && (
           <Card
             className="flex flex-wrap items-center gap-2 p-4"
@@ -96,10 +101,10 @@ export function TaskDetail({
             <State value={retriedAs.state} />
           </Card>
         )}
-        {job.task?.source_url && (
+        {safeExternalURL(job.task?.source_url) && (
           <a
             className="block text-sm text-primary underline"
-            href={job.task.source_url}
+            href={safeExternalURL(job.task.source_url)}
             target="_blank"
             rel="noreferrer"
           >
@@ -111,32 +116,11 @@ export function TaskDetail({
             {error}
           </p>
         )}
-        {(job.metadata || planeTicket || pullRequest) && (
-          <Card className="space-y-4 p-5" aria-label="Job metadata">
-            <h2 className="text-lg font-semibold">Metadata</h2>
-            <dl className="grid gap-4 text-sm sm:grid-cols-2">
-              {planeTicket && (
-                <div className="min-w-0">
-                  <dt className="text-xs uppercase tracking-wide text-muted-foreground">Plane</dt>
-                  <dd className="mt-1 break-words">
-                    <a className="text-primary underline" href={planeTicket.href} target="_blank" rel="noopener noreferrer">
-                      {planeTicket.text}
-                    </a>
-                  </dd>
-                </div>
-              )}
-              {pullRequest && (
-                <div className="min-w-0">
-                  <dt className="text-xs uppercase tracking-wide text-muted-foreground">Pull request</dt>
-                  <dd className="mt-1 break-words">
-                    <a className="text-primary underline" href={pullRequest.href} target="_blank" rel="noopener noreferrer">
-                      {pullRequest.text}
-                    </a>
-                  </dd>
-                </div>
-              )}
+        {job.metadata && (
+          <details className="border-y border-border py-3" aria-label="Job metadata">
+            <summary className="cursor-pointer text-sm font-medium">Delivery details</summary>
+            <dl className="mt-4 grid gap-4 text-sm sm:grid-cols-2">
               {[
-                ["Issue", job.metadata?.issue_url],
                 ["Branch", job.metadata?.branch],
                 ["Preview", job.metadata?.preview_url],
                 ["Review verdict", job.metadata?.review_verdict],
@@ -144,6 +128,7 @@ export function TaskDetail({
                 ["Intake", job.metadata?.intake_source],
                 ["Plane delivery", job.metadata?.intake_delivery_id],
                 ["Spec hash", job.metadata?.intake_spec_hash],
+                ["Labels", job.metadata?.labels?.length ? job.metadata.labels.join(", ") : undefined],
                 [
                   "Diagnosis",
                   job.metadata?.healing &&
@@ -202,13 +187,13 @@ export function TaskDetail({
                 </ul>
               </div>
             )}
-          </Card>
+          </details>
         )}
       </header>
       {stages.length > 1 && (
         <ol
           className="flex flex-wrap items-center gap-3 text-sm"
-          aria-label="Task progress"
+          aria-label="Run progress"
         >
           {stages.map((stage, index) => (
             <li
@@ -284,12 +269,12 @@ export function TaskDetail({
         </div>
       )}
       <div
-        className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,380px)]"
-        aria-label="Task sections"
+        className="grid min-w-0 items-start gap-6 lg:grid-cols-[minmax(0,1fr)_320px]"
+        aria-label="Run sections"
       >
         <Tabs
           key={job.id}
-          label="Task spec, transcript, activity, artifacts and history"
+          label="Run spec, transcript, activity, artifacts and history"
           selected={tab || "transcript"}
           onSelect={onTabChange}
           items={[
@@ -445,7 +430,7 @@ export function TaskDetail({
           <RunSkills run={latest} />
           <div
             className="space-y-6 rounded-sm border border-border bg-surface p-5 text-sm sm:p-6"
-            aria-label="Task details"
+            aria-label="Run details"
           >
             <h2 className="text-lg font-semibold">Details</h2>
             {result?.revision && (
@@ -467,7 +452,7 @@ export function TaskDetail({
             {result && <ExecutionDetails run={result} />}
             <section className="border-t border-border pt-4">
               <dl className="my-4 grid gap-3 sm:grid-cols-2">
-                <RunMetric label="Task ID" value={job.id} />
+                <RunMetric label="Run ID" value={job.id} />
                 <RunMetric label="Repository" value={job.repository} />
                 <RunMetric
                   label="Created"
@@ -483,7 +468,7 @@ export function TaskDetail({
                 disabled={!terminal || deleting}
                 onClick={() => onDelete(job)}
               >
-                {deleting ? "Deleting…" : "Delete task"}
+                {deleting ? "Deleting…" : "Delete run"}
               </Button>
             </section>
           </div>
@@ -564,8 +549,8 @@ function RunSkills({ run }) {
                   {shortVersion(skill.version)}
                 </span>
               )}
-              {skill.scope && <Badge variant="outline" className="border-border bg-muted font-normal capitalize text-muted-foreground">{skill.scope}</Badge>}
-              {skill.method && <Badge variant="outline" className="border-border bg-muted font-normal text-muted-foreground">{skill.method}</Badge>}
+              {skill.scope && <Badge className="font-normal capitalize">{skill.scope}</Badge>}
+              {skill.method && <Badge className="font-normal">{skill.method}</Badge>}
             </li>
           ))}
         </ul>
@@ -645,7 +630,7 @@ function CancelJobButton({ job, onCancel }) {
     <Button
       variant="outline"
       disabled={busy}
-      aria-label={`Cancel task ${jobDisplayTitle(job)}`}
+      aria-label={`Cancel run ${jobDisplayTitle(job)}`}
       onClick={async () => {
         setBusy(true);
         try {
@@ -655,7 +640,7 @@ function CancelJobButton({ job, onCancel }) {
         }
       }}
     >
-      {busy ? "Cancelling…" : "Cancel task"}
+      {busy ? "Cancelling…" : "Cancel run"}
     </Button>
   );
 }
@@ -797,7 +782,7 @@ function TaskActions({ job, result, onAction }) {
           disabled={busy}
           onClick={() => action("cancel")}
         >
-          Cancel task
+          Cancel run
         </Button>
       )}
       {retry && (
@@ -827,7 +812,7 @@ function resultTitle(job, result) {
     case "queued":
       return `${command} queued`;
     case "succeeded":
-      return "Task complete";
+      return "Run complete";
     default:
       return `${command} · ${stateLabel(job.state)}`;
   }

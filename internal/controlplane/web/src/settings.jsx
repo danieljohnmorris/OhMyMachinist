@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { PageHeading, QuietState } from "@/components/ui/page-heading";
@@ -150,9 +151,9 @@ export function SettingsPage({ repositories = [], csrfToken }) {
             {repositories.map((name) => <option key={name} value={name}>{name}</option>)}
           </select>
         </label>
-        {loaded && <Badge variant="outline" className="text-muted-foreground">Resolved from: {source || "default"}</Badge>}
+        {loaded && <Badge tone="surface">Resolved from: {source || "default"}</Badge>}
       </div>
-      {error && <div role="alert" className="mt-3 whitespace-pre-wrap rounded-md border border-danger/35 bg-danger/10 px-3 py-2 text-sm text-danger">{error}</div>}
+      {error && <Alert className="mt-3">{error}</Alert>}
       {notice && <div role="status" className="mt-3 rounded-md border border-success/35 bg-success/10 px-3 py-2 text-sm text-success">{notice}</div>}
       {loaded && <div className="mt-4 space-y-4">
         <div className="flex flex-wrap items-center gap-3">
@@ -302,7 +303,7 @@ function PlaneIntakeCard({ csrfToken, project = "" }) {
       <h2 className="font-medium">Plane intake</h2>
       <p className="text-sm text-muted-foreground">Webhook and poll intake for Plane tickets. Shadow mode records what intake would do without creating jobs, patching tickets or writing alerts.</p>
     </div>
-    {error && <div role="alert" className="mt-3 whitespace-pre-wrap rounded-md border border-danger/35 bg-danger/10 px-3 py-2 text-sm text-danger">{error}</div>}
+    {error && <Alert className="mt-3">{error}</Alert>}
     {notice && <div role="status" className="mt-3 rounded-md border border-success/35 bg-success/10 px-3 py-2 text-sm text-success">{notice}</div>}
     {!values ? <QuietState title="Loading Plane intake" description="Fetching the stored intake settings." role="status" />
       : <>
@@ -470,7 +471,7 @@ function ProjectSkillsCard({ project, csrfToken }) {
       <h2 className="text-lg font-semibold">Project skills</h2>
       <p className="mt-1 text-sm text-muted-foreground">An ordered list of skills every run for {project || "this project"} loads. Repository <code>.machinist/skills.yaml</code> composes first, then this list, then the global default. Untick both kinds to apply to every run.</p>
     </div>
-    {error && <div role="alert" className="whitespace-pre-wrap rounded-md border border-danger/35 bg-danger/10 px-3 py-2 text-sm text-danger">{error}</div>}
+    {error && <Alert>{error}</Alert>}
     {notice && <div role="status" className="rounded-md border border-success/35 bg-success/10 px-3 py-2 text-sm text-success">{notice}</div>}
     {!loaded ? <QuietState title={project ? "Loading project skills" : "No repositories yet"} description={project ? "Fetching the stored skills list." : "Register a worker repository to edit its skills."} role="status" />
       : <>
@@ -622,7 +623,7 @@ function TokensCard({ csrfToken }) {
       <h2 className="font-medium">API tokens</h2>
       <p className="text-sm text-muted-foreground">Bearer credentials for machine clients and MCP tools. The secret is shown once; store it in your bot's environment, never in the repository.</p>
     </div>
-    {error && <div role="alert" className="mt-3 whitespace-pre-wrap rounded-md border border-danger/35 bg-danger/10 px-3 py-2 text-sm text-danger">{error}</div>}
+    {error && <Alert className="mt-3">{error}</Alert>}
     {secret && <div role="status" className="mt-3 space-y-1 rounded-md border border-success/35 bg-success/10 px-3 py-2 text-sm text-success">
       <div>New token secret (copy now, shown once):</div>
       <code className="block break-all font-mono text-xs">{secret}</code>
@@ -648,7 +649,7 @@ function TokensCard({ csrfToken }) {
       <tbody>
         {tokens.map((token) => <tr key={token.id} className="border-t">
           <td className="py-1 pr-3">{token.name}</td>
-          <td className="py-1 pr-3"><Badge variant="outline">{token.scope}</Badge></td>
+          <td className="py-1 pr-3"><Badge tone="surface">{token.scope}</Badge></td>
           <td className="py-1 pr-3 font-mono text-xs">{token.id}</td>
           <td className="py-1 pr-3">{token.revokedAt ? "revoked" : "active"}</td>
           <td className="py-1 text-right">

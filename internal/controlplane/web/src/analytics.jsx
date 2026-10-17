@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { Card } from "@/components/ui/card";
+import { Alert } from "@/components/ui/alert";
 import { PageHeading, QuietState } from "@/components/ui/page-heading";
 import { analyticsState } from "@/analytics-state";
 import { formatDurationMillis, formatReportingCoverage, formatSuccessRate, formatTokenUsage, tokenUsageSummary } from "@/run-metrics";
@@ -11,21 +12,21 @@ export function Analytics({ jobs, loaded, error }) {
   const usage = useMemo(() => tokenUsageSummary(runs), [runs]);
 
   return <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
-    <PageHeading title="Task analytics" description="Task outcomes with measured run duration and executor-reported token usage.">
+    <PageHeading title="Run analytics" description="Run outcomes with measured duration and executor-reported token usage.">
       <label className="w-full sm:w-40"><span className="field-label">Time window</span><select className="field-control" value={days} onChange={(event) => setDays(event.target.value)}><option value="7">Last 7 days</option><option value="30">Last 30 days</option></select></label>
     </PageHeading>
 
-    {view.kind === "error" ? <div role="alert" className="rounded-md border border-danger/35 bg-danger/10 px-3 py-2 text-sm text-danger">{view.message}</div> : view.kind === "loading" ? <Card><QuietState title="Measuring the work" description="Loading task outcomes and reported usage." role="status" /></Card> : <>
-      <section className="grid gap-4 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]" aria-label="Task metrics">
+    {view.kind === "error" ? <Alert>{view.message}</Alert> : view.kind === "loading" ? <Card><QuietState title="Measuring the work" description="Loading run outcomes and reported usage." role="status" /></Card> : <>
+      <section className="grid gap-4 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]" aria-label="Run metrics">
         <Card className="flex min-h-48 flex-col justify-between border-primary/25 bg-primary/5 p-5 sm:p-6">
-          <div><p className="text-sm font-medium text-muted-foreground">Average task time</p><p className="mt-3 break-words text-4xl font-semibold tracking-tight tabular-nums sm:text-5xl">{formatDurationMillis(view.metrics.averageTaskDurationMillis)}</p></div>
-          <p className="mt-6 text-sm text-muted-foreground">{view.metrics.contributingTasks} contributing task{view.metrics.contributingTasks === 1 ? "" : "s"} with complete run timing</p>
+          <div><p className="text-sm font-medium text-muted-foreground">Average run time</p><p className="mt-3 break-words text-4xl font-semibold tracking-tight tabular-nums sm:text-5xl">{formatDurationMillis(view.metrics.averageTaskDurationMillis)}</p></div>
+          <p className="mt-6 text-sm text-muted-foreground">{view.metrics.contributingTasks} contributing run{view.metrics.contributingTasks === 1 ? "" : "s"} with complete timing</p>
         </Card>
         <div className="grid grid-cols-2 gap-3 sm:gap-4">
-          <Metric label="Total tasks" value={view.metrics.totalTasks} />
+          <Metric label="Total runs" value={view.metrics.totalTasks} />
           <Metric label="Success rate" value={formatSuccessRate(view.metrics.successRate)} />
-          <Metric label="Failed tasks" value={view.metrics.failedTasks} />
-          <Metric label="Active tasks" value={view.metrics.activeTasks} />
+          <Metric label="Failed runs" value={view.metrics.failedTasks} />
+          <Metric label="Active runs" value={view.metrics.activeTasks} />
         </div>
       </section>
 
@@ -35,7 +36,7 @@ export function Analytics({ jobs, loaded, error }) {
       </div>
 
       <section aria-labelledby="completed-run-metrics">
-        <div className="mb-3"><h2 id="completed-run-metrics" className="text-sm font-semibold">Completed run metrics</h2><p className="mt-1 text-xs text-muted-foreground">Duration and reported token usage for runs belonging to tasks in this window.</p></div>
+        <div className="mb-3"><h2 id="completed-run-metrics" className="text-sm font-semibold">Completed run metrics</h2><p className="mt-1 text-xs text-muted-foreground">Duration and reported token usage for runs in this window in this window.</p></div>
         <Card className="overflow-hidden">
           <div className="hidden grid-cols-[minmax(8rem,1fr)_minmax(8rem,1fr)_10rem_12rem] gap-4 border-b border-border bg-muted/35 px-4 py-2.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground sm:grid">
             <span>Run</span><span>Command</span><span>Duration</span><span>Reported token usage</span>

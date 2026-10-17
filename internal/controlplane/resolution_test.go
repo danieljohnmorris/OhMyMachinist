@@ -5,11 +5,14 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -177,6 +180,7 @@ func TestTicketKeyExtraction(t *testing.T) {
 		job  Job
 		want string
 	}{
+		{"stored ticket identity wins", Job{Metadata: &JobMetadata{Tracker: "builtin", TicketKey: "MM-3"}, IssueKey: "MACH-5", Title: "SPARK-10: other"}, "MM-3"},
 		{"stored key wins", Job{IssueKey: "MACH-5", Title: "SPARK-10: other"}, "MACH-5"},
 		{"trigger subject", Job{TriggerSubject: "https://plane.example/projects/p/issues/MACH-5/"}, "MACH-5"},
 		{"title", Job{Title: "MACH-5: Fix sidebar"}, "MACH-5"},
@@ -323,44 +327,127 @@ func TestReconcileSkipsActiveAndResolvedJobs(t *testing.T) {
 	}
 }
 
+// linearRequest is one GraphQL call received by the fake Linear API.
+type linearRequest struct {
+	Query     string
+	Variables map[string]any
+}
+
+// newLinearFixture starts a fake Linear GraphQL API. states maps the ticket
+// keys this workspace knows to their workflow state type; every other key is
+// "Entity not found", as Linear reports issues of other workspaces.
+func newLinearFixture(t *testing.T, states map[string]string) (*issues.LinearClient, *[]linearRequest) {
+	t.Helper()
+	var mu sync.Mutex
+	var requests []linearRequest
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		var payload linearRequest
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			response.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		requests = append(requests, payload)
+		mu.Unlock()
+		response.Header().Set("Content-Type", "application/json")
+		write := func(body string) { _, _ = response.Write([]byte(body)) }
+		switch {
+		case strings.Contains(payload.Query, "commentCreate"):
+			write(`{"data":{"commentCreate":{"success":true}}}`)
+			return
+		case strings.Contains(payload.Query, "issueUpdate"):
+			write(`{"data":{"issueUpdate":{"success":true}}}`)
+			return
+		}
+		key, _ := payload.Variables["key"].(string)
+		stateType, known := states[key]
+		if !known {
+			write(`{"data":{"issue":null},"errors":[{"message":"Entity not found: Issue"}]}`)
+			return
+		}
+		if strings.Contains(payload.Query, "states(") {
+			write(`{"data":{"issue":{"id":"uuid-` + key + `","team":{"states":{"nodes":[{"id":"state-started","name":"In Progress","type":"started"},{"id":"state-done","name":"Done","type":"completed"}]}}}}}`)
+			return
+		}
+		name := "In Progress"
+		if stateType == "completed" {
+			name = "Done"
+		}
+		write(`{"data":{"issue":{"id":"uuid-` + key + `","identifier":"` + key + `","title":"Ticket","description":"","url":"https://linear.app/team/issue/` + key + `","labels":{"nodes":[]},"team":{"id":"team"},"state":{"name":"` + name + `","type":"` + stateType + `"}}}}`)
+	}))
+	t.Cleanup(server.Close)
+	client, err := issues.NewLinearClient(issues.LinearConfig{APIKey: "key", Endpoint: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client, &requests
+}
+
+// seedTrackedJob creates a finished job carrying stored ticket identity, as
+// issue triggers and builtin approval now record it.
+func seedTrackedJob(t *testing.T, store *Store, tracker, key, trigger, state string) string {
+	t.Helper()
+	jobID := seedJob(t, store, key+": Tracked work", "", state)
+	if _, err := store.db.Exec(`UPDATE jobs SET trigger_identity=?, issue_key=? WHERE id=?`, trigger, key, jobID); err != nil {
+		t.Fatal(err)
+	}
+	metadata := `{"tracker":"` + tracker + `","ticket_key":"` + key + `"}`
+	if _, err := store.db.Exec(`INSERT INTO job_metadata(job_id,metadata) VALUES(?,?) ON CONFLICT(job_id) DO UPDATE SET metadata=excluded.metadata`, jobID, metadata); err != nil {
+		t.Fatal(err)
+	}
+	return jobID
+}
+
+func mergedPullRequest(number int, title, url, login string) GitHubPullRequest {
+	pullRequest := GitHubPullRequest{Number: number, Title: title, HeadRefName: "main", URL: url}
+	pullRequest.MergedBy.Login = login
+	return pullRequest
+}
+
+func signWebhook(secret string, payload []byte) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(payload)
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// postIssueWebhook delivers payload to the issue webhook with one signature
+// header and asserts the response status.
+func postIssueWebhook(t *testing.T, server *Server, header, signature string, payload []byte, wantStatus int) {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/issues", strings.NewReader(string(payload)))
+	if signature != "" {
+		request.Header.Set(header, signature)
+	}
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != wantStatus {
+		t.Fatalf("webhook status = %d, want %d: %s", recorder.Code, wantStatus, recorder.Body.String())
+	}
+}
+
 func TestIssueWebhookResolvesCompletedTickets(t *testing.T) {
 	server, store := newResolutionTestServer(t)
 	server.webhookSecret = "hook-secret"
+	planeClient, _ := newPlaneFixture(t)
+	server.planeClients = map[string]*issues.PlaneClient{"issue/sparkdash": planeClient}
 	resolved := seedJob(t, store, "MACH-5: Fix sidebar", "", "failed")
+	longer := seedJob(t, store, "MACH-51: Longer key", "", "failed")
+	builtin := seedTrackedJob(t, store, trackerBuiltin, "MACH-5", "", "failed")
 	other := seedJob(t, store, "SPARK-10: Hand finished", "", "failed")
 
-	webServer := httptest.NewServer(server.Handler())
-	defer webServer.Close()
-
-	post := func(t *testing.T, payload []byte, signature string, wantStatus int) *http.Response {
-		t.Helper()
-		request, err := http.NewRequest(http.MethodPost, webServer.URL+"/api/v1/webhooks/issues", strings.NewReader(string(payload)))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if signature != "" {
-			request.Header.Set("X-Signature", signature)
-		}
-		response, err := http.DefaultClient.Do(request)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer response.Body.Close()
-		if response.StatusCode != wantStatus {
-			body, _ := io.ReadAll(response.Body)
-			t.Fatalf("webhook status = %d, want %d: %s", response.StatusCode, wantStatus, body)
-		}
-		return response
-	}
-
 	payload := []byte(`{"issue":{"identifier":"MACH-5","title":"Fix sidebar","state":{"name":"Done","group":"completed"}}}`)
-	post(t, payload, "", http.StatusUnauthorized)
-	mac := hmac.New(sha256.New, []byte("hook-secret"))
-	mac.Write(payload)
-	post(t, payload, hex.EncodeToString(mac.Sum(nil)), http.StatusAccepted)
+	postIssueWebhook(t, server, "X-Signature", "", payload, http.StatusUnauthorized)
+	postIssueWebhook(t, server, "X-Signature", signWebhook("wrong-secret", payload), payload, http.StatusUnauthorized)
+	postIssueWebhook(t, server, "X-Signature", signWebhook("hook-secret", payload), payload, http.StatusAccepted)
 	job := jobByID(t, store, resolved)
 	if job.State != "resolved" || job.ResolutionKind != "plane" || job.ResolutionDetail != "Plane Done" {
 		t.Fatalf("job = %s/%s/%s, want resolved/plane/Plane Done", job.State, job.ResolutionKind, job.ResolutionDetail)
+	}
+	if jobByID(t, store, longer).State != "failed" {
+		t.Fatal("Plane MACH-5 completion resolved MACH-51")
+	}
+	if jobByID(t, store, builtin).State != "failed" {
+		t.Fatal("Plane MACH-5 completion resolved the builtin MACH-5")
 	}
 	if jobByID(t, store, other).State != "failed" {
 		t.Fatal("unrelated ticket was resolved")
@@ -368,80 +455,188 @@ func TestIssueWebhookResolvesCompletedTickets(t *testing.T) {
 
 	// A non-completed state must not resolve anything.
 	openPayload := []byte(`{"issue":{"identifier":"SPARK-10","title":"Hand finished","state":{"name":"In Progress","group":"started"}}}`)
-	openSignature := "sha256=" + func() string {
-		mac := hmac.New(sha256.New, []byte("hook-secret"))
-		mac.Write(openPayload)
-		return hex.EncodeToString(mac.Sum(nil))
-	}()
-	post(t, openPayload, openSignature, http.StatusAccepted)
+	postIssueWebhook(t, server, "X-Signature", "sha256="+signWebhook("hook-secret", openPayload), openPayload, http.StatusAccepted)
 	if jobByID(t, store, other).State != "failed" {
 		t.Fatal("open ticket was resolved")
 	}
+
+	// Real Plane deliveries announce a state move as a state-only activity;
+	// intake treats those as no-ops but completion must still resolve.
+	statePayload := []byte(`{"event":"issue","action":"updated","data":{"identifier":"SPARK-10","name":"Hand finished","state":{"name":"Done","group":"completed"}},"activity":{"field":"state","old_value":"In Progress","new_value":"Done"}}`)
+	postIssueWebhook(t, server, "X-Signature", signWebhook("hook-secret", statePayload), statePayload, http.StatusAccepted)
+	if job := jobByID(t, store, other); job.State != "resolved" || job.ResolutionKind != "plane" {
+		t.Fatalf("state-only completion = %s/%s, want resolved/plane", job.State, job.ResolutionKind)
+	}
 }
 
-func TestResolveTicketsForIssueMatchesStoredKeyTitleAndSubject(t *testing.T) {
-	store := openTestStore(t, filepath.Join(t.TempDir(), "machinist.db"))
-	byKey := seedJob(t, store, "Unrelated title", "", "failed")
-	if _, err := store.db.Exec(`UPDATE jobs SET issue_key='MACH-5' WHERE id=?`, byKey); err != nil {
-		t.Fatal(err)
+func TestIssueWebhookLinearCompletionRequiresSignatureFreshnessAndSource(t *testing.T) {
+	server, store := newResolutionTestServer(t)
+	server.webhookSecret = "hook-secret"
+	// Two Linear workspaces both have a MACH-5; only workspace A completed it.
+	clientA, _ := newLinearFixture(t, map[string]string{"MACH-5": "completed"})
+	clientB, _ := newLinearFixture(t, map[string]string{"MACH-5": "started"})
+	// Workspace C does not know MACH-5 at all.
+	clientC, _ := newLinearFixture(t, map[string]string{})
+	server.issueSources = map[string]issuePoller{
+		"issue/linear-a": linearPoller{client: clientA},
+		"issue/linear-b": linearPoller{client: clientB},
+		"issue/linear-c": linearPoller{client: clientC},
 	}
-	byTitle := seedJob(t, store, "MACH-6: Fix sidebar", "", "failed")
-	bySubject := seedJob(t, store, "Unrelated", "https://plane.example/projects/p/issues/MACH-8/", "failed")
-	running := seedJob(t, store, "MACH-9: In flight", "", "running")
-	alreadyResolved := seedJob(t, store, "MACH-5: duplicate", "", "failed")
-	if _, err := store.db.Exec(`UPDATE jobs SET state='resolved', resolution_kind='pr' WHERE id=?`, alreadyResolved); err != nil {
+	planeClient, planeRequests := newPlaneFixture(t)
+	server.planeClients = map[string]*issues.PlaneClient{"issue/sparkdash": planeClient}
+	sourceA := seedTrackedJob(t, store, trackerLinear, "MACH-5", "issue/linear-a", "failed")
+	sourceB := seedTrackedJob(t, store, trackerLinear, "MACH-5", "issue/linear-b", "succeeded")
+	sourceC := seedTrackedJob(t, store, trackerLinear, "MACH-5", "issue/linear-c", "failed")
+	plane := seedJob(t, store, "MACH-5: Plane twin", "", "failed")
+	builtin := seedTrackedJob(t, store, trackerBuiltin, "MACH-5", "", "failed")
+
+	payloadAt := func(at time.Time) []byte {
+		return []byte(`{"action":"update","type":"Issue","data":{"id":"uuid-MACH-5","identifier":"MACH-5","title":"Ticket","state":{"id":"state-done","name":"Done","type":"completed"}},"webhookTimestamp":` + strconv.FormatInt(at.UnixMilli(), 10) + `}`)
+	}
+	fresh := payloadAt(time.Now())
+	postIssueWebhook(t, server, "Linear-Signature", signWebhook("wrong-secret", fresh), fresh, http.StatusUnauthorized)
+	stale := payloadAt(time.Now().Add(-10 * time.Minute))
+	postIssueWebhook(t, server, "Linear-Signature", signWebhook("hook-secret", stale), stale, http.StatusUnauthorized)
+	if jobByID(t, store, sourceA).State != "failed" {
+		t.Fatal("rejected delivery resolved a job")
+	}
+
+	postIssueWebhook(t, server, "Linear-Signature", signWebhook("hook-secret", fresh), fresh, http.StatusAccepted)
+	if job := jobByID(t, store, sourceA); job.State != "resolved" || job.ResolutionKind != "linear" || job.ResolutionDetail != "Linear Done" {
+		t.Fatalf("source A job = %s/%s/%s, want resolved/linear/Linear Done", job.State, job.ResolutionKind, job.ResolutionDetail)
+	}
+	if jobByID(t, store, sourceB).State != "succeeded" {
+		t.Fatal("MACH-5 completed in workspace A resolved workspace B's open MACH-5")
+	}
+	if jobByID(t, store, sourceC).State != "failed" {
+		t.Fatal("MACH-5 completed in workspace A resolved a workspace that does not know MACH-5")
+	}
+	if jobByID(t, store, plane).State != "failed" || jobByID(t, store, builtin).State != "failed" {
+		t.Fatal("Linear completion resolved a Plane or builtin MACH-5")
+	}
+	if len(*planeRequests) != 0 {
+		t.Fatalf("Linear completion queried Plane: %+v", *planeRequests)
+	}
+}
+
+func TestReconcileResolvesLinearTicketsThroughTheirOwnSource(t *testing.T) {
+	server, store := newResolutionTestServer(t)
+	linearClient, linearRequests := newLinearFixture(t, map[string]string{"MACH-7": "started", "MACH-8": "completed"})
+	server.issueSources = map[string]issuePoller{"issue/linear": linearPoller{client: linearClient}}
+	planeClient, planeRequests := newPlaneFixture(t)
+	server.planeClients = map[string]*issues.PlaneClient{"issue/sparkdash": planeClient}
+	server.github = &constantGitHubCLI{pullRequests: []GitHubPullRequest{
+		mergedPullRequest(7, "MACH-7: Fix export", "https://github.com/dan/sparkdash/pull/7", "kim"),
+	}}
+	merged := seedTrackedJob(t, store, trackerLinear, "MACH-7", "issue/linear", "succeeded")
+	completed := seedTrackedJob(t, store, trackerLinear, "MACH-8", "issue/linear", "failed")
+	// A legacy job admitted by the Linear trigger carries no stored tracker.
+	legacy := seedJob(t, store, "MACH-8: Earlier attempt", "", "failed")
+	if _, err := store.db.Exec(`UPDATE jobs SET trigger_identity='issue/linear' WHERE id=?`, legacy); err != nil {
 		t.Fatal(err)
 	}
 
-	count, err := store.ResolveTicketsForIssue(t.Context(), "MACH-5", "plane", "Plane Done", time.Now().UTC())
+	if err := server.reconcileTicketOutcomes(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if job := jobByID(t, store, merged); job.State != "resolved" || job.ResolutionKind != "pr" || job.ResolutionDetail != "PR #7 (merged by kim)" {
+		t.Fatalf("merged job = %s/%s/%s", job.State, job.ResolutionKind, job.ResolutionDetail)
+	}
+	for _, id := range []string{completed, legacy} {
+		if job := jobByID(t, store, id); job.State != "resolved" || job.ResolutionKind != "linear" || job.ResolutionDetail != "Linear Done" {
+			t.Fatalf("completed job %s = %s/%s/%s, want resolved/linear/Linear Done", id, job.State, job.ResolutionKind, job.ResolutionDetail)
+		}
+	}
+	var stateUpdates, comments []linearRequest
+	for _, request := range *linearRequests {
+		switch {
+		case strings.Contains(request.Query, "issueUpdate"):
+			stateUpdates = append(stateUpdates, request)
+		case strings.Contains(request.Query, "commentCreate"):
+			comments = append(comments, request)
+		}
+	}
+	if len(stateUpdates) != 1 || stateUpdates[0].Variables["issue"] != "uuid-MACH-7" || stateUpdates[0].Variables["state"] != "state-done" {
+		t.Fatalf("linear state updates = %+v, want MACH-7 moved to Done once", stateUpdates)
+	}
+	if len(comments) != 1 || comments[0].Variables["issue"] != "uuid-MACH-7" || !strings.Contains(fmt.Sprint(comments[0].Variables["body"]), "[PR #7](https://github.com/dan/sparkdash/pull/7)") {
+		t.Fatalf("linear comments = %+v, want one PR comment on MACH-7", comments)
+	}
+	if len(*planeRequests) != 0 {
+		t.Fatalf("the sole Plane client was used for Linear jobs: %+v", *planeRequests)
+	}
+}
+
+func TestReconcileResolvesBuiltinTicketOnMergedPullRequestAtomically(t *testing.T) {
+	server, store := newResolutionTestServer(t)
+	planeClient, planeRequests := newPlaneFixture(t)
+	server.planeClients = map[string]*issues.PlaneClient{"issue/sparkdash": planeClient}
+	ticket, err := store.createTicket(t.Context(), Ticket{Title: "Export CSV", Repository: "sparkdash"}, "MACH")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 {
-		t.Fatalf("resolved count = %d, want 1", count)
-	}
-	if job := jobByID(t, store, byKey); job.State != "resolved" || job.ResolutionDetail != "Plane Done" {
-		t.Fatalf("stored key job = %+v", job)
-	}
-
-	count, err = store.ResolveTicketsForIssue(t.Context(), "MACH-6", "pr", "PR #2 (merged by dan)", time.Now().UTC())
+	jobID, _, err := store.approveTicket(t.Context(), ticket.Key, testAgent("build", "{{machinist.prompt}}"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 {
-		t.Fatalf("resolved count = %d, want 1", count)
+	if _, err := store.db.Exec(`UPDATE jobs SET state='succeeded' WHERE id=?`, jobID); err != nil {
+		t.Fatal(err)
 	}
-	if job := jobByID(t, store, byTitle); job.State != "resolved" || job.ResolutionKind != "pr" {
-		t.Fatalf("title job = %+v", job)
+	// The delivered PR title does not name the ticket; the PR recorded on the
+	// job links it.
+	if _, err := store.db.Exec(`UPDATE job_metadata SET metadata=json_set(metadata,'$.pr_url',?) WHERE job_id=?`, "https://github.com/dan/sparkdash/pull/42", jobID); err != nil {
+		t.Fatal(err)
 	}
+	server.github = &constantGitHubCLI{pullRequests: []GitHubPullRequest{
+		mergedPullRequest(42, "Add CSV export", "https://github.com/dan/sparkdash/pull/42", "kim"),
+	}}
 
-	count, err = store.ResolveTicketsForIssue(t.Context(), "MACH-8", "plane", "Plane Done", time.Now().UTC())
+	for range 2 {
+		if err := server.reconcileTicketOutcomes(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if job := jobByID(t, store, jobID); job.State != "resolved" || job.ResolutionKind != "pr" || job.ResolutionDetail != "PR #42 (merged by kim)" {
+		t.Fatalf("builtin job = %s/%s/%s", job.State, job.ResolutionKind, job.ResolutionDetail)
+	}
+	updated, err := store.ticket(t.Context(), ticket.Key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 {
-		t.Fatalf("resolved count = %d, want 1", count)
+	if updated.State != "done" {
+		t.Fatalf("ticket state = %q, want done", updated.State)
 	}
-	if job := jobByID(t, store, bySubject); job.State != "resolved" || job.ResolutionKind != "plane" {
-		t.Fatalf("subject job = %+v", job)
+	resolutionComments := 0
+	for _, comment := range updated.Comments {
+		if strings.Contains(comment.Body, "Resolved by merged pull request #42") && strings.Contains(comment.Body, "https://github.com/dan/sparkdash/pull/42") {
+			resolutionComments++
+		}
 	}
+	if resolutionComments != 1 {
+		t.Fatalf("resolution comments = %d, want exactly one across passes: %+v", resolutionComments, updated.Comments)
+	}
+	if len(*planeRequests) != 0 {
+		t.Fatalf("the sole Plane client was used for a builtin ticket: %+v", *planeRequests)
+	}
+}
 
-	// Active and already-resolved jobs stay untouched on later passes.
-	if _, err := store.ResolveTicketsForIssue(t.Context(), "MACH-9", "plane", "Plane Done", time.Now().UTC()); err != nil {
-		t.Fatal(err)
+func TestPlaneClientForIgnoresBuiltinAndLinearJobs(t *testing.T) {
+	server, _ := newResolutionTestServer(t)
+	planeClient, _ := newPlaneFixture(t)
+	linearClient, _ := newLinearFixture(t, nil)
+	server.planeClients = map[string]*issues.PlaneClient{"issue/sparkdash": planeClient}
+	server.issueSources = map[string]issuePoller{"issue/linear": linearPoller{client: linearClient}}
+	if server.planeClientFor(Job{Title: "MACH-5: legacy"}) != planeClient {
+		t.Fatal("legacy Plane job lost the single-client fallback")
 	}
-	if job := jobByID(t, store, running); job.State != "running" {
-		t.Fatalf("running job state = %q, want running", job.State)
+	if server.planeClientFor(Job{Metadata: &JobMetadata{Tracker: trackerBuiltin, TicketKey: "MACH-5"}}) != nil {
+		t.Fatal("builtin job got the Plane fallback client")
 	}
-	if job := jobByID(t, store, alreadyResolved); job.ResolutionKind != "pr" {
-		t.Fatalf("resolved job overwritten: %+v", job)
+	if server.planeClientFor(Job{Metadata: &JobMetadata{Tracker: trackerLinear, TicketKey: "MACH-5"}, TriggerID: "issue/linear"}) != nil {
+		t.Fatal("Linear job got the Plane fallback client")
 	}
-
-	if _, err := store.ResolveTicketsForIssue(t.Context(), "", "plane", "Plane Done", time.Now().UTC()); err == nil {
-		t.Fatal("empty issue key accepted")
-	}
-	if _, err := store.ResolveTicketsForIssue(t.Context(), "MACH-5", "email", "x", time.Now().UTC()); err == nil {
-		t.Fatal("unknown resolution kind accepted")
+	if server.planeClientFor(Job{Title: "MACH-5: legacy", TriggerID: "issue/linear"}) != nil {
+		t.Fatal("legacy job of a Linear trigger got the Plane fallback client")
 	}
 }
 

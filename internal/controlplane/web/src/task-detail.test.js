@@ -34,7 +34,7 @@ const job = {
   ],
 };
 
-test("run page puts the sidebar right, renders markdown instructions, and styles links", async (context) => {
+test("run page renders markdown instructions, safe links, and details after the content", async (context) => {
   const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost/#/runs/job_markdown" });
   const priorGlobals = new Map();
   for (const name of ["window", "document", "navigator", "localStorage", "Event", "MouseEvent"]) {
@@ -47,7 +47,7 @@ test("run page puts the sidebar right, renders markdown instructions, and styles
     return { ok: true, json: async () => ({ jobs: [job], workers: [], commands: [], repositories: [], triggers: [], csrf_token: "test" }) };
   };
 
-  const server = await createServer({ server: { middlewareMode: true }, appType: "custom" });
+  const server = await createServer({ server: { middlewareMode: true, hmr: false }, appType: "custom" });
   let mountedRoot;
   context.after(async () => {
     const previousActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT;
@@ -65,12 +65,8 @@ test("run page puts the sidebar right, renders markdown instructions, and styles
   mountedRoot = (await server.ssrLoadModule("/src/main.jsx")).appRoot;
   await eventually(() => assert.match(document.body.textContent, /Markdown fixture/));
 
-  const sections = document.querySelector('[aria-label="Task sections"]');
+  const sections = document.querySelector('[aria-label="Run sections"]');
   assert.ok(sections, "task sections grid exists");
-  // Sidebar on the right: instructions fill the 1fr left column, the side
-  // column is the fixed 380px right column, and nothing depends on order
-  // utilities.
-  assert.match(sections.className, /lg:grid-cols-\[minmax\(0,1fr\)_minmax\(0,380px\)\]/);
   const instructions = sections.querySelector('[aria-label="Instructions"]');
   const sideColumn = sections.querySelector('[aria-label="Current result"]').closest("div");
   assert.ok(instructions && sideColumn, "instructions and side column both render");
@@ -79,9 +75,6 @@ test("run page puts the sidebar right, renders markdown instructions, and styles
     dom.window.Node.DOCUMENT_POSITION_FOLLOWING,
     "side column comes after instructions in DOM order (right at lg, below on mobile)",
   );
-  for (const child of sections.children) {
-    assert.doesNotMatch(child.className, /lg:order-/);
-  }
 
   // Instructions render markdown, not a pre-wrapped plain-text body.
   const body = instructions.querySelector(".markdown-body");
@@ -100,8 +93,6 @@ test("run page puts the sidebar right, renders markdown instructions, and styles
   const hrefs = anchors.map((a) => a.getAttribute("href"));
   assert.deepEqual(hrefs.sort(), ["https://example.com/docs", "https://example.com/plan", "https://example.com/summary"]);
   for (const anchor of anchors) {
-    assert.match(anchor.className, /text-primary/);
-    assert.match(anchor.className, /underline/);
     assert.equal(anchor.target, "_blank");
     assert.equal(anchor.rel, "noopener noreferrer");
   }
@@ -147,7 +138,7 @@ test("run page lists the skills a run loaded and its warnings", async (context) 
     return { ok: true, json: async () => ({ jobs: [skillsJob], workers: [], commands: [], repositories: [], triggers: [], csrf_token: "test" }) };
   };
 
-  const server = await createServer({ server: { middlewareMode: true }, appType: "custom" });
+  const server = await createServer({ server: { middlewareMode: true, hmr: false }, appType: "custom" });
   let mountedRoot;
   context.after(async () => {
     const previousActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT;

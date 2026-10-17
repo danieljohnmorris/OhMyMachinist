@@ -242,13 +242,6 @@ test("jobs without an issue source stay on their own cards", () => {
   assert.deepEqual(grouped.finished.map(({ id }) => id), ["plain_1"]);
 });
 
-test("ticket keys come from the title first, then the persisted source field", () => {
-  assert.equal(jobTicketKey({ title: "SPARK-6: Board collapse", prompt: "ignored" }), "key:SPARK-6");
-  assert.equal(jobTicketKey({ github_issue_title: "MACH-13: One card per ticket" }), "key:MACH-13");
-  assert.equal(jobTicketKey({ prompt: "no key", metadata: { issue_url: "https://plane.example/tickets/SPARK-6/" } }), "url:https://plane.example/tickets/SPARK-6/");
-  assert.equal(jobTicketKey({ prompt: "no key", task: { source_url: "https://plane.example/tickets/SPARK-6/" } }), "url:https://plane.example/tickets/SPARK-6/");
-  assert.equal(jobTicketKey({ prompt: "unticketed work", id: "job_1" }), "");
-});
 
 test("attempts of one ticket collapse to the latest with priors linked", () => {
   const spark = (id, state, updated) => ({ id, state, title: "SPARK-6: Board collapse", created_at: updated, updated_at: updated, runs: [] });
@@ -373,4 +366,22 @@ test("only plain queued jobs are cancellable", () => {
   }
   assert.equal(canCancelJob({ state: "queued", workflow: { name: "deliver", steps: ["build"], current_step: 0 } }), false);
   assert.equal(canCancelJob({ state: "running", workflow: { name: "deliver" } }), false);
+});
+
+test("ticket grouping keeps providers and projects separate while retaining prior attempts", () => {
+  const job = (id, tracker, url, created_at) => ({ id, repository: "app", title: "ENG-1: Same visible key", metadata: { tracker, ticket_key: "ENG-1", issue_url: url }, created_at, state: "succeeded", runs: [] });
+  const jobs = [
+    job("linear_old", "linear", "https://linear.app/a/issue/ENG-1", "2026-10-01T00:00:00Z"),
+    job("plane", "plane", "https://plane.example/b/browse/ENG-1", "2026-10-02T00:00:00Z"),
+    job("other_project", "linear", "https://linear.app/b/issue/ENG-1", "2026-10-02T00:00:00Z"),
+    job("linear_new", "linear", "https://linear.app/a/issue/ENG-1", "2026-10-03T00:00:00Z"),
+  ];
+  const entries = collapseJobsByTicket(jobs);
+  assert.deepEqual(entries.map(({ latest }) => latest.id), ["linear_new", "plane", "other_project"]);
+  assert.deepEqual(entries[0].priors.map(({ id }) => id), ["linear_old"]);
+});
+
+test("human-blocked work remains visible without showing completed work", () => {
+  const states = ["blocked", "awaiting_approval", "interrupted", "resolved"];
+  assert.deepEqual(filterBoardJobs(states.map(state => ({ state })), false).map(job => job.state), states.slice(0, 3));
 });

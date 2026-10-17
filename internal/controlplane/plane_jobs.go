@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"time"
 
 	"github.com/owainlewis/machinist/internal/config"
@@ -88,8 +89,8 @@ func (s *Store) CreatePlaneJob(ctx context.Context, admission PlaneAdmission) (s
 		"intake_delivery_id": admission.DeliveryID,
 		"intake_spec_hash":   admission.SpecHash,
 	}
-	if admission.Subject != "" {
-		metadata["issue_url"] = admission.Subject
+	for key, value := range ticketIdentityMetadata("plane", admission.IssueKey, admission.Subject) {
+		metadata[key] = value
 	}
 	if admission.Project != "" {
 		metadata["project"] = admission.Project
@@ -109,6 +110,27 @@ func (s *Store) CreatePlaneJob(ctx context.Context, admission PlaneAdmission) (s
 		return "", fmt.Errorf("commit plane job: %w", err)
 	}
 	return jobID, nil
+}
+
+// ticketIdentityMetadata is the intake-assigned ticket identity of an issue
+// job: provider, human key and browse URL. Resolution and the run board rely
+// on it instead of matching keys in titles. The URL is kept only when it is an
+// absolute HTTP(S) link, since job metadata rejects anything else.
+func ticketIdentityMetadata(tracker, key, issueURL string) map[string]any {
+	identity := map[string]any{}
+	if tracker != "" {
+		identity["tracker"] = tracker
+	}
+	if key != "" {
+		identity["ticket_key"] = key
+	}
+	if parsed, err := url.Parse(issueURL); err == nil && parsed.Host != "" && (parsed.Scheme == "http" || parsed.Scheme == "https") {
+		identity["issue_url"] = issueURL
+	}
+	if len(identity) == 0 {
+		return nil
+	}
+	return identity
 }
 
 // PlaneSyncCandidate is one plane-intake job's run as seen by the state sync.

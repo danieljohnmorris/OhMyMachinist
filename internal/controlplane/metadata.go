@@ -27,6 +27,8 @@ type JobScreenshot struct {
 }
 
 type JobMetadata struct {
+	Tracker          string           `json:"tracker,omitempty"`
+	TicketKey        string           `json:"ticket_key,omitempty"`
 	Project          string           `json:"project,omitempty"`
 	IssueURL         string           `json:"issue_url,omitempty"`
 	Branch           string           `json:"branch,omitempty"`
@@ -37,6 +39,7 @@ type JobMetadata struct {
 	IntakeSource     string           `json:"intake_source,omitempty"`
 	IntakeDeliveryID string           `json:"intake_delivery_id,omitempty"`
 	IntakeSpecHash   string           `json:"intake_spec_hash,omitempty"`
+	Labels           []string         `json:"labels,omitempty"`
 	Healing          *healingRecord   `json:"healing,omitempty"`
 	Automerge        *AutoMergeRecord `json:"automerge,omitempty"`
 	Screenshots      []JobScreenshot  `json:"screenshots,omitempty"`
@@ -71,6 +74,9 @@ func NormalizeJobMetadata(raw map[string]any) (*JobMetadata, error) {
 	}
 	for _, value := range []string{metadata.IssueURL, metadata.PRURL, metadata.PreviewURL} {
 		if value == "" {
+			continue
+		}
+		if value == metadata.IssueURL && metadata.Tracker == "builtin" && ticketKeyPattern.FindString(metadata.TicketKey) == metadata.TicketKey && metadata.TicketKey != "" && value == "#/tickets/"+metadata.TicketKey {
 			continue
 		}
 		parsed, err := url.Parse(value)
@@ -120,23 +126,25 @@ func ResolveProjectKey(explicit, title string) (string, error) {
 }
 
 func saveJobMetadata(ctx context.Context, tx *sql.Tx, jobID string, raw map[string]any) error {
-	var existingProject string
-	var existing string
-	err := tx.QueryRowContext(ctx, `SELECT metadata FROM job_metadata WHERE job_id=?`, jobID).Scan(&existing)
-	if err == nil {
-		var prior JobMetadata
-		if decodeErr := json.Unmarshal([]byte(existing), &prior); decodeErr == nil {
-			existingProject = prior.Project
-		}
-	} else if !errors.Is(err, sql.ErrNoRows) {
+	var previous string
+	err := tx.QueryRowContext(ctx, `SELECT metadata FROM job_metadata WHERE job_id=?`, jobID).Scan(&previous)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	if existingProject != "" && (raw == nil || raw["project"] == nil) {
-		if raw == nil {
-			raw = map[string]any{}
+	merged := map[string]any{}
+	if previous != "" {
+		if err := json.Unmarshal([]byte(previous), &merged); err != nil {
+			return err
 		}
-		raw["project"] = existingProject
 	}
+	for key, value := range raw {
+		// Ticket identity is assigned by intake, never replaced by agent output.
+		if (key == "tracker" || key == "ticket_key" || key == "issue_url") && merged[key] != nil {
+			continue
+		}
+		merged[key] = value
+	}
+	raw = merged
 	metadata, err := NormalizeJobMetadata(raw)
 	if err != nil || metadata == nil {
 		return err

@@ -1,4 +1,5 @@
 import { Clock3, GitBranch, TimerReset } from "lucide-react";
+import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { PageHeading, QuietState } from "@/components/ui/page-heading";
@@ -15,16 +16,10 @@ export function TriggersPage({ triggers = [], loaded, error }) {
 function TriggerCard({ trigger }) {
   const view = triggerView(trigger);
   const tone = triggerHealthTone(view.health);
-  const healthClass = {
-    success: "border-success/25 bg-success/10 text-success",
-    warning: "border-warning/25 bg-warning/10 text-warning",
-    danger: "border-danger/25 bg-danger/10 text-danger",
-    neutral: "border-border bg-muted text-muted-foreground",
-  }[tone];
   return <Card className={cn("overflow-hidden", tone === "danger" && "border-danger/40")}>
     <header className="flex flex-col gap-3 border-b border-border p-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
       <div className="min-w-0"><div className="flex items-center gap-2"><TimerReset className="size-4 shrink-0 text-muted-foreground" /><h2 className="truncate font-mono text-sm font-semibold" title={view.identity}>{view.identity}</h2></div><p className="mt-1 capitalize text-xs text-muted-foreground">{view.family} trigger</p></div>
-      <Badge className={cn("shrink-0 gap-1.5 capitalize", healthClass)}><span className="size-1.5 rounded-full bg-current" />{view.health}</Badge>
+      <Badge tone={tone} dot className="shrink-0 capitalize">{view.health}</Badge>
     </header>
     <dl className="grid gap-x-6 gap-y-3 p-4 text-xs sm:grid-cols-2 sm:p-5">{view.rows.map((row) => <div key={row.field} className="min-w-0"><dt className="text-muted-foreground">{row.label}</dt><dd className={cn("mt-1 break-all font-medium", row.field.endsWith("_count") && "tabular-nums", row.field.includes("due") || row.field.includes("attempt") || row.field.includes("success") ? "font-mono" : "")}><TriggerValue field={row.field} value={row.value} /></dd></div>)}</dl>
     {view.error && <div role="alert" className="flex items-start gap-2 border-t border-danger/25 bg-danger/5 px-4 py-3 text-xs text-danger sm:px-5"><GitBranch className="mt-0.5 size-3.5 shrink-0" /><p className="break-words">{view.error}</p></div>}
@@ -44,5 +39,5 @@ function formatDate(value) {
 
 function Page({ title, children }) { return <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8"><PageHeading title={title} description="Scheduled and managed ways work enters the shop." />{children}</div>; }
 function Loading() { return <Card><QuietState title="Checking the schedule" description="Loading managed trigger state." role="status" /></Card>; }
-function Failure({ value }) { return <div role="alert" className="rounded-md border border-danger/35 bg-danger/10 px-3 py-2 text-sm text-danger">{value}</div>; }
+function Failure({ value }) { return <Alert>{value}</Alert>; }
 function Empty() { return <Card><QuietState title="No managed triggers" description="Configured schedules and event sources will appear here." /></Card>; }

@@ -53,6 +53,9 @@ All requests and responses are `application/json`. Errors are
 | GET | `/api/v1/skills` | Installed skills with their versions and `used_by` references. |
 | GET | `/api/v1/skills/{name}` | One installed skill with every version. |
 | GET | `/api/v1/plane/intake` | Plane intake settings, shadow-mode decisions and imported script jobs. |
+| GET | `/api/v1/trackers` | Default tracker and configured status for built-in, Plane and Linear. |
+| GET | `/api/v1/tickets` | Built-in tickets, newest first, as `{"tickets": [...]}`. |
+| GET | `/api/v1/tickets/{key}` | One built-in ticket with comments and its factory `job_id`. |
 
 `GET /api/v1/status` (board state: jobs, workers, triggers, plus the CSRF
 token) and `GET /api/v1/catalog` and `GET /api/v1/definitions` remain open so
@@ -77,6 +80,13 @@ capped at a configurable size and marked `[raw agent log truncated at N MB]`
 when the cap is reached. It is downloadable from the run page Artifacts list for
 every attempt, including failed, timed-out and cancelled runs.
 
+Built-in ticket responses carry `key`, `title`, `description`, `repository`,
+`state`, timestamps, optional `job_id`, and `comments`. The `approved` and
+`in_progress` states cannot be assigned by PATCH: use approval and worker
+dispatch. After approval, the repository cannot change and the ticket cannot
+return to backlog/todo. `done` resolves linked terminal jobs. Invalid input
+returns 400; unknown keys return 404; conflicting changes return 409.
+
 ### Changing state (write scope)
 
 | Method | Path | Description |
@@ -85,6 +95,12 @@ every attempt, including failed, timed-out and cancelled runs.
 | POST | `/api/v1/jobs/{id}/{action}` | Workflow actions: `cancel`, `retry` (requeue), `approve`, `request_changes`. Body may carry `run_id`, `feedback`, `previous_process_stopped`. |
 | POST | `/api/v1/jobs/{id}/move-to-queue` | Stop a running or stalled job's current attempt and requeue it as the next attempt on the same card. Returns `{"job_id": "job_…"}` (the new attempt id); a repeated call returns the same id. The attempt is cancelled with the reason `moved to queue`, the lane's uncommitted work (tracked and untracked) is saved by the worker that held the lease and recorded on the cancelled attempt, and the new attempt carries the prior transcript and waits at the back of the queue. |
 | DELETE | `/api/v1/jobs/{id}` | Delete a terminal job. |
+| POST | `/api/v1/tickets` | Create a built-in draft. Body: `title`, optional `description`, `repository`, `project` (a configured `[tracker.projects]` name; unknown projects return 400). |
+| PATCH | `/api/v1/tickets/{key}` | Edit `title`, `description`, `repository`, or planning/completion `state`. `project` is fixed at creation. |
+| DELETE | `/api/v1/tickets/{key}` | Delete an unapproved ticket; linked tickets return 409. |
+| DELETE | `/api/v1/workers/{instance_id}` | Forget a registered worker. Unknown workers return 404; a worker running a job returns 409. |
+| POST | `/api/v1/tickets/{key}/approve` | Atomically approve and queue work. Returns `{ticket, job_id, created}`; repeated approval returns the existing job. |
+| POST | `/api/v1/tickets/{key}/comments` | Add a comment. Body: `{"body": "…"}`. Returns the ticket. |
 | PUT | `/api/v1/settings/{key}` | Write one setting. Body: `{"value": "…"}`. The reserved `factory.*` keys are refused; use the factory endpoints below. |
 | POST | `/api/v1/factory/stop` | Stop dispatching new jobs. Body: `{"mode": "drain"|"cancel", "reason": "…"}`. `drain` lets the running job finish; `cancel` stops it now. Workers stay connected. |
 | POST | `/api/v1/factory/start` | Resume dispatch. |

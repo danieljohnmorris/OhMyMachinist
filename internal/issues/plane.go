@@ -65,31 +65,101 @@ func (p *PlaneClient) FetchIssue(ctx context.Context, key string) (Issue, error)
 	}, nil
 }
 
+// IssuesWithLabel lists the project's issues carrying label that are still
+// open. Issues in Plane's completed or cancelled state groups are skipped, so
+// a delivered ticket that keeps its label never admits new work. Keys are the
+// human ticket form (MACH-5) whenever Plane reports the sequence number.
 func (p *PlaneClient) IssuesWithLabel(ctx context.Context, label string) ([]Issue, error) {
 	if err := requiresValue(label, "label"); err != nil {
 		return nil, err
 	}
-	query := url.Values{"labels": []string{label}}
+	query := url.Values{"labels": []string{label}, "expand": []string{"labels,state"}}
 	var response struct {
 		Results []struct {
-			ID          string       `json:"id"`
-			Name        string       `json:"name"`
-			Description string       `json:"description"`
-			URL         string       `json:"url"`
-			Labels      []planeLabel `json:"labels"`
+			ID          string          `json:"id"`
+			SequenceID  int64           `json:"sequence_id"`
+			Name        string          `json:"name"`
+			Description string          `json:"description"`
+			URL         string          `json:"url"`
+			Labels      []planeLabel    `json:"labels"`
+			State       json.RawMessage `json:"state"`
 		} `json:"results"`
 	}
 	if err := p.request(ctx, http.MethodGet, p.endpoint("issues/?", query.Encode()), nil, &response); err != nil {
 		return nil, err
 	}
+	var identifier string
+	var states map[string]planeState
 	issues := make([]Issue, 0, len(response.Results))
 	for _, result := range response.Results {
+		closed, err := p.closedPlaneState(ctx, result.State, &states)
+		if err != nil {
+			return nil, fmt.Errorf("plane issue %s state: %w", result.ID, err)
+		}
+		if closed {
+			continue
+		}
+		key, issueURL := result.ID, firstNonEmpty(result.URL, p.IssueURL(result.ID))
+		if result.SequenceID > 0 {
+			if identifier == "" {
+				if identifier, err = p.projectIdentifier(ctx); err != nil {
+					return nil, err
+				}
+			}
+			key = identifier + "-" + strconv.FormatInt(result.SequenceID, 10)
+			issueURL = firstNonEmpty(result.URL, p.BrowseURL(key))
+		}
 		issues = append(issues, Issue{
-			ID: result.ID, Key: result.ID, Title: result.Name, Description: result.Description,
-			URL: firstNonEmpty(result.URL, p.IssueURL(result.ID)), Labels: planeLabelNames(result.Labels),
+			ID: result.ID, Key: key, Title: result.Name, Description: result.Description,
+			URL: issueURL, Labels: planeLabelNames(result.Labels),
 		})
 	}
 	return issues, nil
+}
+
+// closedPlaneState reports whether a listed issue's state sits in the
+// completed or cancelled group. An unexpanded state is a UUID, resolved
+// through the project's state list, fetched once per poll into states.
+func (p *PlaneClient) closedPlaneState(ctx context.Context, raw json.RawMessage, states *map[string]planeState) (bool, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return false, nil
+	}
+	var state planeState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		var id string
+		if err := json.Unmarshal(raw, &id); err != nil || id == "" {
+			return false, nil
+		}
+		if *states == nil {
+			list, err := p.projectStates(ctx, p.config.ProjectID)
+			if err != nil {
+				return false, err
+			}
+			*states = make(map[string]planeState, len(list))
+			for _, listed := range list {
+				(*states)[listed.ID] = listed
+			}
+		}
+		state = (*states)[id]
+	}
+	if state.Group != "" {
+		return strings.EqualFold(state.Group, "completed") || strings.EqualFold(state.Group, "cancelled"), nil
+	}
+	return strings.EqualFold(state.Name, CompletedPlaneState), nil
+}
+
+// projectIdentifier is the project's ticket prefix (MACH in MACH-5).
+func (p *PlaneClient) projectIdentifier(ctx context.Context) (string, error) {
+	var project struct {
+		Identifier string `json:"identifier"`
+	}
+	if err := p.request(ctx, http.MethodGet, p.endpoint(), nil, &project); err != nil {
+		return "", fmt.Errorf("plane project identifier: %w", err)
+	}
+	if project.Identifier == "" {
+		return "", fmt.Errorf("plane project %s has no identifier", p.config.ProjectID)
+	}
+	return project.Identifier, nil
 }
 
 func (p *PlaneClient) PostComment(ctx context.Context, key, body string) error {
@@ -259,6 +329,9 @@ func (p *PlaneClient) requestOnce(ctx context.Context, method, endpoint string, 
 	}
 	if response.StatusCode == http.StatusTooManyRequests {
 		return planeRetryAfter(response), fmt.Errorf("plane request %s: HTTP %d: %s", method, response.StatusCode, strings.TrimSpace(string(payload)))
+	}
+	if response.StatusCode == http.StatusNotFound && method == http.MethodGet {
+		return 0, fmt.Errorf("plane request %s: %w: HTTP 404: %s", method, ErrIssueNotFound, strings.TrimSpace(string(payload)))
 	}
 	if response.StatusCode < 200 || response.StatusCode > 299 {
 		return 0, fmt.Errorf("plane request %s: HTTP %d: %s", method, response.StatusCode, strings.TrimSpace(string(payload)))
