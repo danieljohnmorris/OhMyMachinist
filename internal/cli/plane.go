@@ -141,6 +141,11 @@ func startControlPlane(ctx context.Context, options *commandOptions) error {
 		return err
 	}
 	defer store.Close()
+	grace, err := serverConfig.LeaseGraceDuration()
+	if err != nil {
+		return err
+	}
+	store.SetLeaseGrace(grace)
 	server, err := controlplane.NewServer(store, machinistConfig.Path(), token, serverConfig.ConcurrentJobLimit(), serverConfig.Auth)
 	if err != nil {
 		return err

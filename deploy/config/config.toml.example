@@ -14,6 +14,11 @@ listen = "127.0.0.1:7331"
 database = "~/.machinist/server/machinist.db"
 worker_token_file = "~/.machinist/server/worker.token"
 max_concurrent_jobs = 1
+# How long after a restart a lease that lapsed (e.g. while the control plane
+# was down) still belongs to its worker (MACH-71): the worker re-attaches by
+# heartbeat and the run is not redelivered until the grace elapses unused.
+# Two to five minutes is a sensible range; empty means 3m.
+# lease_grace = "3m"
 # API authentication. "tokens" (default) requires scoped bearer tokens for
 # machine clients; "none" opts out and is only allowed on a loopback or
 # trusted Tailscale interface.

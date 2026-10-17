@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,6 +35,11 @@ var (
 const leaseDuration = 30 * time.Second
 const maxTriggerErrorLength = 2000
 
+// defaultLeaseGrace is the restart grace period: how long after a control-plane
+// start a lease that lapsed (for example while the control plane was down for
+// an upgrade) still belongs to its worker (MACH-71). A few heartbeat intervals.
+const defaultLeaseGrace = 3 * time.Minute
+
 // reclaimExpiredLeasesSQL returns running runs whose lease lapsed to the queue.
 const reclaimExpiredLeasesSQL = `UPDATE runs SET state='queued',worker_instance=NULL,worker_name='',lease_token=NULL,lease_expires_at=NULL,started_at=NULL WHERE state='running' AND (lease_expires_at IS NULL OR lease_expires_at<=?)`
 
@@ -45,6 +51,25 @@ type Store struct {
 	// inspect command pointing at it.
 	path string
 	now  func() time.Time
+	// startedAt is when this store (and with it the control plane) came up;
+	// leaseGrace counts from here, not from the last pre-restart heartbeat.
+	startedAt time.Time
+	// leaseGrace is how long after startedAt a lapsed lease is still
+	// honoured so the holding worker can re-attach (MACH-71). Zero disables.
+	leaseGrace time.Duration
+}
+
+// SetLeaseGrace configures the restart grace period (MACH-71). Zero or
+// negative disables the grace and restores the old reclaim-immediately
+// behaviour.
+func (s *Store) SetLeaseGrace(grace time.Duration) {
+	s.leaseGrace = grace
+}
+
+// inLeaseGrace reports whether now falls in the post-restart grace window in
+// which lapsed leases are still honoured.
+func (s *Store) inLeaseGrace(now time.Time) bool {
+	return s.leaseGrace > 0 && now.Before(s.startedAt.Add(s.leaseGrace))
 }
 
 type Job struct {
@@ -208,7 +233,7 @@ func OpenStore(path string) (*Store, error) {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 	db.SetMaxOpenConns(1)
-	store := &Store{db: db, path: path, now: time.Now}
+	store := &Store{db: db, path: path, now: time.Now, startedAt: time.Now().UTC(), leaseGrace: defaultLeaseGrace}
 	if err := store.initialize(context.Background()); err != nil {
 		db.Close()
 		return nil, err
@@ -1161,7 +1186,7 @@ func (s *Store) poll(ctx context.Context, request protocol.PollRequest, maxConcu
 	if _, err := tx.ExecContext(ctx, `INSERT INTO workers(instance_id,name,last_seen_at) VALUES(?,?,?) ON CONFLICT(instance_id) DO UPDATE SET name=excluded.name,last_seen_at=excluded.last_seen_at`, request.InstanceID, request.Name, now); err != nil {
 		return nil, fmt.Errorf("update worker: %w", err)
 	}
-	if _, err := reclaimLeases(ctx, tx, nowTime); err != nil {
+	if _, err := s.reclaimLeases(ctx, tx, nowTime); err != nil {
 		return nil, fmt.Errorf("reclaim expired leases: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM worker_repositories WHERE worker_instance=?`, request.InstanceID); err != nil {
@@ -1379,7 +1404,13 @@ func (s *Store) Complete(ctx context.Context, runID string, completion protocol.
 	if state != "running" {
 		return ErrRunState
 	}
-	if !leaseExpiresAt.Valid || leaseExpiresAt.Int64 <= s.now().UTC().UnixNano() {
+	if !leaseExpiresAt.Valid {
+		return ErrLeaseConflict
+	}
+	if leaseExpiresAt.Int64 <= s.now().UTC().UnixNano() && !s.inLeaseGrace(s.now().UTC()) {
+		// Lapsed leases are only honoured during the post-restart grace
+		// window, when the worker may have been alive while the control plane
+		// was down (MACH-71).
 		return ErrLeaseConflict
 	}
 	if !terminalRunState(completion.State) {
@@ -1470,8 +1501,17 @@ func (s *Store) Heartbeat(ctx context.Context, runID string, heartbeat protocol.
 		return ErrLeaseConflict
 	}
 	now := s.now().UTC()
-	if !leaseExpiresAt.Valid || leaseExpiresAt.Int64 <= now.UnixNano() {
+	if !leaseExpiresAt.Valid {
 		return ErrLeaseConflict
+	}
+	if leaseExpiresAt.Int64 <= now.UnixNano() {
+		// The lease lapsed. Normally that is the end of it, but during the
+		// post-restart grace window the worker may have been alive all along
+		// while the control plane was down: let it re-attach (MACH-71).
+		if !s.inLeaseGrace(now) {
+			return ErrLeaseConflict
+		}
+		log.Printf("lease: run %s re-attached to worker %s during restart grace", runID, heartbeat.InstanceID)
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE runs SET lease_expires_at=? WHERE id=? AND state='running' AND worker_instance=? AND lease_token=?`, now.Add(leaseDuration).UnixNano(), runID, heartbeat.InstanceID, heartbeat.LeaseToken)
 	if err != nil {
@@ -1528,7 +1568,7 @@ func (s *Store) ReclaimExpiredLeases(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 	defer tx.Rollback()
-	n, err := reclaimLeases(ctx, tx, s.now().UTC())
+	n, err := s.reclaimLeases(ctx, tx, s.now().UTC())
 	if err != nil {
 		return 0, err
 	}

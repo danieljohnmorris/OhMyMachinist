@@ -10,7 +10,10 @@ Commands own the work inside each step.
   streams both output channels, records artifacts and token usage, and terminates the
   process tree on timeout or cancellation.
 - `internal/controlplane` stores jobs and execution attempts, leases work to a capable worker,
-  rejects stale completions, and exposes authenticated APIs and the web UI.
+  rejects stale completions, and exposes authenticated APIs and the web UI. After a
+  restart a lapsed lease stays with its worker for a configurable grace period
+  (`server.lease_grace`, default 3m) so a live run is not redelivered to a second
+  lane; see [the API docs](docs/api.md#restart-grace-period).
 - `internal/managedworker` resolves only worker-owned executor and repository names.
 
 Single-command jobs have one run and retain process-result semantics. Workflow

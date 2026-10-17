@@ -178,8 +178,26 @@ $ curl -s -X POST -H "Authorization: Bearer mmt_9f2c…" \
 listen = "127.0.0.1:7331"
 database = "~/.machinist/server/machinist.db"
 worker_token_file = "~/.machinist/server/worker.token"
+# lease_grace = "3m"
 # auth = "tokens"   # default; "none" opts out on loopback/Tailscale only
 ```
+
+### Restart grace period
+
+After a control-plane restart, a run lease that lapsed while the server was
+down is kept for `server.lease_grace` (default 3m), measured from the server
+start rather than the last heartbeat before the outage. While the grace
+window is open the run is not redelivered to another lane: when the worker's
+next heartbeat or poll arrives with the matching lease token, it re-attaches
+and carries on, and a completion for the same lease is still accepted. Only
+after the grace period with no heartbeat does the run go back to the queue
+and a fresh lease (a restart also logs re-attaches and redeliveries). The
+workflow no-replay rule is unchanged: an expired workflow job becomes
+`interrupted`, not queued, and still needs `previous_process_stopped`
+confirmation before a retry. Two to five minutes is a sensible range — a few
+heartbeat intervals. Workers that really died during normal operation are
+redelivered as before; the grace only covers the window right after a
+restart.
 
 Tokens live in the server database (outside any repository) and are never
 written to config files or the repository. Keep them in your bot's

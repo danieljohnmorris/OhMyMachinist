@@ -311,14 +311,84 @@ def gh_repo(url):
     if not m: raise RuntimeError(f"not a GitHub repo: {url}")
     return m.group(1), m.group(2)
 
+PUSH_REJECTED_RE = re.compile(r"(?i)(non-fast-forward|fetch first|failed to push some refs)")
+
+# A job's branch is its slug prefix plus a run-id tail: the last 6 hex chars of
+# run_<24 hex> (internal/runner runner.go validRunID), or "manual" when
+# MACHINIST_RUN_ID is unset.
+RUN_ID_TAIL_RE = re.compile(r"[0-9a-f]{6}|manual", re.IGNORECASE)
+
+def is_job_branch(branch, prefix):
+    """True if the branch was cut for this job: the name starts with the job's
+    slug prefix and the remainder is a bare run-id tail. A distinct job whose
+    slug only extends this one's (SPEC titles "Test thing" vs "Test thing 2"
+    give branches ...-test-thing-<runid> and ...-test-thing-2-<runid>) must
+    not match: its remainder carries the extra slug text before the run id."""
+    if not branch.startswith(prefix):
+        return False
+    return bool(RUN_ID_TAIL_RE.fullmatch(branch[len(prefix):]))
+
+def is_push_rejection(output):
+    """True if a git push failure was a non-fast-forward rejection (MACH-71)."""
+    return bool(PUSH_REJECTED_RE.search(output or ""))
+
+def find_job_pr(repo_full, prefix):
+    """The open PR whose head branch was cut for this job (MACH-71). The
+    branch name embeds the run id, so a retried run looks the job up by slug
+    prefix plus a run-id tail; a longer slug from another job cannot match."""
+    out = run("gh", "pr", "list", "--repo", repo_full, "--state", "open",
+              "--json", "headRefName,url", check=False)
+    try:
+        pulls = json.loads(out)
+    except ValueError:
+        return None
+    for pull in pulls or []:
+        head = pull.get("headRefName") or ""
+        if is_job_branch(head, prefix):
+            return {"branch": head, "url": pull.get("url", "")}
+    return None
+
+def find_job_branch(repo, prefix):
+    """A remote branch already pushed for this job, with or without a PR (MACH-71)."""
+    out = run("git", "ls-remote", "--heads", "origin", f"{prefix}*", cwd=repo, check=False)
+    for line in out.splitlines():
+        ref = line.split("\t", 1)[-1].strip()
+        if ref.startswith("refs/heads/") and is_job_branch(ref[len("refs/heads/"):], prefix):
+            return ref[len("refs/heads/"):]
+    return None
+
+def mark_already_delivered(branch, pr_url):
+    """Record an already-delivered outcome: the run's pr.json links the open
+    PR that carries the job's work (MACH-71)."""
+    out = os.environ.get("MACHINIST_OUTPUT_DIR")
+    if not out:
+        return
+    json.dump({"branch": branch, "pr": pr_url, "review_status": review_status(out)},
+              open(os.path.join(out, "pr.json"), "w"))
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", required=True); ap.add_argument("--brief", required=True)
     ap.add_argument("--start-branch", default="")
+    ap.add_argument("--find-branch", action="store_true",
+                    help="print the branch already pushed for this job, if any (MACH-71); "
+                         "used by the worker before the agent starts coding")
     a = ap.parse_args()
     repo = a.repo
     g = lambda *c, **k: run("git", *NOHOOKS, *c, cwd=repo, **k)
     brief = open(a.brief, errors="replace").read()
+
+    if a.find_branch:
+        # Read-only lookup; no owner checks or gh needed: the job's branch
+        # prefix comes from the SPEC line and the branch lives on origin.
+        sm = re.search(r"--- SPEC: (\S+) (.*?) ---", brief)
+        key, title = (sm.group(1), sm.group(2).strip()) if sm else ("", "")
+        if not title:
+            title = next((l.strip() for l in brief.splitlines() if l.strip()), "Machinist change")[:72]
+        job_branch = find_job_branch(repo, f"factory/{(key + '-') if key else ''}{slug(title)}-")
+        if job_branch:
+            print(job_branch)
+        return 0
 
     owner, name = gh_repo(g("remote", "get-url", "origin"))
     if owner not in ALLOWED_OWNERS: raise RuntimeError(f"push owner {owner} not in allowlist")
@@ -338,16 +408,26 @@ def main():
         log(f"fork mode: push -> {full}, upstream {up_full} ({up_mode})")
 
     pr_file_title, pr_file_body = read_pr_file(repo)
-    if not g("status", "--porcelain"):
-        log("no changes from agent; nothing to deliver"); return 0
-
     sm = re.search(r"--- SPEC: (\S+) (.*?) ---", brief)
     key, title = (sm.group(1), sm.group(2).strip()) if sm else ("", "")
     if not title:
         title = next((l.strip() for l in brief.splitlines() if l.strip()), "Machinist change")[:72]
     run_id = os.environ.get("MACHINIST_RUN_ID", "manual")
     pr_title = pr_file_title or clean_title(title) or "Machinist change"
-    if PLAIN_BRANCH_OWNERS & {owner, (up_full or "").split("/")[0]}:
+    plain = bool(PLAIN_BRANCH_OWNERS & {owner, (up_full or "").split("/")[0]})
+    job_prefix = "" if plain else f"factory/{(key + '-') if key else ''}{slug(title)}-"
+
+    if not g("status", "--porcelain"):
+        # MACH-71: a redelivered run with nothing new to deliver still links
+        # the open PR that already carries this job's work.
+        job_pr = find_job_pr(full, job_prefix) if job_prefix else None
+        if job_pr:
+            log(f"already delivered: {job_pr['url']} (no changes from agent)")
+            mark_already_delivered(job_pr["branch"], job_pr["url"])
+            return 0
+        log("no changes from agent; nothing to deliver"); return 0
+
+    if plain:
         # Plain-branch owners: plain kebab-case from the PR title; no factory/, no ticket key, no run id
         base_b = slug(pr_title, 50)
         branch, n = base_b, 2
@@ -358,7 +438,24 @@ def main():
         branch = f"factory/{(key + '-') if key else ''}{slug(title)}-{run_id[-6:]}"
 
     cur = g("rev-parse", "--abbrev-ref", "HEAD")
-    if cur != branch: g("switch", "-c", branch)
+    if job_prefix:
+        # MACH-71: a redelivered or retried run reuses the branch already cut
+        # for this job instead of starting another one. The agent's edits are
+        # carried onto it and pushed fast-forward; open_pr then finds the
+        # existing PR instead of opening a second one.
+        job_pr = find_job_pr(full, job_prefix)
+        job_branch = job_pr["branch"] if job_pr else find_job_branch(repo, job_prefix)
+        if job_branch:
+            if job_pr:
+                log(f"reusing branch {job_branch} with open PR {job_pr['url']}")
+            else:
+                log(f"reusing branch {job_branch} already pushed for this job")
+            g("fetch", "origin", job_branch)
+            g("switch", "-C", job_branch, f"origin/{job_branch}")
+            branch = job_branch
+        elif cur != branch:
+            g("switch", "-c", branch)
+    elif cur != branch: g("switch", "-c", branch)
     g("add", "-A")
     run("git", *NOHOOKS, "rm", "-q", "--cached", "--ignore-unmatch", PR_FILE, cwd=repo, check=False)
     files = [f for f in g("diff", "--cached", "--name-only").splitlines() if f]
@@ -374,7 +471,33 @@ def main():
     sha = g("rev-parse", "--short", "HEAD")
     if os.environ.get("DELIVER_PR_DRY") == "1":
         log(f"DRY: would push {branch} @ {sha} to {full} and open PR base={base} upstream={up_full} mode={up_mode} files={files}"); return 0
-    g("push", "--no-verify", "-u", "origin", branch)
+
+    def push_branch():
+        return subprocess.run(["git", *NOHOOKS, "push", "--no-verify", "-u", "origin", branch],
+                              cwd=repo, capture_output=True, text=True)
+
+    pushed = push_branch()
+    rebases = 0
+    while pushed.returncode != 0 and is_push_rejection(pushed.stderr + pushed.stdout) and rebases < 2:
+        # MACH-71: a non-fast-forward push to the job's own branch means
+        # another attempt got there first. Fetch and rebase onto it; never
+        # fail the run on this rejection.
+        rebases += 1
+        log(f"push rejected (non-fast-forward); rebasing onto origin/{branch}")
+        g("fetch", "origin", branch)
+        rebase = subprocess.run(["git", *NOHOOKS, "rebase", f"origin/{branch}"], cwd=repo, capture_output=True, text=True)
+        if rebase.returncode != 0:
+            subprocess.run(["git", *NOHOOKS, "rebase", "--abort"], cwd=repo, capture_output=True, text=True)
+            log(f"rebase onto origin/{branch} failed; the commit stays on local {branch}")
+            break
+        pushed = push_branch()
+    if pushed.returncode != 0:
+        # A rejection that survives the rebase loop (rebase failed or retries
+        # exhausted) means this attempt's commit is NOT on the remote, so the
+        # open job PR does not carry it: fail the run, never report success.
+        detail = (pushed.stderr or pushed.stdout).strip()[-500:]
+        raise RuntimeError(f"push to {branch} failed: {detail}")
+    sha = g("rev-parse", "--short", "HEAD")
     log(f"pushed {branch} @ {sha} to {full}")
 
     spec = re.search(r"--- SPEC:.*?---\n(.*?)--- END SPEC ---", brief, re.S)

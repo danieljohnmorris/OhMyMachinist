@@ -35,6 +35,20 @@ fi
 start_branch="$(git -C "$repo" rev-parse --abbrev-ref HEAD)"
 
 cat > "$brief"
+
+# MACH-71: a redelivered or retried run must not start from scratch. If a
+# branch was already pushed for this job (the name is derived from the SPEC
+# line), check it out so the agent continues on it; deliver-pr.py then pushes
+# fast-forward and reuses the open PR.
+job_branch="$(/usr/bin/python3 "$HERE/deliver-pr.py" --repo "$repo" --brief "$brief" --find-branch 2>/dev/null || true)"
+if [ -n "$job_branch" ] && git -C "$repo" fetch -q origin "$job_branch" 2>/dev/null; then
+  if git -C "$repo" switch -C "$job_branch" "origin/$job_branch" 2>/dev/null; then
+    echo "omp-glm-pr: reusing branch $job_branch already pushed for this job" >&2
+  else
+    echo "omp-glm-pr: could not check out $job_branch; coding on $start_branch" >&2
+  fi
+fi
+
 MACHINIST_OMP_MODE="${MACHINIST_OMP_MODE:-json}" "$OMP_RUN" medium < "$brief"
 rc=$?
 if [ $rc -ne 0 ]; then
