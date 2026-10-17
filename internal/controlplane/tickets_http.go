@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -22,9 +23,13 @@ func ticketError(w http.ResponseWriter, err error) {
 	}
 	writeError(w, status, err)
 }
-func (s *Server) trackerConfig() (config.ResolvedTracker, error) {
+func (s *Server) trackerConfig(ctx context.Context) (config.ResolvedTracker, error) {
 	c, err := config.LoadDefinitions(s.definitionPath)
 	if err != nil {
+		return config.ResolvedTracker{}, err
+	}
+	// Settings-defined projects (the Projects view) overlay the config file.
+	if err := s.applyProjectOverrides(ctx, &c); err != nil {
 		return config.ResolvedTracker{}, err
 	}
 	return c.ResolveTracker()
@@ -54,7 +59,7 @@ func (s *Server) createTicketHandler(w http.ResponseWriter, r *http.Request) {
 		writeDecodeError(w, err)
 		return
 	}
-	c, err := s.trackerConfig()
+	c, err := s.trackerConfig(r.Context())
 	if err != nil {
 		ticketError(w, err)
 		return
@@ -117,7 +122,7 @@ func (s *Server) deleteTicketHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 func (s *Server) approveTicketHandler(w http.ResponseWriter, r *http.Request) {
-	c, err := s.trackerConfig()
+	c, err := s.trackerConfig(r.Context())
 	if err != nil {
 		ticketError(w, err)
 		return
@@ -196,7 +201,7 @@ func (s *Server) commentTicketHandler(w http.ResponseWriter, r *http.Request) {
 	s.getTicketHandler(w, r)
 }
 func (s *Server) trackersHandler(w http.ResponseWriter, r *http.Request) {
-	c, err := s.trackerConfig()
+	c, err := s.trackerConfig(r.Context())
 	if err != nil {
 		ticketError(w, err)
 		return
