@@ -5,6 +5,9 @@ import { fileURLToPath, URL } from "node:url";
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  // Port 0 lets the OS pick a free port: parallel agent runs each start a dev
+  // server, and vite's fixed default HMR ws port (24678) collides otherwise.
+  server: { hmr: { port: 0 } },
   build: { assetsInlineLimit: 0 },
   resolve: { alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) } },
 });

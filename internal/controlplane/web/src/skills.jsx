@@ -22,14 +22,14 @@ export function SkillsPage({ csrfToken }) {
   const [versions, setVersions] = useState({});
 
   const refresh = async () => {
-    const result = await loadSkills();
+    const result = await loadSkills(csrfToken);
     setSkills(result);
     setLoaded(true);
   };
 
   useEffect(() => {
     let active = true;
-    loadSkills()
+    loadSkills(csrfToken)
       .then((result) => {
         if (!active) return;
         setSkills(result);
@@ -44,7 +44,7 @@ export function SkillsPage({ csrfToken }) {
     return () => {
       active = false;
     };
-  }, []);
+  }, [csrfToken]);
 
   const run = async (label, action) => {
     setBusy(label);
