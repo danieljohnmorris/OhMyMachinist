@@ -4,9 +4,10 @@
 # 1. Runs omp-glm medium on the brief (bwrap: repo writable, .git read-only, no keys).
 # 2. If omp succeeded, runs deliver-pr.py OUTSIDE the sandbox: branch, commit,
 #    push over SSH, open PR with gh. The model never gets .git write or push keys.
-# 3. (2026-10-10) On ANY failure (preflight / omp / deliver-pr / killed) runs
-#    fail.py hook -> ~/.machinist/alerts/inbox/<job>.json; machinist-fail-notify.path
-#    then comments on the Plane ticket and hands it to Factory Alerts (alerts/pending/).
+# 3. (2026-10-17, MACH-70) Failures are handled by the control plane's
+#    self-healing pass, which spools the fail alert (run, stage, exit code,
+#    stderr tail, diagnosis) for the Factory Alerts watcher; the wrapper no
+#    longer runs the retired fail.py.
 #
 # MACH-42: the coding omp run defaults to MACHINIST_OMP_MODE=json so the worker
 # streams every message, thinking block, tool call and result into the run
@@ -16,14 +17,13 @@ set -uo pipefail
 OMP_RUN="$(dirname "$(readlink -f "$0")")/omp-glm"
 HERE="$(dirname "$(readlink -f "$0")")"
 repo="$(pwd)"
-brief="$(mktemp)"; errlog="$(mktemp)"
-trap 'rm -f "$brief" "$errlog"' EXIT
-exec 3>&2
-exec 2> >(tee -a "$errlog" >&3)
+brief="$(mktemp)"
+trap 'rm -f "$brief"' EXIT
 
 fail() {  # fail <rc> <stage>
-  sleep 0.3
-  /usr/bin/python3 "$HERE/fail.py" hook --rc "$1" --stage "$2" --stderr-file "$errlog" --brief "$brief" 2>&3 || true
+  # MACH-70: the control plane spools the fail alert (stage and stderr ride
+  # in the run transcript); no local hook to call.
+  echo "omp-glm-pr: failed at stage $2 with exit $1" >&2
   exit "$1"
 }
 trap 'echo "omp-glm-pr: killed by signal (timeout/stop)" >&2; fail 143 killed' TERM INT

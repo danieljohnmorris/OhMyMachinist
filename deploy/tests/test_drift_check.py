@@ -57,8 +57,9 @@ class DriftCheckTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_check(self):
-        return subprocess.run(["bash", str(DRIFT_CHECK)], env=self.env,
+    def run_check(self, env_extra=None):
+        env = dict(self.env, **(env_extra or {}))
+        return subprocess.run(["bash", str(DRIFT_CHECK)], env=env,
                               capture_output=True, text=True)
 
     def test_clean_tree_reports_no_drift(self):
@@ -66,6 +67,24 @@ class DriftCheckTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(json.loads(self.status.read_text())["ok"])
         self.assertFalse(self.alerts.exists())
+
+    def test_missing_alerts_section_warns(self):
+        config = pathlib.Path(self.tmp.name) / "config.toml"
+        config.write_text("[server]\nlisten = \"127.0.0.1:7331\"\n")
+        result = self.run_check({"MACHINIST_CONFIG": str(config)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("WARNING", result.stderr)
+        self.assertIn("[alerts]", result.stderr)
+        status = json.loads(self.status.read_text())
+        self.assertFalse(status["alerts_configured"])
+
+    def test_present_alerts_section_does_not_warn(self):
+        config = pathlib.Path(self.tmp.name) / "config.toml"
+        config.write_text("[alerts]\ndirectory = \"~/.machinist/alerts/pending\"\n")
+        result = self.run_check({"MACHINIST_CONFIG": str(config)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("WARNING", result.stderr)
+        self.assertTrue(json.loads(self.status.read_text())["alerts_configured"])
 
     def test_edited_installed_file_alerts(self):
         self.installed.write_text("[Unit]\nDescription=hand-edited\n")

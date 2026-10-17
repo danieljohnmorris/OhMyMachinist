@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,7 +23,10 @@ func newTestHTTPServerWithAlerts(t *testing.T) (*Server, *httptest.Server, strin
 	}
 	alertsDirectory := filepath.Join(directory, "alerts")
 	definitionPath := filepath.Join(directory, "config.toml")
-	definition := "[commands.plan]\nexecutor = \"test\"\nprompt_file = \"plan.md\"\ntimeout = \"1m\"\n\n[alerts]\ndirectory = \"" + alertsDirectory + "\"\n"
+	// Healing is disabled so every failed run takes the give-up path and
+	// spools its fail alert; the requeue paths are covered in
+	// alert_healing_test.go.
+	definition := "[commands.plan]\nexecutor = \"test\"\nprompt_file = \"plan.md\"\ntimeout = \"1m\"\n\n[alerts]\ndirectory = \"" + alertsDirectory + "\"\n\n[healing]\nmax_retries = -1\n"
 	if err := os.WriteFile(definitionPath, []byte(definition), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -32,6 +36,22 @@ func newTestHTTPServerWithAlerts(t *testing.T) (*Server, *httptest.Server, strin
 		t.Fatal(err)
 	}
 	return server, httptest.NewServer(server.Handler()), alertsDirectory
+}
+
+// waitSpooled fails the test unless the named alert file appears within five
+// seconds; alerting runs on the healing goroutine off the request path.
+func waitSpooled(t *testing.T, directory, name string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(directory, name)); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("alert %s never appeared in %s", name, directory)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func spooledFailAlerts(t *testing.T, directory string) map[string]FailAlert {
@@ -90,6 +110,7 @@ func TestTimedOutRunSpoolsOnePendingFailAlert(t *testing.T) {
 		t.Fatalf("repeat completion status = %d", repeat.StatusCode)
 	}
 
+	waitSpooled(t, alertsDirectory, "fail-"+run.ID+".json")
 	alerts := spooledFailAlerts(t, alertsDirectory)
 	if len(alerts) != 1 {
 		t.Fatalf("spooled %d alerts, want exactly one: %#v", len(alerts), alerts)
@@ -107,8 +128,8 @@ func TestTimedOutRunSpoolsOnePendingFailAlert(t *testing.T) {
 	if alert.ExitCode != 124 {
 		t.Fatalf("exit code = %d, want 124", alert.ExitCode)
 	}
-	if alert.Command != "plan" {
-		t.Fatalf("command = %q, want plan", alert.Command)
+	if alert.Command != "plan" || alert.Stage != "plan" {
+		t.Fatalf("command/stage = %q/%q, want plan/plan", alert.Command, alert.Stage)
 	}
 	if alert.TimeoutMillis != int64(time.Minute.Milliseconds()) {
 		t.Fatalf("timeout millis = %d, want %d", alert.TimeoutMillis, time.Minute.Milliseconds())
@@ -121,6 +142,18 @@ func TestTimedOutRunSpoolsOnePendingFailAlert(t *testing.T) {
 	}
 	if alert.IssueURL != "https://tracker.example/issues/MACH-10" {
 		t.Fatalf("issue url = %q", alert.IssueURL)
+	}
+	if alert.Healing == nil || !alert.Healing.NeedsHuman {
+		t.Fatalf("healing diagnosis missing: %+v", alert.Healing)
+	}
+	if alert.Healing.Reason != "retry budget exhausted" {
+		t.Fatalf("healing reason = %q, want retry budget exhausted", alert.Healing.Reason)
+	}
+	if alert.Healing.Attempts != 1 || alert.Healing.Budget != 0 {
+		t.Fatalf("healing attempts/budget = %d/%d, want 1/0", alert.Healing.Attempts, alert.Healing.Budget)
+	}
+	if alert.Inspect == "" || !strings.Contains(alert.Inspect, run.ID) {
+		t.Fatalf("inspect = %q, want a command naming the run", alert.Inspect)
 	}
 }
 
@@ -144,6 +177,7 @@ func TestFailedRunSpoolsFailAlertAndCancelledDoesNot(t *testing.T) {
 	if failed.StatusCode != http.StatusNoContent {
 		t.Fatalf("failed completion status = %d", failed.StatusCode)
 	}
+	waitSpooled(t, alertsDirectory, "fail-"+run.ID+".json")
 	alerts := spooledFailAlerts(t, alertsDirectory)
 	if len(alerts) != 1 {
 		t.Fatalf("spooled %d alerts, want exactly one", len(alerts))

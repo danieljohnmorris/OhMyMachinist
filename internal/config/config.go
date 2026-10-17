@@ -118,10 +118,30 @@ type Review struct {
 	DefaultProfile string `toml:"default_profile"`
 }
 
-// Alerts configures the pending failure alert spool directory. An external
-// alert poller watches it; when unset, no failure alerts are written.
+// Alerts configures the pending failure alert spool and the optional webhook
+// that wakes the external alert watcher. When Directory is unset no alert
+// files are written and failures alert nowhere.
 type Alerts struct {
+	// Directory is the pending spool an external watcher polls. Empty
+	// disables alert files.
 	Directory string `toml:"directory"`
+	// WebhookURL receives a POST of every spooled alert so the watcher can
+	// wake on push instead of polling. Empty disables the webhook. A webhook
+	// failure is logged and never fails the run completion or the file write.
+	WebhookURL string `toml:"webhook_url"`
+	// WebhookHeader carries the secret to the watcher. Empty means
+	// "X-Machinist-Alert-Token".
+	WebhookHeader string `toml:"webhook_header"`
+	// WebhookSecretEnv names the environment variable holding the webhook
+	// secret. The secret is never logged.
+	WebhookSecretEnv string `toml:"webhook_secret_env"`
+	// WebhookSecretFile is a path to a file holding the webhook secret, used
+	// when WebhookSecretEnv is unset.
+	WebhookSecretFile string `toml:"webhook_secret_file"`
+	// HealingAlerts also spools a healing-<run>.json when self-healing
+	// requeues a job or schedules a backoff retry. Off by default: a retry is
+	// not a failure a human has to see.
+	HealingAlerts bool `toml:"healing_alerts"`
 }
 
 // Healing configures the self-healing pass (MACH-25): when a run fails, times

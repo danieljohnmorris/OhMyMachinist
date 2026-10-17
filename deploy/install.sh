@@ -157,6 +157,21 @@ seed_if_absent() { # <example> <dest>
 seed_if_absent "$config_dir/config.toml.example" "$config_dir/config.toml"
 seed_if_absent "$config_dir/worker.toml.example" "$config_dir/worker.toml"
 
+# --- config pre-flight (MACH-70) -------------------------------------------
+# A server config without [alerts] means failed runs alert nowhere: no spool
+# file for the Factory Alerts watcher and no webhook. The overlay can carry
+# the section, so both files count.
+alerts_configured=0
+for candidate in "$config_dir/config.toml" \
+  "${MACHINIST_CONFIG_OVERLAY:-$config_dir/config.local.toml}"; do
+  if [ -f "$candidate" ] && grep -Eq '^[[:space:]]*\[alerts\]' "$candidate"; then
+    alerts_configured=1
+  fi
+done
+if [ "$alerts_configured" = 0 ]; then
+  log "WARNING: $config_dir/config.toml has no [alerts] section; failed runs alert nowhere (no spool file, no webhook) - see deploy/config/config.toml.example"
+fi
+
 # --- manifest --------------------------------------------------------------
 if [ "$dry_run" = 1 ]; then
   log "dry-run: would record ${#manifest_entries[@]} files and SHA $sha in $manifest"

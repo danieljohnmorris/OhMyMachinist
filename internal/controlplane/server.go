@@ -56,6 +56,7 @@ type Server struct {
 	authMode             string
 	reviewDefaultProfile string
 	failAlerts           *failAlertWriter
+	healingAlerts        bool
 	healing              config.Healing
 	health               config.Health
 	healthChecker        *healthChecker
@@ -153,6 +154,7 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 	if e != nil {
 		return nil, e
 	}
+	failAlerts := &failAlertWriter{directory: alertsDirectory, webhook: newAlertWebhook(definition.Alerts)}
 	startup := time.Now().UTC()
 	definitions := make([]TriggerDefinition, 0, len(managedTriggers))
 	for _, trigger := range managedTriggers {
@@ -189,10 +191,11 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 		planePause:         2500 * time.Millisecond, // ~2 Plane calls per ticket; stays under 60 req/min
 		schedulerEvery:     30 * time.Second, shutdownTimeout: 5 * time.Second,
 		schedulerError:    func(err error) { log.Printf("scheduler: %v", err) },
-		failAlerts:        &failAlertWriter{directory: alertsDirectory},
+		failAlerts:        failAlerts,
+		healingAlerts:     definition.Alerts.HealingAlerts,
 		healing:           definition.Healing,
 		health:            definition.Health,
-		healthChecker:     &healthChecker{alerts: &failAlertWriter{directory: alertsDirectory}, timeout: 10 * time.Second, now: time.Now},
+		healthChecker:     &healthChecker{alerts: failAlerts, timeout: 10 * time.Second, now: time.Now},
 		healingEvery:      30 * time.Second,
 		autoMergeEvery:    defaultAutoMergeEvery,
 		deployRunner:      bashRunner{},
@@ -745,18 +748,20 @@ func (s *Server) complete(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 	if alertingState(input.State) {
-		s.writeFailAlert(request.Context(), request.PathValue("id"))
-		// Self-healing (MACH-25): diagnose and requeue failed runs without
-		// waiting for an external watcher. Best effort, off the request path.
+		// Self-healing (MACH-25) owns failure alerting: exactly one alert per
+		// run is spooled when healing gives up — or straight away for workflow
+		// jobs and healing errors — so a requeued failure does not page a
+		// human. Best effort, off the request path.
 		go s.HealRun(context.WithoutCancel(request.Context()), request.PathValue("id"))
 	}
 	response.WriteHeader(http.StatusNoContent)
 }
 
-// writeFailAlert spools the pending fail alert for a failed or timed-out run.
-// The run is already terminal when this runs, so alerting is best effort: a
+// spoolFailAlert writes the pending fail alert for a failed or timed-out run:
+// the run, stage, exit code, stderr tail, ticket and — when healing gave up —
+// the diagnosis. The run is already terminal, so alerting is best effort: a
 // failed alert write is logged and never fails the completion delivery.
-func (s *Server) writeFailAlert(ctx context.Context, runID string) {
+func (s *Server) spoolFailAlert(ctx context.Context, runID string, healing *HealingAlert, classification string) {
 	alert, ok, err := s.store.pendingFailAlert(ctx, runID)
 	if err != nil {
 		log.Printf("collect fail alert for run %q: %v", runID, err)
@@ -765,8 +770,40 @@ func (s *Server) writeFailAlert(ctx context.Context, runID string) {
 	if !ok {
 		return
 	}
+	if classification != "" {
+		alert.Classification = classification
+	}
+	alert.Healing = healing
 	if err := s.failAlerts.write(alert); err != nil {
 		log.Printf("write fail alert for run %q: %v", runID, err)
+	}
+}
+
+// alertHealingFailure spools a plain fail alert when the healing pass itself
+// errored before it could diagnose the failure, so the watcher still sees the
+// run instead of it being silently dropped.
+func (s *Server) alertHealingFailure(ctx context.Context, runID string, cause error) {
+	s.spoolFailAlert(ctx, runID, &HealingAlert{NeedsHuman: true, Reason: "self-healing failed: " + cause.Error()}, "")
+}
+
+// maybeHealingAlert spools the optional healing-<run>.json notice for a run
+// that self-healing requeued or scheduled a retry for, behind
+// [alerts] healing_alerts. Deduped per run like the fail alert; a retry is
+// never a needs-human alert.
+func (s *Server) maybeHealingAlert(ctx context.Context, runID string, healing *HealingAlert) {
+	if !s.healingAlerts {
+		return
+	}
+	alert, ok, err := s.store.pendingFailAlert(ctx, runID)
+	if err != nil || !ok {
+		if err != nil {
+			log.Printf("collect healing alert for run %q: %v", runID, err)
+		}
+		return
+	}
+	alert.Healing = healing
+	if _, err := s.failAlerts.writeAlert("healing-"+runID+".json", alert); err != nil {
+		log.Printf("write healing alert for run %q: %v", runID, err)
 	}
 }
 
