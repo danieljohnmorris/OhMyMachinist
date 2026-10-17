@@ -109,6 +109,40 @@ func TestBuiltinTicketConcurrentApprovalAndCompletion(t *testing.T) {
 	}
 }
 
+func TestBuiltinTicketTakesPullRequestFromFinalMessage(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "db"))
+	ticket, err := store.createTicket(t.Context(), Ticket{Title: "Ship it", Repository: "machinist"}, "MM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = store.approveTicket(t.Context(), ticket.Key, testAgent("build", "{{machinist.prompt}}")); err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"machinist"}))
+	if err != nil || run == nil {
+		t.Fatalf("poll = %v, %v", run, err)
+	}
+	// The runner's real result.json has no metadata block; the PR is only in the agent's last message.
+	result := json.RawMessage(`{"state":"succeeded","final_message":"Opened https://github.com/example/repo/pull/41 then superseded it with https://github.com/example/repo/pull/42."}`)
+	if err = store.Complete(t.Context(), run.ID, protocol.Completion{InstanceID: "worker-a", LeaseToken: run.LeaseToken, State: "succeeded", Result: result}); err != nil {
+		t.Fatal(err)
+	}
+	ticket, err = store.ticket(t.Context(), ticket.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ticket.PRURL != "https://github.com/example/repo/pull/42" {
+		t.Fatalf("ticket pr_url = %q", ticket.PRURL)
+	}
+	snapshot, err := store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Jobs[0].Metadata == nil || snapshot.Jobs[0].Metadata.PRURL != ticket.PRURL {
+		t.Fatalf("job metadata = %#v", snapshot.Jobs[0].Metadata)
+	}
+}
+
 func TestBuiltinTicketApprovalValidationAndPersistence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "db")
 	store := openTestStore(t, path)
