@@ -4,7 +4,8 @@
 Modes
   serve   HTTP listener for Plane webhooks. POST /plane, HMAC-SHA256 verified
           (X-Plane-Signature, key = PLANE_WEBHOOK_SECRET). Bind addr from
-          PLANE_INTAKE_LISTEN (default 100.70.205.115:7340, Tailscale only).
+          PLANE_INTAKE_LISTEN (default 127.0.0.1:7340; bind the Tailscale
+          address by setting it).
   poll    One pass over Plane REST API (needs PLANE_API_KEY). Run from a timer.
   file F  Process one saved webhook JSON payload (testing).
 
@@ -23,7 +24,7 @@ import subprocess, sys, threading, time, urllib.parse, urllib.request
 
 E = os.environ.get
 HOME = os.path.expanduser("~")
-PLANE_URL = E("PLANE_URL", "https://plane.danieljohnmorris.com").rstrip("/")
+PLANE_URL = E("PLANE_URL", "").rstrip("/")  # required; no host-specific default
 WORKSPACE = E("PLANE_WORKSPACE", "dan")
 TRIGGER = E("PLANE_TRIGGER_LABEL", "factory").lower()
 JOBS_DIR = E("PLANE_JOBS_DIR", f"{HOME}/.machinist/plane-jobs")
@@ -33,8 +34,8 @@ DEFAULT_REPO = E("PLANE_DEFAULT_REPO", "")  # empty: unmapped projects get a job
 COMMAND = E("PLANE_MACHINIST_COMMAND", "smoke")
 AUTO_SUBMIT = E("PLANE_AUTO_SUBMIT", "1") == "1"
 MACHINIST = E("MACHINIST_BIN", "/opt/machinist/bin/machinist")
-# Tailscale UI (machinist-control-tailscale). Hash route: #/runs/<job_id>
-UI = E("MACHINIST_UI_URL", "http://100.70.205.115:7331").rstrip("/")
+# Machinist UI. Hash route: #/runs/<job_id>
+UI = E("MACHINIST_UI_URL", "http://127.0.0.1:7331").rstrip("/")
 START_COMMENT = E("PLANE_START_COMMENT", "1") == "1"
 LOCK = threading.Lock()
 
@@ -495,7 +496,7 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
         super().server_bind()
 
 def serve():
-    host, port = E("PLANE_INTAKE_LISTEN", "100.70.205.115:7340").rsplit(":", 1)
+    host, port = E("PLANE_INTAKE_LISTEN", "127.0.0.1:7340").rsplit(":", 1)
     if not SECRET:
         log("WARNING: PLANE_WEBHOOK_SECRET unset - every POST will be rejected (401)")
     os.makedirs(JOBS_DIR, exist_ok=True)
@@ -545,6 +546,8 @@ if __name__ == "__main__":
     a = sys.argv[1:]
     dry = "--dry-run" in a
     a = [x for x in a if x != "--dry-run"]
+    if a and not PLANE_URL:
+        sys.exit("PLANE_URL is not set; set it to the Plane base URL, e.g. https://plane.example.com")
     if not a or a[0] == "serve": serve()
     elif a[0] == "poll": poll(dry)
     elif a[0] == "sync": sync_once()

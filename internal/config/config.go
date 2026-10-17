@@ -201,7 +201,7 @@ type Health struct {
 	// Timeout bounds each request. Empty means 10s.
 	Timeout string `toml:"timeout"`
 	// Endpoints maps a name to the URL to probe, e.g. glm = the GLM API
-	// endpoint, sparks = the Sparks host, pipsqueek = the pipsqueek host.
+	// endpoint, sparks = the host running the Sparks stack.
 	Endpoints map[string]string `toml:"endpoints"`
 }
 

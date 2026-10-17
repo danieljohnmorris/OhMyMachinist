@@ -23,7 +23,9 @@ import (
 
 // Defaults mirror the retired plane-intake.py configuration.
 const (
-	DefaultURL            = "https://plane.danieljohnmorris.com"
+	// DefaultURL is a neutral placeholder. The real Plane URL comes from the
+	// [plane] config or PLANE_URL; no personal host is baked into the tool.
+	DefaultURL            = "https://plane.example.com"
 	DefaultWorkspace      = "dan"
 	DefaultTriggerLabel   = "factory"
 	DefaultApproveLabel   = "approved"

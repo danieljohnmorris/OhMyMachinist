@@ -232,6 +232,17 @@ func (p *PlaneIntake) WebhookSecret(ctx context.Context) string {
 	return cfg.WebhookSecret
 }
 
+// PlaneBase returns the configured Plane base URL and workspace so the web UI
+// can build run links from server-provided values instead of a client-side
+// constant. Falls back to the neutral placeholder defaults on a config error.
+func (p *PlaneIntake) PlaneBase(ctx context.Context) (string, string) {
+	cfg, err := p.config(ctx)
+	if err != nil {
+		return plane.DefaultURL, plane.DefaultWorkspace
+	}
+	return cfg.URL, cfg.Workspace
+}
+
 // clientFor returns a cached Plane REST client for the resolved config.
 func (p *PlaneIntake) clientFor(cfg planeConfig) (*plane.Client, error) {
 	p.clientMu.Lock()

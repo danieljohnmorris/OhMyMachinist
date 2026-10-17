@@ -6,7 +6,7 @@ kept for reference only. Nothing here is installed or built.
 - `plane-intake.py` — the 553-line stdlib Python service, run as
   `plane-intake.py serve | poll | sync | file F`.
 - `machinist-plane-intake.service` — the webhook listener
-  (`100.70.205.115:7340`, Tailscale-only).
+  (`<tailscale-ip>:7340`, Tailscale-only; set via `PLANE_INTAKE_LISTEN`).
 - `machinist-plane-poll.service` and `machinist-plane-poll.timer` — the two
   minute poll fallback.
 - `machinist-plane-poll.service.d/webhook-replaces-poll.conf` — the drop-in

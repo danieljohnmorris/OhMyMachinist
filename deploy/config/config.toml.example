@@ -62,8 +62,7 @@ timeout = "120m"
 # [health.endpoints]
 # glm = "https://api.example-glm-host/v1/models"
 # sparks = "https://sparks.internal/healthz"
-# pipsqueek = "https://pipsqueek.internal/healthz"
-
+# factory = "https://factory.internal/healthz"
 # Per-project auto-merge + deploy policy (MACH-24). Seeds ship with MACH
 # (OhMyMachinist: rebuild + restart the control plane) and SPARK (sparkDash on
 # spark2) on; every other project is off until configured. An entry replaces

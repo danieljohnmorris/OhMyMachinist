@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -15,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/owainlewis/machinist/internal/config"
+	"github.com/owainlewis/machinist/internal/plane"
 )
 
 // planeFixture is a fake Plane API that records every write it receives.
@@ -139,6 +141,35 @@ func boolLiteral(value bool) string {
 		return "true"
 	}
 	return "false"
+}
+
+// The Plane base URL must come from config or the environment; with neither
+// set the neutral placeholder default applies and no personal host leaks in.
+func TestPlaneBaseComesFromConfigOrEnv(t *testing.T) {
+	directory := t.TempDir()
+	definitionPath := filepath.Join(directory, "config.toml")
+	if err := os.WriteFile(definitionPath, []byte("[commands.build-pr]\nexecutor = \"test\"\ntimeout = \"1m\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MACHINIST_HOME", filepath.Join(directory, "home"))
+	store := openTestStore(t, filepath.Join(directory, "machinist.db"))
+	intake, err := NewPlaneIntake(store, definitionPath, filepath.Join(directory, "home"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	url, workspace := intake.PlaneBase(context.Background())
+	if url != "https://plane.example.com" {
+		t.Fatalf("default plane URL = %q, want the neutral placeholder", url)
+	}
+	if workspace != plane.DefaultWorkspace {
+		t.Fatalf("default workspace = %q, want %q", workspace, plane.DefaultWorkspace)
+	}
+
+	t.Setenv("PLANE_URL", "https://plane.example.test")
+	url, _ = intake.PlaneBase(context.Background())
+	if url != "https://plane.example.test" {
+		t.Fatalf("PLANE_URL override = %q, want https://plane.example.test", url)
+	}
 }
 
 func TestPlaneIntakeCreatesJobAndDedupes(t *testing.T) {

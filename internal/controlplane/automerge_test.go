@@ -426,6 +426,7 @@ func jobIDOf(t *testing.T, store *Store) string {
 // The remaining helpers patch the plane intake so tests can pin policies
 // without a config file per case.
 func TestQueueAutoMergeResolvesRepoAndNumber(t *testing.T) {
+	t.Setenv("MACHINIST_SPARK_HOST", "spark-host.example.test")
 	server, store, _, _, _ := newAutoMergeTestServer(t)
 	server.githubRepositories = map[string]string{"sparkdash": "dan/sparkdash"}
 	jobID, err := store.CreateJobWithOptions(context.Background(), "Spark ticket.", "sparkdash", "plan",

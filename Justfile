@@ -57,6 +57,7 @@ format-check:
 
 check:
     node --test .github/scripts/issue-triage.test.cjs
+    scripts/check-no-private-hosts.sh
     cd internal/controlplane/web && npm ci && npm test && npm run build
     just format-check
     python3 -m unittest discover -s evals -p 'test_*.py'

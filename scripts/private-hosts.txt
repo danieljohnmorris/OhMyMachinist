@@ -1,0 +1,15 @@
+# Hostnames and addresses that must not appear in tracked files (MACH-64).
+# One entry per line; lines starting with # are comments. The guard script
+# scripts/check-no-private-hosts.sh reads this list and scans every tracked
+# file, including built bundles under internal/controlplane/web/dist.
+#
+# Personal Plane host
+plane.danieljohnmorris.com
+# Personal domain
+danieljohnmorris.com
+# Factory host name
+pipsqueek
+# Tailscale addresses seen in the history (the 100.64.0.0/10 range is also
+# flagged in full, not just these two)
+100.70.205.115
+100.76.111.74

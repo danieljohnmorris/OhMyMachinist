@@ -80,6 +80,8 @@ type statusResponse struct {
 	Repositories      []string      `json:"repositories"`
 	MaxConcurrentJobs *int          `json:"max_concurrent_jobs"`
 	RunningJobs       int           `json:"running_jobs"`
+	PlaneBaseURL      string        `json:"plane_base_url"`
+	PlaneWorkspace    string        `json:"plane_workspace"`
 	CSRFToken         string        `json:"csrf_token"`
 	Factory           *FactoryState `json:"factory,omitempty"`
 }
@@ -507,6 +509,10 @@ func (s *Server) status(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusInternalServerError, factoryErr)
 		return
 	}
+	planeBaseURL, planeWorkspace := "", ""
+	if s.planeIntake != nil {
+		planeBaseURL, planeWorkspace = s.planeIntake.PlaneBase(request.Context())
+	}
 	writeJSON(response, http.StatusOK, statusResponse{
 		Snapshot:          snapshot,
 		Commands:          definition.CommandNames(),
@@ -514,6 +520,8 @@ func (s *Server) status(response http.ResponseWriter, request *http.Request) {
 		Repositories:      repositories,
 		MaxConcurrentJobs: maxConcurrentJobs,
 		RunningJobs:       runningJobs,
+		PlaneBaseURL:      planeBaseURL,
+		PlaneWorkspace:    planeWorkspace,
 		CSRFToken:         s.csrfToken,
 		Factory:           &factory,
 	})

@@ -34,6 +34,8 @@ export function TaskDetail({
   onCancelJob,
   onMoveToQueue,
   onAttemptChange,
+  planeBaseURL = "",
+  planeWorkspace = "",
   tab,
   onTabChange,
 }) {
@@ -52,7 +54,7 @@ export function TaskDetail({
   const latest = job.runs.at(-1);
   const lastCompleted = job.runs.findLast((run) => run.outcome === "complete");
   const { result, history, stages } = taskPresentation(job);
-  const { planeTicket, pullRequest } = runSidebarLinks(job, result);
+  const { planeTicket, pullRequest } = runSidebarLinks(job, result, { planeBaseURL, planeWorkspace });
   const reviewing = job.state === "awaiting_approval";
   const retriedAs = supersededJob(jobs, job);
   const attempts = ticketAttempts(jobs, job);

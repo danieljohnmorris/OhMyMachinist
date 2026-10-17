@@ -15,8 +15,8 @@ import (
 	"github.com/owainlewis/machinist/internal/config"
 )
 
-// Health checks (MACH-25): Machinist probes configured endpoints (pipsqueek,
-// the Sparks host, the GLM API) on a loop and spools an alert when one is
+// Health checks (MACH-25): Machinist probes configured endpoints (the Sparks
+// host, the GLM API) on a loop and spools an alert when one is
 // unreachable, replacing the external Factory Alerts watcher as the thing
 // that notices dead infrastructure.
 

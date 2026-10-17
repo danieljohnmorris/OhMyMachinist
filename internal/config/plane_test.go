@@ -26,19 +26,26 @@ func TestDefaultMergePoliciesSeed(t *testing.T) {
 	if mach.HealthCheck == nil || !strings.Contains(mach.HealthCheck.Command, "{sha}") {
 		t.Fatalf("MACH health check = %+v, want a {sha} command", mach.HealthCheck)
 	}
-	spark, ok := policies["SPARK"]
+	// The SPARK deploy host comes from the environment; without it the seed is
+	// absent so no private address is baked into the tool (MACH-64).
+	if _, ok := DefaultMergePolicies()["SPARK"]; ok {
+		t.Fatal("SPARK seed must be absent without MACHINIST_SPARK_HOST")
+	}
+	t.Setenv("MACHINIST_SPARK_HOST", "spark-host.example.test")
+	spark, ok := DefaultSPARKPolicy()
 	if !ok || !spark.AutoMerge {
 		t.Fatalf("SPARK seed = %+v, want auto-merge on", spark)
 	}
-	if !strings.Contains(spark.DeployCommand, "100.76.111.74") || !strings.Contains(spark.DeployCommand, "docker compose up --build -d") {
+	if !strings.Contains(spark.DeployCommand, "spark-host.example.test") || !strings.Contains(spark.DeployCommand, "docker compose up --build -d") {
 		t.Fatalf("SPARK deploy command = %q", spark.DeployCommand)
 	}
-	if spark.HealthCheck == nil || spark.HealthCheck.URL != "http://100.76.111.74:5555/" || spark.HealthCheck.Status != 200 {
+	if spark.HealthCheck == nil || spark.HealthCheck.URL != "http://spark-host.example.test:5555/" || spark.HealthCheck.Status != 200 {
 		t.Fatalf("SPARK health check = %+v", spark.HealthCheck)
 	}
 }
 
 func TestResolveMergePoliciesDefaultsAndOverride(t *testing.T) {
+	t.Setenv("MACHINIST_SPARK_HOST", "spark-host.example.test")
 	policies := ResolveMergePolicies(nil)
 	if !policies["MACH"].AutoMerge || !policies["SPARK"].AutoMerge {
 		t.Fatal("seeds must be on with no configuration")

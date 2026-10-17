@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 )
@@ -41,10 +42,6 @@ type MergePolicy struct {
 // DefaultDeployTimeout bounds a policy deploy command.
 const DefaultDeployTimeout = 15 * time.Minute
 
-// DefaultMergePolicies seeds the two authorised auto-merge projects (MACH-24):
-// MACH / OhMyMachinist rebuilds the control plane from merged main and
-// restarts it; SPARK / sparkDash pulls and rebuilds the compose stack on
-// spark2. Every other project is off until configured.
 // DefaultMACHDeployCommand rebuilds the control plane from merged main and
 // restarts it: versioned copy (machinist.<version>) plus a
 // machinist.prev-before-<sha> copy for rollback and a SQLite DB backup, all
@@ -75,10 +72,11 @@ const DefaultMACHRollbackCommand = `set -euo pipefail
 cp -f "$(ls -1t /opt/machinist/bin/machinist.prev-before-* | head -1)" /opt/machinist/bin/machinist
 systemctl restart machinist-control`
 
-// DefaultMergePolicies seeds the two authorised auto-merge projects (MACH-24):
+// DefaultMergePolicies seeds the authorised MACH auto-merge project (MACH-24):
 // MACH / OhMyMachinist rebuilds the control plane from merged main and
-// restarts it; SPARK / sparkDash pulls and rebuilds the compose stack on
-// spark2. Every other project is off until configured.
+// restarts it; SPARK / sparkDash pulls and rebuilds the compose stack on the
+// host named by MACHINIST_SPARK_HOST (see DefaultSPARKPolicy). Every other
+// project is off until configured.
 func DefaultMergePolicies() map[string]MergePolicy {
 	return map[string]MergePolicy{
 		"MACH": {
@@ -90,16 +88,27 @@ func DefaultMergePolicies() map[string]MergePolicy {
 			},
 			DeployTimeout: "20m",
 		},
-		"SPARK": {
-			AutoMerge:     true,
-			DeployCommand: `ssh machinist@100.76.111.74 'cd ~/sparkDash && git pull --ff-only && docker compose up --build -d'`,
-			HealthCheck: &MergeHealthCheck{
-				URL:    "http://100.76.111.74:5555/",
-				Status: 200,
-			},
-			DeployTimeout: "20m",
-		},
 	}
+}
+
+// DefaultSPARKPolicy seeds the SPARK auto-merge policy from the operator's
+// environment: the deploy target and health-check host come from
+// MACHINIST_SPARK_HOST, so no private address is baked into the tool. Without
+// the host the policy is absent and the project defaults to auto-merge off.
+func DefaultSPARKPolicy() (MergePolicy, bool) {
+	host := os.Getenv("MACHINIST_SPARK_HOST")
+	if host == "" {
+		return MergePolicy{}, false
+	}
+	return MergePolicy{
+		AutoMerge:     true,
+		DeployCommand: fmt.Sprintf(`ssh machinist@%s 'cd ~/sparkDash && git pull --ff-only && docker compose up --build -d'`, host),
+		HealthCheck: &MergeHealthCheck{
+			URL:    fmt.Sprintf("http://%s:5555/", host),
+			Status: 200,
+		},
+		DeployTimeout: "20m",
+	}, true
 }
 
 // ResolveMergePolicies layers the configured policies over the seeds: a
@@ -110,6 +119,9 @@ func ResolveMergePolicies(configured map[string]MergePolicy) map[string]MergePol
 	policies := map[string]MergePolicy{}
 	for project, policy := range DefaultMergePolicies() {
 		policies[project] = policy
+	}
+	if spark, ok := DefaultSPARKPolicy(); ok {
+		policies["SPARK"] = spark
 	}
 	for project, policy := range configured {
 		if strings.TrimSpace(project) == "" {
