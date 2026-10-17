@@ -343,6 +343,15 @@ export function canCancelJob(job) {
   return !job.workflow && job.state === "queued";
 }
 
+// Move to queue (MACH-66) stops a running attempt and queues the same work as
+// the next attempt on the same card. It is offered only while an attempt is in
+// flight: a running job, including one whose worker has gone silent or whose
+// lease expired — those stay "running" until moved. Workflow jobs carry their
+// own retry and cancel actions, so they never offer it.
+export function canMoveToQueue(job) {
+  return !job?.workflow && job?.state === "running";
+}
+
 export function runProgress(runs) {
   const completeStates = new Set(["succeeded", "failed", "timed_out", "cancelled"]);
   return { completed: runs.filter((run) => completeStates.has(run.state)).length, total: runs.length };
