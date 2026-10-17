@@ -30,8 +30,9 @@ It keeps the upstream control plane, worker model and executors. Everything belo
 **Intake**
 
 - Plane intake by label poll or webhook, with project-to-repository mapping
-- Built-in intake with an approve bridge, run-to-ticket state sync, supervisor alerts and a shadow mode for cutover
-- One job per ticket (deduplicated), with Plane and PR links on every run
+- Built-in project management by default: persistent tickets, comments, explicit factory approval and delivery feedback
+- Native Plane intake with an approve bridge, supervisor alerts and a shadow mode for cutover
+- One job per approved built-in ticket, with source-ticket and PR links on run cards and the run page
 - Tickets resolve automatically when the ticket or its linked PR completes
 
 **Delivery**
@@ -46,11 +47,12 @@ It keeps the upstream control plane, worker model and executors. Everything belo
 
 **Web UI**
 
-- Tasks board: one card per ticket with prior attempts, active and failed by default, Show succeeded, project and date filters that persist in the URL
-- Run page: attempt picker, transcript tab, full-height transcript and an activity sidebar with state timings
+- Tasks board: Queued, Running, Needs you and Done columns; prior attempts, URL-backed filters, 24-hour outcomes and active models
+- Run page: transcript-first layout, ticket/PR links, attempt picker, activity timings and expandable delivery metadata
 - Move to queue: from the board card, table row or run page, stop a running or stalled attempt, save its uncommitted work and requeue it as the next attempt on the same card (workflow jobs keep their own retry and cancel)
 - Transcript streams the whole agent session live: every assistant message, thinking summary, tool call and tool result (omp runs in `--mode json`), per attempt, followed by the delivery and review output
-- Sidebar shows worker count and job concurrency, with Start/Stop and a Factory page for the job cap and lanes
+- Tickets page: built-in drafts and approvals, plus Plane/Linear views of imported work
+- Capacity: concurrent-job limit and worker lanes together in one Factory panel
 - Factory controls: pause or resume dispatch (drain or cancel the running job), set how many jobs run at once, and enable or disable individual lanes, from the UI, the API, MCP or `machinist pause|resume`
 
 ## How it works

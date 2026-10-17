@@ -1,15 +1,19 @@
 import { TaskDetail } from "./task-detail.jsx";
+import { TicketsPage } from "./tickets.jsx";
+import { cardLinks } from "./run-links.js";
+import { activeModels, boardSummary } from "./runs-board.js";
 import { State, friendlyName, relativeTime, stateLabel } from "./task-display.jsx";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "@fontsource-variable/manrope";
-import { Activity, BarChart3, Bot, Factory, GitBranch, LayoutDashboard, Moon, Play, Plus, Server, Settings, Sparkles, Sun, Table2, TimerReset, X } from "lucide-react";
+import { Activity, BarChart3, Bot, Factory, GitBranch, LayoutDashboard, Moon, Play, Plus, Server, Settings, Sparkles, Sun, Table2, Ticket, TimerReset, X } from "lucide-react";
 import { Analytics } from "@/analytics";
 import { CommandsPage, WorkersPage } from "@/catalog";
 import { FactoryControls, FactoryPage } from "@/factory";
 import { SettingsPage } from "@/settings";
 import { SkillsPage } from "@/skills.jsx";
 import { Badge } from "@/components/ui/badge";
+import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { PageHeading } from "@/components/ui/page-heading";
@@ -17,7 +21,6 @@ import { cn } from "@/lib/utils";
 import { routeFromHash } from "@/routes";
 import { attemptTime, boardCardTimestamp, boardColumns, boardDateFilters, boardFiltersFromHash, boardHash, canCancelJob, canMoveToQueue, collapseIssueAttempts, collapseJobsByTicket, currentRun, filterBoardJobs, filterJobsByDate, groupEntriesByBoardColumn, groupJobsByBoardColumn, jobCounts, jobDisplayTitle, resolutionLabel } from "@/runs-board";
 import { groupEntriesByProject, groupJobsByProject } from "@/project";
-import { concurrencyLabel } from "@/concurrency";
 import { createStatusLoader } from "@/status-loader";
 import { TriggersPage } from "@/triggers";
 import "./styles.css";
@@ -108,6 +111,8 @@ function App() {
   const repositories = status.repositories;
 
   const displayJobs = useMemo(() => collapseIssueAttempts(status.jobs), [status.jobs]);
+  const summary = useMemo(() => boardSummary(status.jobs), [status.jobs]);
+  const models = useMemo(() => activeModels(status.jobs), [status.jobs]);
   const counts = useMemo(() => jobCounts(displayJobs), [displayJobs]);
   const visibleJobs = useMemo(() => filterBoardJobs(displayJobs, filters.showSucceeded), [filters.showSucceeded, displayJobs]);
   // Board: one card per Plane ticket (latest attempt); date/state filters apply to the latest.
@@ -191,7 +196,7 @@ function App() {
   }
 
   async function deleteJob(job) {
-    if (!window.confirm(`Delete task ${shortId(job.id)} and all of its stored run data?`)) return;
+    if (!window.confirm(`Delete run ${shortId(job.id)} and all of its stored run data?`)) return;
     setDeletingJob(job.id);
     setTaskActionError("");
     try {
@@ -250,7 +255,8 @@ function App() {
           </a>
         </div>
         <nav className="ml-4 flex flex-1 gap-1 overflow-x-auto md:ml-0 md:mt-9 md:block md:overflow-visible" aria-label="Primary">
-          <a href="#/runs" aria-current={view === "runs" || view === "task" ? "page" : undefined} className={cn("nav-item", (view === "runs" || view === "task") && "nav-item-active")}><Activity className="size-4" /><span>Tasks</span><span className="ml-auto text-xs text-muted-foreground">{counts.all}</span></a>
+          <a href="#/runs" aria-current={view === "runs" || view === "task" ? "page" : undefined} className={cn("nav-item", (view === "runs" || view === "task") && "nav-item-active")}><Activity className="size-4" /><span>Runs</span><span className="ml-auto text-xs text-muted-foreground">{counts.all}</span></a>
+          <a href="#/tickets" aria-current={view === "tickets" ? "page" : undefined} className={cn("nav-item", view === "tickets" && "nav-item-active")}><Ticket className="size-4" /><span>Tickets</span></a>
           <a href="#/analytics" aria-current={view === "analytics" ? "page" : undefined} className={cn("nav-item", view === "analytics" && "nav-item-active")}><BarChart3 className="size-4" /><span>Analytics</span></a>
           <a href="#/workers" aria-current={view === "workers" ? "page" : undefined} className={cn("nav-item", view === "workers" && "nav-item-active")}><Server className="size-4" /><span>Workers</span></a>
           <a href="#/triggers" aria-current={view === "triggers" ? "page" : undefined} className={cn("nav-item", view === "triggers" && "nav-item-active")}><TimerReset className="size-4" /><span>Triggers</span><span className="ml-auto text-xs text-muted-foreground">{status.triggers?.length || 0}</span></a>
@@ -260,8 +266,7 @@ function App() {
           <a href="#/settings" aria-current={view === "settings" ? "page" : undefined} className={cn("nav-item", view === "settings" && "nav-item-active")}><Settings className="size-4" /><span>Settings</span></a>
         </nav>
         <div className="hidden border-t border-border pt-3 md:block">
-          <div className="nav-item" title={`Workers are connected lanes that can take a job. The limit is how many jobs may run at once. ${connectedWorkers} connected · ${status.workers.length} registered`}><Server className="size-4 shrink-0" /><span className="min-w-0 truncate whitespace-nowrap">{`${concurrencyLabel(status.max_concurrent_jobs, status.jobs.filter((job) => job.state === "running").length)} · ${connectedWorkers ? `${connectedWorkers} worker${connectedWorkers === 1 ? "" : "s"} online` : "No workers online"}`}</span></div>
-          <div className="px-2.5 pb-1 pt-2"><FactoryControls factory={status.factory} csrfToken={status.csrf_token} onChanged={refreshStatus} compact /></div>
+          <div className="px-2.5 pb-1 pt-2"><FactoryControls factory={status.factory} csrfToken={status.csrf_token} onChanged={refreshStatus} compact workers={{ online: connectedWorkers, total: status.workers.length }} /></div>
           <button onClick={() => setDark((value) => !value)} className="nav-item w-full" aria-label={`Switch to ${dark ? "light" : "dark"} theme`}>
             {dark ? <Moon className="size-4" /> : <Sun className="size-4" />}<span>{dark ? "Dark" : "Light"} theme</span>
           </button>
@@ -272,15 +277,21 @@ function App() {
       </aside>
 
       <main className="workshop min-w-0 flex-1">
-        {view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={displayJob} jobs={status.jobs} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} onCancelJob={cancelJob} onMoveToQueue={moveJobToQueue} onAttemptChange={selectTaskAttempt} tab={route.tab} onTabChange={selectTaskTab} /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : view === "workers" ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} /> : view === "factory" ? <FactoryPage factory={status.factory} csrfToken={status.csrf_token} onChanged={refreshStatus} loaded={statusLoaded} error={statusError} /> : view === "triggers" ? <TriggersPage triggers={status.triggers || []} loaded={statusLoaded} error={statusError} /> : view === "skills" ? <SkillsPage csrfToken={status.csrf_token} /> : view === "settings" ? <SettingsPage repositories={status.repositories || []} csrfToken={status.csrf_token} /> : ["commands", "workflows"].includes(view) ? <CommandsPage /> : <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
-          <PageHeading title="Tasks" description="Describe the work. Review the result.">
+        {view === "tickets" ? <TicketsPage csrfToken={status.csrf_token} repositories={status.repositories} jobs={status.jobs} ticketKey={route.ticketKey} onChanged={refreshStatus} /> : view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={displayJob} jobs={status.jobs} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} onCancelJob={cancelJob} onMoveToQueue={moveJobToQueue} onAttemptChange={selectTaskAttempt} tab={route.tab} onTabChange={selectTaskTab} /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : view === "workers" ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} csrfToken={status.csrf_token} onChanged={refreshStatus} /> : view === "factory" ? <FactoryPage factory={status.factory} csrfToken={status.csrf_token} onChanged={refreshStatus} loaded={statusLoaded} error={statusError} /> : view === "triggers" ? <TriggersPage triggers={status.triggers || []} loaded={statusLoaded} error={statusError} /> : view === "skills" ? <SkillsPage csrfToken={status.csrf_token} /> : view === "settings" ? <SettingsPage repositories={status.repositories || []} csrfToken={status.csrf_token} /> : ["commands", "workflows"].includes(view) ? <CommandsPage /> : <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
+          <PageHeading title="Runs" description="Describe the work. Review the result.">
             <div className="flex items-center gap-2">
-              <Button className="text-xs!" onClick={() => setComposerOpen(true)}><Plus className="size-4" />New task</Button>
+              <Button className="text-xs!" onClick={() => setComposerOpen(true)}><Plus className="size-4" />New run</Button>
             </div>
           </PageHeading>
+          <section aria-label="Factory overview" className="flex flex-wrap items-center justify-between gap-4 border-b border-border pb-4 text-sm">
+            <dl className="flex flex-wrap gap-x-6 gap-y-2">
+              {[["Succeeded · 24h", summary.succeeded24h], ["Failed · 24h", summary.failed24h]].map(([label, count]) => <div key={label} className="flex items-baseline gap-2"><dt className="text-xs text-muted-foreground">{label}</dt><dd className="font-semibold tabular-nums">{count}</dd></div>)}
+            </dl>
+            <p className="text-xs text-muted-foreground">{models.length ? <>Active models · <span className="font-mono">{models.join(", ")}</span></> : "No models running"}</p>
+          </section>
 
           {composerOpen && <RunComposer title={title} setTitle={setTitle} sourceURL={sourceURL} setSourceURL={setSourceURL} choices={choices} repositories={repositories} selection={selection} setSelection={setSelection} repository={repository} setRepository={setRepository} prompt={prompt} setPrompt={setPrompt} model={model} setModel={setModel} submitting={submitting} submit={submit} close={() => setComposerOpen(false)} />}
-          {(statusError || submitError || taskActionError) && <div role="alert" className="rounded-md border border-danger/35 bg-danger/10 px-3 py-2 text-sm text-danger">{submitError || statusError || taskActionError}</div>}
+          {(statusError || submitError || taskActionError) && <Alert>{submitError || statusError || taskActionError}</Alert>}
 
           <section>
             <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -289,7 +300,7 @@ function App() {
                 Show succeeded
               </label>
               <div className="flex flex-wrap items-center justify-between gap-3 lg:justify-end">
-                <p className="text-xs text-muted-foreground">{counts.all} task{counts.all === 1 ? "" : "s"}</p>
+                <p className="text-xs text-muted-foreground">{counts.all} run{counts.all === 1 ? "" : "s"}</p>
                 <div className="inline-flex rounded-lg bg-muted/60 p-1" role="group" aria-label="Runs view">
                   <Button variant="ghost" size="sm" className={cn("h-7 border-transparent px-2.5 text-xs!", filters.runsView === "board" && "bg-surface text-foreground shadow-xs")} aria-pressed={filters.runsView === "board"} onClick={() => updateBoardFilters({ runsView: "board" })}><LayoutDashboard className="size-3.5" />Board</Button>
                   <Button variant="ghost" size="sm" className={cn("h-7 border-transparent px-2.5 text-xs!", filters.runsView === "table" && "bg-surface text-foreground shadow-xs")} aria-pressed={filters.runsView === "table"} onClick={() => updateBoardFilters({ runsView: "table" })}><Table2 className="size-3.5" />List</Button>
@@ -321,10 +332,10 @@ function RunComposer({ title,setTitle,sourceURL,setSourceURL,choices,repositorie
   const specHintID=React.useId();
   const isTask=selection.startsWith("workflow:");
   return <Card className="overflow-hidden border-primary/25">
-    <div className="flex items-center justify-between border-b border-border px-5 py-3"><h2 className="text-sm font-semibold">New task</h2><Button variant="ghost" size="icon" onClick={close} aria-label="Close new task form"><X className="size-4" /></Button></div>
+    <div className="flex items-center justify-between border-b border-border px-5 py-3"><h2 className="text-sm font-semibold">New run</h2><Button variant="ghost" size="icon" onClick={close} aria-label="Close new run form"><X className="size-4" /></Button></div>
     <form onSubmit={submit} className="space-y-5 p-5">
       <label className="block space-y-2"><span className="text-sm font-medium">What do you want done?</span><textarea autoFocus aria-describedby={specHintID} className="field-control min-h-32 resize-y" value={prompt} onChange={e=>setPrompt(e.target.value)} placeholder="Describe a change or paste an issue link…" required={!sourceURL.trim() || !isTask} /></label>
-      <p id={specHintID} className="text-xs leading-5 text-muted-foreground">{isTask ? <>This is your task’s spec: describe what to build and what counts as done. Prompt templates reference it as <code>{"{{task.spec}}"}</code>. A link on its own is saved as the source instead. <a href="#/workflows" className="text-primary underline">Template variables</a></> : "Write the instructions for this command. Its prompt template receives them as {{machinist.prompt}}."}</p>
+      <p id={specHintID} className="text-xs leading-5 text-muted-foreground">{isTask ? <>This is your run’s spec: describe what to build and what counts as done. Prompt templates reference it as <code>{"{{task.spec}}"}</code>. A link on its own is saved as the source instead. <a href="#/workflows" className="text-primary underline">Template variables</a></> : "Write the instructions for this command. Its prompt template receives them as {{machinist.prompt}}."}</p>
       <section className="text-sm">
         <div className="grid gap-4 sm:grid-cols-2">
           <label><span className="field-label">{isTask ? "Workflow" : "Command"}</span><select className="field-control" value={selection} onChange={e=>setSelection(e.target.value)} required>{choices.map(c=><option key={c.value} value={c.value}>{c.label}</option>)}</select></label>
@@ -333,8 +344,8 @@ function RunComposer({ title,setTitle,sourceURL,setSourceURL,choices,repositorie
           <label><span className="field-label">Model · optional</span><input className="field-control" value={model} onChange={e=>setModel(e.target.value)} maxLength={128} placeholder="Workflow default" /></label>
         </div>
       </section>
-      {!choices.length && <p role="alert" className="text-sm text-danger">Configure a workflow before starting a task.</p>}
-      <div className="flex justify-end"><Button disabled={submitting || !selection || !repository}>{submitting ? "Starting…" : "Start task"}<Play className="size-3.5" /></Button></div>
+      {!choices.length && <p role="alert" className="text-sm text-danger">Configure a workflow before starting a run.</p>}
+      <div className="flex justify-end"><Button disabled={submitting || !selection || !repository}>{submitting ? "Starting…" : "Start run"}<Play className="size-3.5" /></Button></div>
     </form>
   </Card>;
 }
@@ -354,7 +365,7 @@ function ProjectRunBoard({ entries, onCancelJob, onMoveToQueue }) {
       return <section key={project} className="min-w-0" aria-labelledby={`project-${project}`}>
         <header className="mb-2 flex items-center justify-between gap-3">
           <h2 id={`project-${project}`} className="text-base font-semibold">{project}</h2>
-          <Badge className="shrink-0 border-border bg-surface text-muted-foreground" aria-label={`${projectEntries.length} visible ${project} runs`}>{projectEntries.length}</Badge>
+          <Badge tone="surface" className="shrink-0" aria-label={`${projectEntries.length} visible ${project} runs`}>{projectEntries.length}</Badge>
         </header>
         <div className="grid min-w-0 gap-4 md:grid-cols-2 xl:grid-cols-4">
           {boardColumns.map((column) => <RunColumn key={column.id} column={column} entries={groupedEntries[column.id]} idPrefix={`project-${project}`} onCancelJob={onCancelJob} onMoveToQueue={onMoveToQueue} />)}
@@ -368,7 +379,7 @@ function RunColumn({ column, entries, idPrefix, onCancelJob, onMoveToQueue }) {
   return <section className="run-column min-w-0 border border-border bg-muted/20" aria-labelledby={`${idPrefix}-${column.id}`}>
     <header className="flex items-center justify-between gap-3 border-b border-border px-3 py-2.5">
       <div className="min-w-0"><h2 id={`${idPrefix}-${column.id}`} className="text-sm font-semibold">{column.title}</h2><p className="break-words text-xs text-muted-foreground">{column.description}</p></div>
-      <Badge className="shrink-0 border-border bg-surface text-muted-foreground" aria-label={`${entries.length} visible ${column.title.toLowerCase()} runs`}>{entries.length}</Badge>
+      <Badge tone="surface" className="shrink-0" aria-label={`${entries.length} visible ${column.title.toLowerCase()} runs`}>{entries.length}</Badge>
     </header>
     <div className="grid min-w-0 gap-2 p-2">
       {entries.length ? entries.map((entry) => <RunCard key={entry.latest.id} job={entry.latest} priors={entry.priors} onCancelJob={onCancelJob} onMoveToQueue={onMoveToQueue} />) : <p className="px-2 py-8 text-center text-xs text-muted-foreground">No runs</p>}
@@ -379,8 +390,8 @@ function RunColumn({ column, entries, idPrefix, onCancelJob, onMoveToQueue }) {
 function attemptBadges(job) {
   if (!job.attempt_count || job.attempt_count < 2) return null;
   return <div className="flex flex-wrap items-center gap-1.5">
-    <Badge className="border-border bg-surface text-muted-foreground">attempt {job.attempt_count}</Badge>
-    {job.prior_failed_count > 0 && <Badge className="border-danger/25 bg-danger/10 text-danger">{job.prior_failed_count === 1 ? "1 prior fail" : `${job.prior_failed_count} prior fails`}</Badge>}
+    <Badge tone="surface">attempt {job.attempt_count}</Badge>
+    {job.prior_failed_count > 0 && <Badge tone="danger">{job.prior_failed_count === 1 ? "1 prior fail" : `${job.prior_failed_count} prior fails`}</Badge>}
   </div>;
 }
 
@@ -401,30 +412,49 @@ function RunCard({ job, priors = [], onCancelJob, onMoveToQueue }) {
   const timestamp = boardCardTimestamp(job);
   const resolution = resolutionLabel(job);
   const attemptCount = priors.length > 0 ? priors.length + 1 : (job.attempt_count || 0);
-  return <Card className="overflow-hidden"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="block min-w-0 space-y-3 p-4 transition hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50" aria-label={`Open task ${title}`}>
+  return <Card className="overflow-hidden"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="block min-w-0 space-y-3 p-4 transition hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50" aria-label={`Open run ${title}`}>
       <p className="break-words text-sm font-medium leading-5" title={title}>{title}</p>
       <p className="text-xs text-muted-foreground">{job.repository} · {friendlyName(run?.command || job.command)}</p>
+      {run?.model && <p className="truncate font-mono text-xs text-muted-foreground" title={run.model}>{run.model}</p>}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <State value={job.state} />
         <time className="text-xs text-muted-foreground" dateTime={timestamp} title={timestamp ? new Date(timestamp).toLocaleString() : undefined}>{relativeTime(timestamp)}</time>
       </div>
       {resolution && <p className="text-xs text-success">{resolution}</p>}
       {priors.length === 0 && attemptBadges(job)}
-    </a>{priors.length > 0 && <div className="flex flex-wrap items-center gap-1.5 border-t border-border px-4 py-2.5">
-      <Badge className="border-border bg-surface text-muted-foreground" aria-label={`${attemptCount} attempts`}>{attemptCount} attempts</Badge>
-      {priors.map((prior) => <a key={prior.id} href={`#/runs/${encodeURIComponent(prior.id)}`} className="text-xs text-muted-foreground underline hover:text-foreground" aria-label={`Open prior attempt ${stateLabel(prior.state)} ${relativeTime(attemptTime(prior))}`}>{stateLabel(prior.state)} · {relativeTime(attemptTime(prior))}</a>)}
-    </div>}{canCancelJob(job) && <div className="flex justify-end px-4 pb-4"><Button size="sm" variant="outline" aria-label={`Cancel task ${title}`} onClick={() => onCancelJob(job)}>Cancel</Button></div>}{canMoveToQueue(job) && <div className="flex justify-end px-4 pb-4"><MoveToQueueButton job={job} onMoveToQueue={onMoveToQueue} /></div>}</Card>;
+    </a><RunCardLinks job={job} />{priors.length > 0 && <div className="flex items-center border-t border-border px-4 py-2.5">
+      <Badge tone="surface" tabIndex={0} aria-label={`${attemptCount} attempts: ${priors.map((prior) => `${stateLabel(prior.state)} ${relativeTime(attemptTime(prior))}`).join(", ")}`} title={[...priors].reverse().map((prior) => `${stateLabel(prior.state)} · ${relativeTime(attemptTime(prior))}`).join("\n")}>{attemptCount} attempts</Badge>
+    </div>}{canCancelJob(job) && <div className="flex justify-end px-4 pb-4"><Button size="sm" variant="outline" aria-label={`Cancel run ${title}`} onClick={() => onCancelJob(job)}>Cancel</Button></div>}{canMoveToQueue(job) && <div className="flex justify-end px-4 pb-4"><MoveToQueueButton job={job} onMoveToQueue={onMoveToQueue} /></div>}</Card>;
+}
+
+function RunCardLinks({ job }) {
+  const { ticket, pullRequest } = cardLinks(job);
+  if (!ticket && !pullRequest) return null;
+  return <div className="flex flex-wrap gap-x-4 gap-y-2 border-t border-border px-4 py-2.5 text-xs">
+    {ticket && <a className="text-primary underline" href={ticket.href} target={ticket.external ? "_blank" : undefined} rel={ticket.external ? "noopener noreferrer" : undefined}>{ticket.text}</a>}
+    {pullRequest && <a className="text-primary underline" href={pullRequest.href} target="_blank" rel="noopener noreferrer">{pullRequest.text}</a>}
+  </div>;
 }
 
 function RunRow({ job, onCancelJob, onMoveToQueue }) {
   const title=jobDisplayTitle(job);
   const run=currentRun(job);
   const resolution=resolutionLabel(job);
-  return <article className="border-b border-border last:border-b-0"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="flex items-center justify-between gap-4 px-5 py-4 hover:bg-muted/35" aria-label={`Open task ${title}`}><div className="min-w-0"><p className="break-words text-sm font-medium" title={title}>{title}</p><p className="mt-1 text-xs text-muted-foreground">{job.repository} · {friendlyName(run?.command || job.command)}</p>{resolution && <p className="mt-1 text-xs text-success">{resolution}</p>}{attemptBadges(job)}</div><div className="flex shrink-0 flex-col items-end gap-1"><State value={job.state} /><time className="text-xs text-muted-foreground" dateTime={job.created_at}>{relativeTime(job.created_at)}</time>{canCancelJob(job) && <Button size="sm" variant="outline" aria-label={`Cancel task ${title}`} onClick={() => onCancelJob(job)}>Cancel</Button>}{canMoveToQueue(job) && <MoveToQueueButton job={job} onMoveToQueue={onMoveToQueue} />}</div></a></article>;
+  return <article className="border-b border-border last:border-b-0">
+    <div className="flex items-center gap-4 px-5 py-4">
+      <a href={`#/runs/${encodeURIComponent(job.id)}`} className="flex min-w-0 flex-1 items-center justify-between gap-4 hover:text-primary" aria-label={`Open run ${title}`}>
+        <div className="min-w-0"><p className="break-words text-sm font-medium" title={title}>{title}</p><p className="mt-1 text-xs text-muted-foreground">{job.repository} · {friendlyName(run?.command || job.command)}{run?.model ? ` · ${run.model}` : ""}</p>{resolution && <p className="mt-1 text-xs text-success">{resolution}</p>}{attemptBadges(job)}</div>
+        <div className="flex shrink-0 flex-col items-end gap-1"><State value={job.state} /><time className="text-xs text-muted-foreground" dateTime={job.created_at}>{relativeTime(job.created_at)}</time></div>
+      </a>
+      {canCancelJob(job) && <Button size="sm" variant="outline" aria-label={`Cancel run ${title}`} onClick={() => onCancelJob(job)}>Cancel</Button>}
+      {canMoveToQueue(job) && <MoveToQueueButton job={job} onMoveToQueue={onMoveToQueue} />}
+    </div>
+    <RunCardLinks job={job} />
+  </article>;
 }
 
 function EmptyRuns({ filtered, openComposer }) {
-  return <div className="grid place-items-center px-6 py-16 text-center"><span className="grid size-10 place-items-center rounded-full bg-muted text-muted-foreground"><GitBranch className="size-5" /></span><h3 className="mt-3 text-sm font-semibold">{filtered ? "No matching tasks" : "No tasks yet"}</h3><p className="mt-1 max-w-sm text-xs leading-5 text-muted-foreground">{filtered ? "Try a different state filter." : "Describe the work or paste an issue link to get started."}</p>{!filtered && <Button variant="outline" size="sm" className="mt-4" onClick={openComposer}><Plus className="size-3.5" />New task</Button>}</div>;
+  return <div className="grid place-items-center px-6 py-16 text-center"><span className="grid size-10 place-items-center rounded-full bg-muted text-muted-foreground"><GitBranch className="size-5" /></span><h3 className="mt-3 text-sm font-semibold">{filtered ? "No matching runs" : "No runs yet"}</h3><p className="mt-1 max-w-sm text-xs leading-5 text-muted-foreground">{filtered ? "Try a different state filter." : "Describe the work or paste an issue link to get started."}</p>{!filtered && <Button variant="outline" size="sm" className="mt-4" onClick={openComposer}><Plus className="size-3.5" />New run</Button>}</div>;
 }
 
 

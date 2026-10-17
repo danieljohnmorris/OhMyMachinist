@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { factoryStateLabel, factoryStateSummary, jobCapMax, laneStateLabel, stepJobCap } from "./factory-controls.js";
+import { factoryActions, factoryStateLabel, factoryStateSummary, jobCapMax, laneStateLabel, stepJobCap } from "./factory-controls.js";
 
 test("labels each dispatch state", () => {
   assert.equal(factoryStateLabel("running"), "Running");
@@ -36,4 +36,13 @@ test("stepping the cap clamps into range", () => {
   assert.equal(stepJobCap(1, -1, factory), 1);
   assert.equal(stepJobCap(2, 1, factory), 2);
   assert.equal(stepJobCap(1, 1, factory), 2);
+});
+
+test("draining can stop remaining work but cannot drain twice", () => {
+  const lanes = [{ busy: true }, { busy: false }];
+  assert.deepEqual(factoryActions({ state: "running", lanes }), ["drain", "cancel"]);
+  assert.deepEqual(factoryActions({ state: "draining", lanes }), ["start", "cancel"]);
+  assert.deepEqual(factoryActions({ state: "draining", lanes: [{ busy: false }] }), ["start"]);
+  assert.deepEqual(factoryActions({ state: "paused", lanes }), ["start"]);
+  assert.deepEqual(factoryActions(undefined), []);
 });

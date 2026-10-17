@@ -321,6 +321,9 @@ func (s *Store) cancelPlainJob(ctx context.Context, tx *sql.Tx, job, action stri
 	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET state='cancelled',updated_at=? WHERE id=?`, now, job); err != nil {
 		return err
 	}
+	if err := releaseBuiltinTickets(ctx, tx, now, "The factory run was cancelled.", `id=?`, job); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 

@@ -115,7 +115,7 @@ func (s *Server) admitIssue(ctx context.Context, trigger config.ResolvedTrigger,
 		Identity: trigger.Identity, Family: trigger.Family, ConfigSignature: trigger.Signature,
 		ConfigGeneration: generation, OccurrenceKey: subject, Subject: subject, Title: title, ScheduledAt: s.now().UTC(),
 		Prompt: prompt, Repository: trigger.Repository, SelectionName: trigger.SelectionName,
-		Command: command, Task: &task, IssueKey: issue.Key,
+		Command: command, Task: &task, IssueKey: issue.Key, Tracker: issueTracker(source), Labels: issue.Labels,
 	}
 	jobID, state, found, err := s.store.ActiveTriggerJob(ctx, subject, issue.Key)
 	if err != nil {

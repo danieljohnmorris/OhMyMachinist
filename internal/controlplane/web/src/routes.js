@@ -1,4 +1,4 @@
-const pages = new Set(["runs", "analytics", "workers", "factory", "triggers", "commands", "workflows", "skills", "settings"]);
+const pages = new Set(["runs", "tickets", "analytics", "workers", "factory", "triggers", "commands", "workflows", "skills", "settings"]);
 
 export function routeFromHash(hash) {
   const value = hash.replace(/^#\//, "");
@@ -14,6 +14,14 @@ export function routeFromHash(hash) {
       };
     } catch {
       return { view: "runs", jobID: "", tab: "", attempt: "" };
+    }
+  }
+  if (value.startsWith("tickets/") && value.slice(8)) {
+    const [path] = value.slice(8).split("?");
+    try {
+      return { view: "tickets", jobID: "", tab: "", attempt: "", ticketKey: decodeURIComponent(path) };
+    } catch {
+      return { view: "tickets", jobID: "", tab: "", attempt: "", ticketKey: "" };
     }
   }
   return { view: pages.has(value) ? value : "runs", jobID: "", tab: "", attempt: "" };

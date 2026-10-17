@@ -103,7 +103,7 @@ test("confirming moves the job: the card refreshes to attempt 2 with no duplicat
 
   // The same card now shows the queued attempt N+1; the cancelled attempt is a prior, not a second card.
   await eventually(() => assert.match(document.body.textContent, /2 attempts/), "card shows attempt N+1");
-  assert.equal(document.querySelectorAll('a[aria-label="Open task MACH-60: running fixture"]').length, 1, "no duplicate card appears");
+  assert.equal(document.querySelectorAll('a[aria-label="Open run MACH-60: running fixture"]').length, 1, "no duplicate card appears");
 
   // The cancelled attempt shows the move reason and where the work was saved.
   window.location.hash = "#/runs/job_running";

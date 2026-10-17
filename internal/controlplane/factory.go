@@ -342,12 +342,21 @@ func (s *Store) SetLaneEnabled(ctx context.Context, name string, enabled bool) e
 // jobs stay queued: they are not dispatched while the factory is stopped and
 // resume when it starts again.
 func (s *Store) CancelRunningJobs(ctx context.Context) error {
-	now := s.now().UTC().Format(time.RFC3339Nano)
-	if _, err := s.db.ExecContext(ctx, `UPDATE jobs SET state='cancelled',updated_at=? WHERE state='running'`, now); err != nil {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
 		return fmt.Errorf("cancel running jobs: %w", err)
 	}
-	if _, err := s.db.ExecContext(ctx, `UPDATE runs SET state='cancelled',exit_code=130,error='Cancelled by factory stop',completed_at=? WHERE state='running'`, now); err != nil {
+	defer tx.Rollback()
+	now := s.now().UTC().Format(time.RFC3339Nano)
+	// Release tickets first: the selection depends on the jobs still running.
+	if err := releaseBuiltinTickets(ctx, tx, now, "The factory was stopped while this run was in progress.", `state='running'`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET state='cancelled',updated_at=? WHERE state='running'`, now); err != nil {
+		return fmt.Errorf("cancel running jobs: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE runs SET state='cancelled',exit_code=130,error='Cancelled by factory stop',completed_at=? WHERE state='running'`, now); err != nil {
 		return fmt.Errorf("cancel running runs: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }

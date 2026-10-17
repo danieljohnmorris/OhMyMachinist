@@ -77,12 +77,12 @@ test("runs default to board view and share filters when switching views", async 
 
   const retriedCard = [...document.querySelectorAll(".crafted-card")].find((card) => card.textContent.includes("Retried fixture"));
   assert.ok(retriedCard, "retried job renders a board card");
-  const attemptsRow = retriedCard.querySelector('a[href="#/runs/job_retried_old"]');
-  assert.ok(attemptsRow, "prior attempt link renders");
-  assert.ok(retriedCard.contains(attemptsRow), "attempts row is a descendant of the card element");
-  assert.ok(retriedCard.querySelector('[aria-label="2 attempts"]'), "attempts pill renders in the card");
+  assert.equal(retriedCard.querySelector('a[href="#/runs/job_retried_old"]'), null, "prior attempts are not listed inline");
+  const pill = retriedCard.querySelector('[aria-label^="2 attempts"]');
+  assert.ok(pill, "attempts pill renders in the card");
+  assert.match(pill.getAttribute("title"), /Failed|Cancelled|Succeeded|Timed out/i, "prior attempt outcomes are in the tooltip");
   const singleCard = [...document.querySelectorAll(".crafted-card")].find((card) => card.textContent.includes("Failed fixture"));
-  assert.ok(singleCard && !singleCard.querySelector('[aria-label$=" attempts"]'), "single-attempt cards show no attempts row");
+  assert.ok(singleCard && !singleCard.querySelector('[aria-label*=" attempts"]'), "single-attempt cards show no attempts row");
 
   assert.equal(button("List").getAttribute("aria-pressed"), "false");
 
@@ -133,11 +133,11 @@ test("runs default to board view and share filters when switching views", async 
   for (const label of ["Result", "Instructions", "Details"]) {
     assert.equal([...document.querySelectorAll('[role="tab"]')].find(el => el.textContent === label), undefined, `${label} should not be a tab`);
   }
-  const instructions = document.querySelector('[aria-label="Task sections"] [aria-label="Instructions"]');
-  const details = document.querySelector('[aria-label="Task details"]');
+  const instructions = document.querySelector('[aria-label="Run sections"] [aria-label="Instructions"]');
+  const details = document.querySelector('[aria-label="Run details"]');
   const result = document.querySelector('[aria-label="Current result"]');
   assert.ok(instructions && result && details, "instructions, result, and details are visible together");
-  for (const text of ["test-executor", "test-model", "test-worker", "Not reported", "Delete task", "Exit code"]) {
+  for (const text of ["test-executor", "test-model", "test-worker", "Not reported", "Delete run", "Exit code"]) {
     assert.ok(details.textContent.includes(text), `details include ${text}`);
   }
   const instructionLink = instructions.querySelector('a[href="https://github.com/omacom/mobile/pull/179"]');
@@ -156,11 +156,11 @@ test("runs default to board view and share filters when switching views", async 
   assert.equal(document.querySelectorAll("script").length, 0, "preview renders text, not markup");
   assert.equal(artifactRequests, 1, "changing tabs does not refetch metadata");
   window.location.hash = "#/runs/job_interrupted";
-  await eventually(() => assert.ok([...document.querySelectorAll("button")].find(el => el.textContent === "Cancel task")));
-  button("Cancel task").click();
+  await eventually(() => assert.ok([...document.querySelectorAll("button")].find(el => el.textContent === "Cancel run")));
+  button("Cancel run").click();
   await eventually(() => assert.equal(cancelled, true));
-  await eventually(() => assert.equal(button("Delete task").disabled, false));
-  await eventually(() => assert.equal([...document.querySelectorAll("button")].find(el => el.textContent === "Cancel task"), undefined));
+  await eventually(() => assert.equal(button("Delete run").disabled, false));
+  await eventually(() => assert.equal([...document.querySelectorAll("button")].find(el => el.textContent === "Cancel run"), undefined));
 
 });
 

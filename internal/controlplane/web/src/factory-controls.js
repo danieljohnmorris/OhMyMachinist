@@ -38,17 +38,17 @@ export function laneStateLabel(lane) {
   }
 }
 
-// laneTone maps a lane to a badge tone class.
+// laneTone maps a lane to a Badge tone.
 export function laneTone(lane) {
   switch (lane?.state) {
     case "busy":
-      return "tone-busy";
+      return "active";
     case "offline":
-      return "tone-offline";
+      return "neutral";
     case "disabled":
-      return "tone-disabled";
+      return "neutral";
     default:
-      return "tone-idle";
+      return "neutral";
   }
 }
 
@@ -63,4 +63,15 @@ export function stepJobCap(current, delta, factory) {
   const max = jobCapMax(factory);
   const next = (Number.isFinite(current) ? current : 1) + delta;
   return Math.min(max, Math.max(1, next));
+}
+
+export function busyLaneCount(factory) {
+  return (factory?.lanes ?? []).filter((lane) => lane.busy).length;
+}
+
+export function factoryActions(factory) {
+  if (!factory) return [];
+  if (factory.state === "paused") return ["start"];
+  if (factory.state === "draining") return busyLaneCount(factory) ? ["start", "cancel"] : ["start"];
+  return ["drain", "cancel"];
 }
