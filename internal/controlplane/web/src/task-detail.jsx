@@ -665,7 +665,7 @@ function MoveToQueueButton({ job, onMoveToQueue }) {
         }
       }}
     >
-      {busy ? "Moving…" : "Move to queue"}
+      {busy ? "Cancelling…" : "Cancel"}
     </Button>
   );
 }

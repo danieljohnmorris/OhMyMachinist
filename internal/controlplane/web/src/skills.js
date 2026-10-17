@@ -60,8 +60,10 @@ async function readError(response, fallback) {
   return new Error(body.error || `${fallback} (${response.status})`);
 }
 
-export async function loadSkills(signal) {
-  const response = await fetch("/api/v1/skills", { headers: { Accept: "application/json" }, signal });
+export async function loadSkills(csrfToken, signal) {
+  const headers = { Accept: "application/json" };
+  if (csrfToken) headers["X-Machinist-CSRF"] = csrfToken;
+  const response = await fetch("/api/v1/skills", { headers, signal });
   if (!response.ok) throw await readError(response, "Skills request failed");
   return skillsFromPayload(await response.json());
 }

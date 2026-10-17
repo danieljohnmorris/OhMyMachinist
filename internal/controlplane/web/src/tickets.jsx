@@ -30,7 +30,7 @@ export function TicketsPage({ csrfToken, repositories = [], jobs = [], ticketKey
     setSelected(null);
     if (ticketKey) setTracker("builtin");
     async function refresh() {
-      const [items, providers, detail] = await Promise.allSettled([listTickets(), loadTrackers(), ticketKey ? getTicket(ticketKey) : Promise.resolve(null)]);
+      const [items, providers, detail] = await Promise.allSettled([listTickets(csrfToken), loadTrackers(csrfToken), ticketKey ? getTicket(ticketKey, csrfToken) : Promise.resolve(null)]);
       if (cancelled) return;
       const failures = [items, providers, detail].filter(result => result.status === "rejected");
       if (items.status === "fulfilled") setTickets(items.value);
@@ -44,7 +44,7 @@ export function TicketsPage({ csrfToken, repositories = [], jobs = [], ticketKey
     }
     refresh();
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [ticketKey, revision]);
+  }, [ticketKey, revision, csrfToken]);
 
   async function mutate(label, action) {
     setPending(label); setError("");

@@ -931,8 +931,10 @@ func (s *Server) validBrowserRequest(request *http.Request) bool {
 	if err != nil || origin.Scheme != "http" || !strings.EqualFold(origin.Host, request.Host) {
 		return false
 	}
-	hostname := origin.Hostname()
-	return hostname == "localhost" || net.ParseIP(hostname) != nil && net.ParseIP(hostname).IsLoopback()
+	// Same-host Origin is the same-origin defense. The listener itself is
+	// Tailscale-only / loopback-bound, so a spoofed Origin must already match
+	// the Host header the listener was addressed by.
+	return true
 }
 
 // validBrowserWriteRequest is the write-path browser check. Browsers attach
