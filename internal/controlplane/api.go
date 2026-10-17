@@ -226,6 +226,10 @@ func (s *Server) putSettingHandler(response http.ResponseWriter, request *http.R
 		writeError(response, http.StatusBadRequest, errors.New("setting key must be letters, digits, dash or underscore"))
 		return
 	}
+	if err := validateProjectSetting(key, input.Value); err != nil {
+		writeError(response, http.StatusBadRequest, err)
+		return
+	}
 	if err := s.store.PutSetting(request.Context(), key, input.Value); err != nil {
 		writeError(response, http.StatusInternalServerError, err)
 		return

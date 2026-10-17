@@ -80,24 +80,57 @@ See [storage settings](artifacts.md#storage) for size limits. Files are kept unt
 
 ## Failure alerts
 
-When a run ends `failed` or `timed_out`, the server writes one pending fail alert
-JSON file per run to a configured spool directory for an external alert poller or
-notifier to pick up:
+When a run ends `failed` or `timed_out`, the self-healing pass owns alerting:
+exactly one `fail-<run>.json` is spooled per run into a configured pending
+directory for the external Factory Alerts watcher to pick up. The alert is
+written when Machinist gives up on the run — retry budget exhausted, a spec or
+secret-guard (or lane-dirty) cause needing a human, a healing error, workflow
+jobs (healing never requeues those), and jobs with no tracker to comment on:
 
 ```toml
 [alerts]
 directory = "/var/lib/machinist/alerts"
 ```
 
-The payload records the job id, run id, command (stage) name, configured timeout,
-elapsed time, exit code, the issue key and URL when the job came from a tracker,
-and a `reason` of `failed` or `timed_out` — so a notifier can report "timed out
-after 2h" instead of a generic failure. A command that runs past its `timeout`
-ends `timed_out` with exit code 124 and alerts exactly like any other failure;
-each file is written once per run and never duplicated. Cancelled runs do not
-alert. Relative paths resolve against the config file and `~` expands to the
-server user's home, like the artifact storage path. When `[alerts]` is absent,
-no files are written.
+The payload keeps the retired `fail.py` contract: `job_id`, `run_id`,
+`repository`, `stage` and `command` (the stage that failed), configured
+`timeout_millis`, `elapsed_millis`, `exit_code`, `reason` (`failed` or
+`timed_out`), `classification` (the heal cause), `stderr_tail` (last 40
+non-empty lines of the run error), an `inspect` command to read the run from
+the server database, and `issue_key`/`issue_url` when the job came from a
+tracker. A `healing` object carries the diagnosis: `cause`, `summary`, `fix`,
+`attempts`, `budget`, `needs_human` and a `reason` saying why it was handed to
+a human (or `retry_after` for scheduled retries).
+
+**Dedupe rule.** Each file is written once per run (exclusive create) and
+never duplicated, so a re-delivered completion neither rewrites the file nor
+re-fires the webhook. Cancelled runs are operator actions and never alert. A
+run that self-healing requeues produces no needs-human alert; with
+`healing_alerts = true` it also spools a `healing-<run>.json` notice (same
+payload, `needs_human: false`) so the watcher can follow the retry.
+
+**Webhook.** Set `webhook_url` and every spooled alert — fail, healing and
+health — is POSTed to it as JSON so the watcher can wake on push instead of
+polling. The optional secret comes from `webhook_secret_env` or
+`webhook_secret_file` and is sent, unlogged, in `webhook_header` (default
+`X-Machinist-Alert-Token`). Delivery retries three times with a 10s timeout
+per attempt; a final failure is logged and never fails the run completion or
+the file write.
+
+**Who writes what.** The server writes `fail-<run>.json`, the optional
+`healing-<run>.json`, and `health-<name>.json` (one per configured endpoint,
+overwritten until the endpoint recovers, then removed). The drift check
+writes `drift-<timestamp>.json`. The Plane intake writes `pr-<KEY>-<job>.json`
+when a run opens a pull request. The watcher should treat `needs_human: true`
+fail alerts and unreachable-endpoint health alerts as pages, `healing-*.json`
+as informational, and `pr-*.json` as a review prompt.
+
+A command that runs past its `timeout` ends `timed_out` with exit code 124 and
+alerts exactly like any other failure. Relative paths resolve against the
+config file and `~` expands to the server user's home, like the artifact
+storage path. When `[alerts]` is absent no files are written and no webhook
+fires — `deploy/install.sh` and the drift check both warn about that config
+(MACH-70), because failures then alert nowhere.
 
 ## Migration
 
@@ -152,6 +185,14 @@ the project so the runs board groups them with the same stack.
 repository = "sparks-repo"
 command = "task-to-pr"
 ```
+
+Projects can also be added and edited from the control plane's Projects view
+(`#/projects`). Each entry is stored as a `tracker.projects.<NAME>` setting
+holding the table body (`repository`, `command`, `model`); these settings
+overlay the config file's tables the same way a config overlay does — the
+setting wins per project, and the change applies on the next ticket without a
+restart. Per-project skills live in the separate `skills.project.<NAME>`
+setting and are edited on the same page.
 
 The ticket stores the pull request URL reported by its run, and the ticket page
 links to it. Tickets are flat: there are no sub-tickets. Jobs admitted from Plane

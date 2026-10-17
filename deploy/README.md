@@ -87,7 +87,9 @@ repository at the deployed SHA (plus the recorded sha256), ignoring the overlay
 and the env files. On drift it writes a health/status file
 (`~/.machinist/drift.json`) and a `machinist.drift` alert listing the drifted
 files to the Factory Alerts spool (`~/.machinist/alerts/pending/`), and exits 2.
-The `machinist-drift-check.timer` runs it hourly.
+The `machinist-drift-check.timer` runs it hourly. Both it and `install.sh`
+warn when the server config has no `[alerts]` section (MACH-70): failed runs
+then alert nowhere — no spool file, no webhook.
 
 ## Delivery reuse across restarts and retries (MACH-71)
 

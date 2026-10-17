@@ -258,9 +258,21 @@ func TestHealRunSpecAndSecretDoNotRetry(t *testing.T) {
 		if request.Method == "PATCH" && strings.Contains(request.Path, "/issues/") {
 			stateSet = true
 		}
+		// The budget was not spent for these causes; the comment must not
+		// claim it was.
+		if strings.Contains(request.Body, "Retry budget exhausted") {
+			t.Fatalf("plane comment claims budget exhausted: %s", request.Body)
+		}
 	}
 	if !stateSet {
 		t.Fatal("ticket was not moved to Needs attention")
+	}
+	var exhausted bool
+	if err := store.db.QueryRow(`SELECT COALESCE(json_extract(metadata,'$.healing.exhausted'),0) FROM job_metadata WHERE job_id=?`, specJob).Scan(&exhausted); err != nil {
+		t.Fatal(err)
+	}
+	if exhausted {
+		t.Fatal("job metadata records exhausted for a spec cause with budget remaining")
 	}
 }
 

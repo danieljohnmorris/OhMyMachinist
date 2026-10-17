@@ -100,7 +100,8 @@ func probeEndpoint(ctx context.Context, url string, timeout time.Duration) strin
 }
 
 // writeNamed spools one JSON alert under a fixed name, overwriting the
-// previous state for that alert source.
+// previous state for that alert source, and POSTs the new state to the
+// optional webhook.
 func (w *failAlertWriter) writeNamed(name string, payload any) error {
 	if w == nil || w.directory == "" {
 		return nil
@@ -112,10 +113,12 @@ func (w *failAlertWriter) writeNamed(name string, payload any) error {
 	if err != nil {
 		return fmt.Errorf("encode alert: %w", err)
 	}
+	body = append(body, '\n')
 	path := filepath.Join(w.directory, name)
-	if err := os.WriteFile(path, append(body, '\n'), 0o600); err != nil {
+	if err := os.WriteFile(path, body, 0o600); err != nil {
 		return fmt.Errorf("write alert %s: %w", path, err)
 	}
+	go w.deliver(body)
 	return nil
 }
 
