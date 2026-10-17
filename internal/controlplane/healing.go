@@ -384,7 +384,7 @@ func (s *Server) HealRun(ctx context.Context, runID string) {
 		s.finishHealing(ctx, job.ID, job, diagnosis, budget, attempts, exhausted, time.Time{})
 		s.spoolFailAlert(ctx, runID, &HealingAlert{
 			Cause: diagnosis.Cause, Summary: diagnosis.Summary,
-			Fix: healingFixDescription(diagnosis.Cause, diagnosis.Files),
+			Fix:      healingFixDescription(diagnosis.Cause, diagnosis.Files),
 			Attempts: attempts, Budget: budget, NeedsHuman: true, Reason: reason,
 		}, string(diagnosis.Cause))
 	}
@@ -401,7 +401,7 @@ func (s *Server) HealRun(ctx context.Context, runID string) {
 		s.finishHealing(ctx, job.ID, job, diagnosis, budget, attempts, false, retryAfter)
 		s.maybeHealingAlert(ctx, runID, &HealingAlert{
 			Cause: diagnosis.Cause, Summary: diagnosis.Summary,
-			Fix: healingFixDescription(diagnosis.Cause, diagnosis.Files),
+			Fix:      healingFixDescription(diagnosis.Cause, diagnosis.Files),
 			Attempts: attempts, Budget: budget,
 			Reason:     "infra failure: retry scheduled after backoff",
 			RetryAfter: retryAfter.Format(time.RFC3339),
@@ -411,7 +411,7 @@ func (s *Server) HealRun(ctx context.Context, runID string) {
 			log.Printf("healing: requeue job %q: %v", job.ID, err)
 			s.spoolFailAlert(ctx, runID, &HealingAlert{
 				Cause: diagnosis.Cause, Summary: diagnosis.Summary,
-				Fix: healingFixDescription(diagnosis.Cause, diagnosis.Files),
+				Fix:      healingFixDescription(diagnosis.Cause, diagnosis.Files),
 				Attempts: attempts, Budget: budget, NeedsHuman: true,
 				Reason: "self-healing could not requeue: " + err.Error(),
 			}, string(diagnosis.Cause))
@@ -420,7 +420,7 @@ func (s *Server) HealRun(ctx context.Context, runID string) {
 		s.finishHealing(ctx, job.ID, job, diagnosis, budget, attempts, false, time.Time{})
 		s.maybeHealingAlert(ctx, runID, &HealingAlert{
 			Cause: diagnosis.Cause, Summary: diagnosis.Summary,
-			Fix: healingFixDescription(diagnosis.Cause, diagnosis.Files),
+			Fix:      healingFixDescription(diagnosis.Cause, diagnosis.Files),
 			Attempts: attempts, Budget: budget,
 			Reason: "requeued for another attempt",
 		})

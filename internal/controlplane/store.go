@@ -43,8 +43,8 @@ type Store struct {
 	db            *sql.DB
 	// path is the sqlite file, recorded so alert payloads can carry an
 	// inspect command pointing at it.
-	path          string
-	now           func() time.Time
+	path string
+	now  func() time.Time
 }
 
 type Job struct {
