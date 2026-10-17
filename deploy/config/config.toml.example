@@ -24,11 +24,24 @@ max_concurrent_jobs = 1
 # [review]
 # default_profile = "default"
 
-# Pending failure-alert spool (MACH-25). Machinist spools failure alerts,
-# self-healing outcomes and endpoint health alerts here for operators; the
-# external fail.py watcher was retired.
+# Pending failure-alert spool (MACH-25, MACH-70). Machinist spools one
+# fail-<run>.json per failed or timed-out run that self-healing does not fix,
+# optional healing-<run>.json retry notices, and endpoint health alerts here
+# for the external Factory Alerts watcher. Without this section failures
+# alert nowhere.
 [alerts]
 directory = "~/.machinist/alerts/pending"
+# Optional webhook: every spooled alert is POSTed here so the watcher can wake
+# on push instead of polling. The secret is read from an env var or a file and
+# sent in the header; it is never logged. A webhook failure is logged and
+# never fails the run.
+#webhook_url = ""
+#webhook_header = "X-Machinist-Alert-Token"
+#webhook_secret_env = "MACHINIST_ALERT_WEBHOOK_SECRET"
+#webhook_secret_file = ""
+# Also spool a healing-<run>.json when self-healing requeues a job or
+# schedules a backoff retry. Off by default: a retry is not a human alert.
+#healing_alerts = false
 
 # Take a task or issue to a reviewed pull request. With no prompt_file the
 # submitted prompt is passed through; point it at a prompt template (resolved

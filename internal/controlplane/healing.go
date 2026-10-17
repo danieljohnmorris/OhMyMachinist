@@ -300,12 +300,16 @@ func parseInt(value string) (int, error) {
 }
 
 // HealRun runs the self-healing pass for one terminal failed or timed-out
-// run: diagnose, classify, then apply the matching fix. Errors are logged and
-// never fail the completion delivery.
+// run: diagnose, classify, then apply the matching fix. It also owns failure
+// alerting (MACH-70): exactly one pending fail alert is spooled when healing
+// gives up — or straight away for workflow jobs and healing errors — plus the
+// optional healing-<run>.json notice when a retry is scheduled. Errors are
+// logged and never fail the completion delivery.
 func (s *Server) HealRun(ctx context.Context, runID string) {
 	run, err := s.store.GetRun(ctx, runID)
 	if err != nil {
 		log.Printf("healing: read run %q: %v", runID, err)
+		s.alertHealingFailure(ctx, runID, err)
 		return
 	}
 	if !alertingState(run.State) {
@@ -314,31 +318,48 @@ func (s *Server) HealRun(ctx context.Context, runID string) {
 	var jobID string
 	if err := s.store.db.QueryRowContext(ctx, `SELECT job_id FROM runs WHERE id=?`, runID).Scan(&jobID); err != nil {
 		log.Printf("healing: read job for run %q: %v", runID, err)
+		s.alertHealingFailure(ctx, runID, err)
 		return
 	}
 	job, err := s.store.GetJob(ctx, jobID)
 	if err != nil {
-		log.Printf("healing: read job for run %q: %v", runID, err)
-		return
-	}
-	// Workflow steps retry through the operator-controlled workflow actions;
-	// healing requeues plain jobs where a new run is the whole attempt.
-	var workflowRow int
-	if err := s.store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM workflow_jobs WHERE job_id=?`, job.ID).Scan(&workflowRow); err != nil {
-		log.Printf("healing: check workflow for job %q: %v", job.ID, err)
-		return
-	}
-	if workflowRow > 0 {
+		log.Printf("healing: read job %q: %v", jobID, err)
+		s.alertHealingFailure(ctx, runID, err)
 		return
 	}
 	errorText, events, err := s.store.RunFailureContext(ctx, runID)
 	if err != nil {
 		log.Printf("healing: read failure context for run %q: %v", runID, err)
+		s.alertHealingFailure(ctx, runID, err)
 		return
 	}
 	failureText := strings.Join([]string{errorText, run.Summary, strings.Join(decodeEventTranscript(events), "\n")}, "\n")
+	// The keyword classifier is free and always available; it classifies the
+	// paths below that never reach the diagnose executor.
+	cause, _ := classifyFailure(failureText)
+	keyword := string(cause)
+	// Workflow steps retry through the operator-controlled workflow actions;
+	// healing requeues plain jobs where a new run is the whole attempt.
+	var workflowRow int
+	if err := s.store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM workflow_jobs WHERE job_id=?`, job.ID).Scan(&workflowRow); err != nil {
+		log.Printf("healing: check workflow for job %q: %v", job.ID, err)
+		s.alertHealingFailure(ctx, runID, err)
+		return
+	}
+	if workflowRow > 0 {
+		// Workflow jobs cannot be requeued by healing; hand them to the watcher.
+		s.spoolFailAlert(ctx, runID, &HealingAlert{
+			NeedsHuman: true,
+			Reason:     "workflow job: healing does not requeue it, retry through the workflow actions",
+		}, keyword)
+		return
+	}
 	if healLaneFailurePattern.MatchString(failureText) {
 		// The lane paused itself; a retry would meet the same broken checkout.
+		s.spoolFailAlert(ctx, runID, &HealingAlert{
+			NeedsHuman: true,
+			Reason:     "lane checkout is dirty: the lane paused itself and an operator must clear it",
+		}, keyword)
 		return
 	}
 	diagnosis := s.diagnoseFailure(ctx, failureText)
@@ -346,32 +367,61 @@ func (s *Server) HealRun(ctx context.Context, runID string) {
 	attempts, err := s.store.runAttemptCount(ctx, job.ID)
 	if err != nil {
 		log.Printf("healing: count attempts for job %q: %v", job.ID, err)
+		s.alertHealingFailure(ctx, runID, err)
 		return
 	}
 	budget, err := s.healBudget(ctx, job)
 	if err != nil {
 		log.Printf("healing: resolve budget for job %q: %v", job.ID, err)
+		s.alertHealingFailure(ctx, runID, err)
 		return
 	}
 	// Each queued run is one attempt; the budget counts retries after the
 	// first, so the cap on total runs is budget+1.
-	if attempts >= budget+1 {
+	giveUp := func(reason string) {
 		s.finishHealing(ctx, job.ID, job, diagnosis, budget, attempts, true, time.Time{})
+		s.spoolFailAlert(ctx, runID, &HealingAlert{
+			Cause: diagnosis.Cause, Summary: diagnosis.Summary,
+			Fix: healingFixDescription(diagnosis.Cause, diagnosis.Files),
+			Attempts: attempts, Budget: budget, NeedsHuman: true, Reason: reason,
+		}, string(diagnosis.Cause))
+	}
+	if attempts >= budget+1 {
+		giveUp("retry budget exhausted")
 		return
 	}
 	switch diagnosis.Cause {
 	case CauseSpec, CauseSecret:
-		s.finishHealing(ctx, job.ID, job, diagnosis, budget, attempts, false, time.Time{})
+		giveUp("needs a human: " + healingFixDescription(diagnosis.Cause, diagnosis.Files))
 	case CauseInfra:
 		backoff := s.healingBackoff(attempts)
 		retryAfter := s.now().UTC().Add(backoff)
 		s.finishHealing(ctx, job.ID, job, diagnosis, budget, attempts, false, retryAfter)
+		s.maybeHealingAlert(ctx, runID, &HealingAlert{
+			Cause: diagnosis.Cause, Summary: diagnosis.Summary,
+			Fix: healingFixDescription(diagnosis.Cause, diagnosis.Files),
+			Attempts: attempts, Budget: budget,
+			Reason:     "infra failure: retry scheduled after backoff",
+			RetryAfter: retryAfter.Format(time.RFC3339),
+		})
 	default: // CauseStale, CauseTest
 		if err := s.store.HealRequeue(ctx, job.ID, healingFixInstruction(diagnosis.Cause, diagnosis.Files)); err != nil {
 			log.Printf("healing: requeue job %q: %v", job.ID, err)
+			s.spoolFailAlert(ctx, runID, &HealingAlert{
+				Cause: diagnosis.Cause, Summary: diagnosis.Summary,
+				Fix: healingFixDescription(diagnosis.Cause, diagnosis.Files),
+				Attempts: attempts, Budget: budget, NeedsHuman: true,
+				Reason: "self-healing could not requeue: " + err.Error(),
+			}, string(diagnosis.Cause))
 			return
 		}
 		s.finishHealing(ctx, job.ID, job, diagnosis, budget, attempts, false, time.Time{})
+		s.maybeHealingAlert(ctx, runID, &HealingAlert{
+			Cause: diagnosis.Cause, Summary: diagnosis.Summary,
+			Fix: healingFixDescription(diagnosis.Cause, diagnosis.Files),
+			Attempts: attempts, Budget: budget,
+			Reason: "requeued for another attempt",
+		})
 	}
 }
 

@@ -17,21 +17,23 @@
 #   MACHINIST_MANIFEST       manifest written by install.sh (default /etc/machinist/installed.json)
 #   MACHINIST_ALERTS_DIR     Factory Alerts spool (default $HOME/.machinist/alerts/pending)
 #   MACHINIST_DRIFT_STATUS   health/status file (default $HOME/.machinist/drift.json)
+#   MACHINIST_CONFIG         server config checked for [alerts] (default /etc/machinist/config.toml)
 set -eu
 
 manifest="${MACHINIST_MANIFEST:-/etc/machinist/installed.json}"
 alerts_dir="${MACHINIST_ALERTS_DIR:-${MACHINIST_DATA_DIR:-$HOME/.machinist}/alerts/pending}"
 status_file="${MACHINIST_DRIFT_STATUS:-${MACHINIST_DATA_DIR:-$HOME/.machinist}/drift.json}"
+config_file="${MACHINIST_CONFIG:-/etc/machinist/config.toml}"
 
 fail_setup() { printf 'drift-check: %s\n' "$*" >&2; exit 1; }
 
 [ -r "$manifest" ] || fail_setup "manifest $manifest is missing; run deploy/install.sh first"
 command -v python3 >/dev/null 2>&1 || fail_setup "python3 is required"
 
-python3 - "$manifest" "$alerts_dir" "$status_file" <<'PY'
-import hashlib, json, os, subprocess, sys, time
+python3 - "$manifest" "$alerts_dir" "$status_file" "$config_file" <<'PY'
+import hashlib, json, os, re, subprocess, sys, time
 
-manifest_path, alerts_dir, status_file = sys.argv[1:4]
+manifest_path, alerts_dir, status_file, config_file = sys.argv[1:5]
 try:
     manifest = json.load(open(manifest_path))
 except (OSError, ValueError) as err:
@@ -77,8 +79,21 @@ for entry in files:
 
 checked_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
 ok = not drifted
+
+# MACH-70: a config without [alerts] means failures alert nowhere — no file,
+# no webhook. The overlay can carry the section, so both files count.
+def has_alerts_section(path):
+    try:
+        return re.search(r"^\s*\[alerts\]", open(path).read(), re.M) is not None
+    except OSError:
+        return False
+
+overlay = os.environ.get("MACHINIST_CONFIG_OVERLAY") or os.path.join(
+    os.path.dirname(config_file), "config.local.toml")
+alerts_configured = has_alerts_section(config_file) or has_alerts_section(overlay)
+
 status = {"ok": ok, "sha": sha, "checked_at": checked_at, "drifted": drifted,
-          "manifest": manifest_path}
+          "manifest": manifest_path, "alerts_configured": alerts_configured}
 os.makedirs(os.path.dirname(status_file), exist_ok=True)
 tmp = status_file + ".tmp"
 with open(tmp, "w") as handle:
@@ -88,6 +103,10 @@ os.replace(tmp, status_file)
 
 if ok:
     print("drift-check: no drift", file=sys.stderr)
+    if not alerts_configured:
+        print("drift-check: WARNING: %s has no [alerts] section; failed runs "
+              "alert nowhere (no spool file, no webhook) - see docs/configuration.md"
+              % config_file, file=sys.stderr)
     sys.exit(0)
 
 os.makedirs(alerts_dir, exist_ok=True)
@@ -100,6 +119,10 @@ with open(alert_path, "w") as handle:
     handle.write("\n")
 print("drift-check: %d drifted file(s): %s" % (len(drifted), ", ".join(d["path"] for d in drifted)),
       file=sys.stderr)
+if not alerts_configured:
+    print("drift-check: WARNING: %s has no [alerts] section; failed runs "
+          "alert nowhere (no spool file, no webhook) - see docs/configuration.md"
+          % config_file, file=sys.stderr)
 print("drift-check: alert written to %s" % alert_path, file=sys.stderr)
 sys.exit(2)
 PY

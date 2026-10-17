@@ -40,6 +40,9 @@ type Store struct {
 	artifactStore artifacts.Store
 	storageConfig config.ResolvedStorage
 	db            *sql.DB
+	// path is the sqlite file, recorded so alert payloads can carry an
+	// inspect command pointing at it.
+	path          string
 	now           func() time.Time
 }
 
@@ -198,7 +201,7 @@ func OpenStore(path string) (*Store, error) {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 	db.SetMaxOpenConns(1)
-	store := &Store{db: db, now: time.Now}
+	store := &Store{db: db, path: path, now: time.Now}
 	if err := store.initialize(context.Background()); err != nil {
 		db.Close()
 		return nil, err

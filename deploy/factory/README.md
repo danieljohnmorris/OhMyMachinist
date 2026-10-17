@@ -18,9 +18,12 @@ The install snippets below are only for a one-off manual copy.
   secret scan, `machinist/review` commit status).
 - `omp-glm`, `omp-glm-pr`, `codex` — coding-executor wrappers: run the agent in
   the sandbox, then deliver the PR outside it.
-- (MACH-25) `fail.py` and the fail-notify/fail-sweep units were retired:
-  the control plane now diagnoses failures itself, comments on Plane and
-  requeues within the retry budget (see the config `healing` section).
+- (MACH-25, MACH-70) `fail.py` and the fail-notify/fail-sweep units were
+  retired: the control plane now diagnoses failures itself, comments on
+  Plane, requeues within the retry budget and spools the fail alert (run,
+  stage, exit code, stderr tail, diagnosis) for the Factory Alerts watcher
+  (see the config `healing` and `alerts` sections). The `omp-glm-pr` and
+  `codex` wrappers no longer call `fail.py`.
 - `lane-clean.sh` — dirty-lane guard run as `ExecStartPre` on the worker units.
 - `restart-when-idle.sh` — restart a worker unit only when its lane is idle.
 - `install-review-skills.sh` — install the review skills and pinned TruffleHog.
