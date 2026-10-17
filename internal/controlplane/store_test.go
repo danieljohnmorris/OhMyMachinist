@@ -380,6 +380,99 @@ func TestStoreRenewsAndRedispatchesExpiredLease(t *testing.T) {
 	}
 }
 
+// MACH-71: after a control-plane restart a lease that lapsed during the
+// downtime still belongs to its worker. The worker re-attaches with the same
+// token, no other lane is handed the run, and the run finishes on its lane.
+func TestStoreRestartGraceReattachesLeaseInsteadOfRedelivering(t *testing.T) {
+	clock := newTestClock(time.Date(2026, time.August, 25, 12, 0, 0, 0, time.UTC))
+	store := openTestStore(t, filepath.Join(t.TempDir(), "machinist.db"))
+	store.now = clock.Now
+	jobID, err := store.CreateJob(t.Context(), "request", "machinist", "plan", testAgent("plan", "Plan request"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"machinist"}))
+	if err != nil || first == nil {
+		t.Fatalf("first lease = %#v, %v", first, err)
+	}
+	// The control plane goes down; heartbeats fail and the lease lapses.
+	lapsed := clock.Now().Add(-time.Hour).UnixNano()
+	if _, err := store.db.ExecContext(t.Context(), `UPDATE runs SET lease_expires_at=? WHERE id=?`, lapsed, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	// The control plane comes back; the grace window starts at the restart.
+	store.startedAt = clock.Now()
+	store.leaseGrace = 3 * time.Minute
+
+	clock.Advance(20 * time.Second)
+	reattached, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"machinist"}))
+	if err != nil || reattached == nil || reattached.ID != first.ID || reattached.LeaseToken != first.LeaseToken {
+		t.Fatalf("re-attached lease = %#v, %v", reattached, err)
+	}
+	other, err := store.Poll(t.Context(), pollRequest("worker-b", []string{"codex"}, []string{"machinist"}))
+	if err != nil || other != nil {
+		t.Fatalf("second lane stole the run: %#v, %v", other, err)
+	}
+	heartbeat := protocol.Heartbeat{InstanceID: "worker-a", LeaseToken: first.LeaseToken}
+	if err := store.Heartbeat(t.Context(), first.ID, heartbeat); err != nil {
+		t.Fatalf("re-attach heartbeat = %v", err)
+	}
+	assertLeaseExpiry(t, store, first.ID, clock.Now().Add(leaseDuration))
+	completion := protocol.Completion{InstanceID: "worker-a", LeaseToken: first.LeaseToken, State: "succeeded", ExitCode: 0, Result: []byte(`{}`)}
+	if err := store.Complete(t.Context(), first.ID, completion); err != nil {
+		t.Fatalf("complete after re-attach = %v", err)
+	}
+	snapshot, err := store.Snapshot(t.Context())
+	if err != nil || snapshot.Jobs[0].ID != jobID || snapshot.Jobs[0].State != "succeeded" {
+		t.Fatalf("job after re-attach = %#v, %v", snapshot.Jobs, err)
+	}
+}
+
+// MACH-71: with no heartbeat the run is redelivered only once the grace
+// period, measured from the server start, has elapsed.
+func TestStoreRedeliversExpiredLeaseOnlyAfterRestartGrace(t *testing.T) {
+	clock := newTestClock(time.Date(2026, time.August, 25, 12, 0, 0, 0, time.UTC))
+	store := openTestStore(t, filepath.Join(t.TempDir(), "machinist.db"))
+	store.now = clock.Now
+	jobID, err := store.CreateJob(t.Context(), "request", "machinist", "plan", testAgent("plan", "Plan request"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"machinist"}))
+	if err != nil || first == nil {
+		t.Fatalf("first lease = %#v, %v", first, err)
+	}
+	lapsed := clock.Now().Add(-time.Hour).UnixNano()
+	if _, err := store.db.ExecContext(t.Context(), `UPDATE runs SET lease_expires_at=? WHERE id=?`, lapsed, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	store.startedAt = clock.Now()
+	store.leaseGrace = 3 * time.Minute
+
+	// The worker is gone; during the grace nothing is redelivered.
+	other, err := store.Poll(t.Context(), pollRequest("worker-b", []string{"codex"}, []string{"machinist"}))
+	if err != nil || other != nil {
+		t.Fatalf("run redelivered during grace: %#v, %v", other, err)
+	}
+	heartbeat := protocol.Heartbeat{InstanceID: "worker-a", LeaseToken: first.LeaseToken}
+	clock.Advance(3*time.Minute + time.Second)
+	if err := store.Heartbeat(t.Context(), first.ID, heartbeat); !errors.Is(err, ErrLeaseConflict) {
+		t.Fatalf("post-grace heartbeat = %v, want ErrLeaseConflict", err)
+	}
+	completion := protocol.Completion{InstanceID: "worker-a", LeaseToken: first.LeaseToken, State: "succeeded", ExitCode: 0, Result: []byte(`{}`)}
+	if err := store.Complete(t.Context(), first.ID, completion); !errors.Is(err, ErrLeaseConflict) {
+		t.Fatalf("post-grace completion = %v, want ErrLeaseConflict", err)
+	}
+	if _, err := store.ReclaimExpiredLeases(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	assertReclaimedRun(t, store, first.ID, jobID)
+	redispatched, err := store.Poll(t.Context(), pollRequest("worker-b", []string{"codex"}, []string{"machinist"}))
+	if err != nil || redispatched == nil || redispatched.ID != first.ID || redispatched.LeaseToken == first.LeaseToken {
+		t.Fatalf("post-grace lease = %#v, %v", redispatched, err)
+	}
+}
+
 func TestConcurrentPollsReclaimExpiredRunOnce(t *testing.T) {
 	clock := newTestClock(time.Date(2026, time.August, 25, 12, 0, 0, 0, time.UTC))
 	store := openTestStore(t, filepath.Join(t.TempDir(), "machinist.db"))
@@ -1183,6 +1276,10 @@ func openTestStore(t *testing.T, path string) *Store {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Tests inject their own clock; a real-time restart grace would silently
+	// swallow lease expiries. Tests that exercise MACH-71 set startedAt and
+	// leaseGrace explicitly.
+	store.leaseGrace = 0
 	t.Cleanup(func() { _ = store.Close() })
 	return store
 }

@@ -80,6 +80,14 @@ type Server struct {
 	Database          string `toml:"database"`
 	WorkerTokenFile   string `toml:"worker_token_file"`
 	MaxConcurrentJobs *int   `toml:"max_concurrent_jobs"`
+	// LeaseGrace is how long after a control-plane (re)start a run lease that
+	// lapsed — typically while the control plane was down — still belongs to
+	// its worker (MACH-71): the worker can re-attach by heartbeat and the run
+	// is not redelivered to another lane until the grace elapses with no
+	// heartbeat. It is measured from the server start, not from the last
+	// heartbeat before the outage. Empty means 3m; two to five minutes is a
+	// sensible range (a few heartbeat intervals).
+	LeaseGrace string `toml:"lease_grace"`
 	// Auth selects the API authentication mode: "tokens" (default) requires
 	// scoped bearer tokens for machine access, "none" disables auth and is
 	// only allowed on loopback or trusted Tailscale interfaces.
@@ -519,6 +527,19 @@ func (s Server) ConcurrentJobLimit() int {
 		return 0
 	}
 	return *s.MaxConcurrentJobs
+}
+
+// LeaseGraceDuration parses the restart lease grace (MACH-71), defaulting to
+// 3 minutes.
+func (s Server) LeaseGraceDuration() (time.Duration, error) {
+	if s.LeaseGrace == "" {
+		return 3 * time.Minute, nil
+	}
+	parsed, err := time.ParseDuration(s.LeaseGrace)
+	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf("server.lease_grace must be a positive duration: %w", err)
+	}
+	return parsed, nil
 }
 
 func LoadCommand(definitionPath, name string) (ResolvedCommand, error) {

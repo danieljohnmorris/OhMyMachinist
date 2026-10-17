@@ -22,6 +22,8 @@ func TestClassifyFailure(t *testing.T) {
 		{"dead endpoint", "dial tcp 10.0.0.5:443: connect: connection refused", CauseInfra, 0},
 		{"offline host", "resolve: no such host glm.internal", CauseInfra, 0},
 		{"stale checkout", "error: failed to push some refs (non-fast-forward); your branch is behind", CauseStale, 0},
+		{"push rejection despite infra noise", "deliver-pr: FAILED: push to factory/MACH-71-x-abc123 failed: ! [rejected] (non-fast-forward); last log line: dial tcp: i/o timeout", CauseStale, 0},
+		{"push rejection divergent branches", "error: divergent branches detected while pushing the job branch", CauseStale, 0},
 		{"test failure", "--- FAIL: TestSidebar (0.01s)\nFAIL\texample.com/app 0.4s", CauseTest, 0},
 		{"spec problem", "cannot proceed: specification is ambiguous about export formats", CauseSpec, 0},
 		{"secret guard", "secret-file guard refused: .env, prod.env look like real env files", CauseSecret, 2},
@@ -120,6 +122,34 @@ func TestHealRunRequeuesTestFailure(t *testing.T) {
 	}
 	if job.Metadata == nil || job.Metadata.Healing == nil || job.Metadata.Healing.Cause != CauseTest {
 		t.Fatalf("healing metadata missing: %+v", job.Metadata)
+	}
+}
+
+// MACH-71: a non-fast-forward rejection on the job's own branch is stale
+// checkout work (fetch and rebase), even when the same log carries infra
+// noise; it must not be scheduled as an infra retry from scratch.
+func TestHealRunPushRejectionRequeuesInsteadOfInfraBackoff(t *testing.T) {
+	server, store, _ := newHealingTestServer(t)
+	jobID, runID := seedFailedRun(t, store, "https://plane.example/MACH-71/",
+		"deliver-pr: FAILED: push to factory/MACH-71-x-abc123 failed: ! [rejected] (non-fast-forward); last log line: dial tcp 10.0.0.5: i/o timeout", "")
+
+	server.HealRun(context.Background(), runID)
+
+	job, err := store.GetJob(context.Background(), jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.State != "queued" {
+		t.Fatalf("job state = %q, want queued (stale requeue, not infra backoff)", job.State)
+	}
+	if job.Metadata == nil || job.Metadata.Healing == nil || job.Metadata.Healing.Cause != CauseStale {
+		t.Fatalf("healing metadata = %+v, want cause stale", job.Metadata)
+	}
+	if job.Metadata != nil && job.Metadata.Healing != nil && job.Metadata.Healing.RetryAfter != "" {
+		t.Fatalf("infra backoff scheduled for a push rejection: %+v", job.Metadata.Healing)
+	}
+	if !strings.Contains(job.Prompt, "rebase") {
+		t.Fatalf("prompt missing rebase instruction: %s", job.Prompt)
 	}
 }
 
