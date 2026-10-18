@@ -154,7 +154,11 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 	if e != nil {
 		return nil, e
 	}
-	failAlerts := &failAlertWriter{directory: alertsDirectory, webhook: newAlertWebhook(definition.Alerts)}
+	alertsFileMode, e := definition.Alerts.SpoolFileMode()
+	if e != nil {
+		return nil, e
+	}
+	failAlerts := &failAlertWriter{directory: alertsDirectory, webhook: newAlertWebhook(definition.Alerts), fileMode: alertsFileMode}
 	startup := time.Now().UTC()
 	definitions := make([]TriggerDefinition, 0, len(managedTriggers))
 	for _, trigger := range managedTriggers {

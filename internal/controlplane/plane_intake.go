@@ -54,8 +54,11 @@ type planeConfig struct {
 	SyncSince         time.Time
 	WebhookSecret     string
 	AlertsDirectory   string
-	WebhookLiveFile   string
-	QuietWindow       time.Duration
+	// AlertsFileMode is the mode spooled alert files are created with so the
+	// group watcher can read them without root (MACH-72).
+	AlertsFileMode  os.FileMode
+	WebhookLiveFile string
+	QuietWindow     time.Duration
 	// ProjectPrompts overrides the prompt template per Machinist repository,
 	// from the "plane.prompt_template.<repository>" settings.
 	ProjectPrompts map[string]string
@@ -158,6 +161,10 @@ func (p *PlaneIntake) config(ctx context.Context) (planeConfig, error) {
 	if alertsDirectory == "" {
 		alertsDirectory = filepath.Join(p.homeDirectory, "alerts")
 	}
+	alertsFileMode, err := definition.Alerts.SpoolFileMode()
+	if err != nil {
+		return planeConfig{}, err
+	}
 	base := definition.Plane
 	resolved := planeConfig{
 		URL:             firstNonEmptyString(base.URL, os.Getenv("PLANE_URL"), plane.DefaultURL),
@@ -176,6 +183,7 @@ func (p *PlaneIntake) config(ctx context.Context) (planeConfig, error) {
 		Shadow:          boolSetting(settings, "plane.shadow", base.Shadow, true),
 		WebhookSecret:   firstNonEmptyString(setting(settings, "plane.webhook_secret"), base.WebhookSecret, os.Getenv("PLANE_WEBHOOK_SECRET"), os.Getenv("MACHINIST_ISSUE_WEBHOOK_SECRET")),
 		AlertsDirectory: alertsDirectory,
+		AlertsFileMode:  alertsFileMode,
 		WebhookLiveFile: filepath.Join(p.homeDirectory, "plane-webhook-live"),
 		QuietWindow:     defaultPlanePollQuiet,
 	}
@@ -490,7 +498,7 @@ func (p *PlaneIntake) emitStateAlert(ctx context.Context, cfg planeConfig, issue
 		p.recordShadow(ctx, "state-alert", key, alert)
 		return
 	}
-	if err := writeAlertFile(cfg.AlertsDirectory, fmt.Sprintf("plane-%s-%d.json", key, p.now().UnixMilli()), alert); err != nil {
+	if err := writeAlertFile(cfg.AlertsDirectory, fmt.Sprintf("plane-%s-%d.json", key, p.now().UnixMilli()), alert, cfg.AlertsFileMode); err != nil {
 		p.logf("plane intake: write state alert: %v", err)
 	}
 	if err := p.store.PutPlaneAlertState(ctx, PlaneAlertState{IssueID: issue.ID, StateID: issue.StateID, Name: issue.StateName, Group: issue.StateGroup}); err != nil {
@@ -805,7 +813,7 @@ func (p *PlaneIntake) notifyPROpened(ctx context.Context, cfg planeConfig, candi
 		plane.BrowseURL(cfg.URL, cfg.Workspace, candidate.IssueKey), pr, candidate.JobID, repo,
 		plane.RunURL(cfg.UIURL, candidate.JobID), p.now().UTC().Format(time.RFC3339), autoMerge,
 	)
-	if err := writeAlertFile(cfg.AlertsDirectory, fmt.Sprintf("pr-%s-%s.json", candidate.IssueKey, candidate.JobID), alert); err != nil {
+	if err := writeAlertFile(cfg.AlertsDirectory, fmt.Sprintf("pr-%s-%s.json", candidate.IssueKey, candidate.JobID), alert, cfg.AlertsFileMode); err != nil {
 		p.logf("plane intake: write PR alert: %v", err)
 	}
 }
@@ -939,13 +947,15 @@ func labelIDs(issue plane.Issue) []string {
 	return append(ids, issue.LabelIDs...)
 }
 
-// writeAlertFile writes one alert JSON file atomically into the pending spool.
-func writeAlertFile(directory, name string, payload any) error {
+// writeAlertFile writes one alert JSON file atomically into the pending spool
+// with the configured alert file mode (MACH-72): the temporary file is
+// re-chmod-ed before the rename so the umask cannot narrow the group bits.
+func writeAlertFile(directory, name string, payload any, fileMode os.FileMode) error {
 	if directory == "" {
 		return errors.New("alert directory is not configured")
 	}
 	pending := filepath.Join(directory, "pending")
-	if err := os.MkdirAll(pending, 0o755); err != nil {
+	if err := ensureAlertDirectory(pending, fileMode); err != nil {
 		return err
 	}
 	body, err := json.MarshalIndent(payload, "", "  ")
@@ -957,7 +967,11 @@ func writeAlertFile(directory, name string, payload any) error {
 		return nil
 	}
 	temporary := filepath.Join(pending, "."+name+".tmp")
-	if err := os.WriteFile(temporary, append(body, '\n'), 0o600); err != nil {
+	if err := os.WriteFile(temporary, append(body, '\n'), fileMode); err != nil {
+		return err
+	}
+	if err := os.Chmod(temporary, fileMode); err != nil {
+		os.Remove(temporary)
 		return err
 	}
 	return os.Rename(temporary, path)

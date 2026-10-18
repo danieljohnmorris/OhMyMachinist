@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -239,5 +240,72 @@ func TestFailAlertWriterIsIdempotentPerRun(t *testing.T) {
 	}
 	if alerts["fail-run_1.json"].ExitCode != 124 {
 		t.Fatalf("existing alert was overwritten: %#v", alerts)
+	}
+}
+
+// TestFailAlertFileModeSurvivesRestrictiveUmask covers MACH-72: with
+// file_mode = "0640" and a process umask of 077, the spooled fail alert is
+// still group-readable and the spool directory is group-traversable.
+func TestFailAlertFileModeSurvivesRestrictiveUmask(t *testing.T) {
+	directory := t.TempDir()
+	writer := &failAlertWriter{directory: directory, fileMode: 0o640}
+	oldUmask := syscall.Umask(0o077)
+	defer syscall.Umask(oldUmask)
+
+	if err := writer.write(FailAlert{JobID: "job_1", RunID: "run_1", Reason: "failed"}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(directory, "fail-run_1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o640 {
+		t.Fatalf("fail alert mode = %o, want 640 under umask 077", info.Mode().Perm())
+	}
+	dirInfo, err := os.Stat(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirInfo.Mode().Perm() != 0o770 {
+		t.Fatalf("alert directory mode = %o, want 770", dirInfo.Mode().Perm())
+	}
+}
+
+// TestAlertDirectoryKeepsSetgid covers that the writer never strips a setgid
+// bit the installer put on the spool directory (2770, MACH-72).
+func TestAlertDirectoryKeepsSetgid(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o770|os.ModeSetgid); err != nil {
+		t.Fatal(err)
+	}
+	writer := &failAlertWriter{directory: directory, fileMode: 0o640}
+	if err := writer.write(FailAlert{JobID: "job_1", RunID: "run_1", Reason: "failed"}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o770 || info.Mode()&os.ModeSetgid == 0 {
+		t.Fatalf("alert directory mode = %#o, want setgid 2770 preserved", info.Mode())
+	}
+}
+
+// TestWriteAlertFileAppliesFileMode covers the plane/PR/automerge spool
+// writers: the renamed alert file carries the configured mode despite umask.
+func TestWriteAlertFileAppliesFileMode(t *testing.T) {
+	directory := t.TempDir()
+	oldUmask := syscall.Umask(0o077)
+	defer syscall.Umask(oldUmask)
+
+	if err := writeAlertFile(directory, "plane-MACH-1-1.json", map[string]string{"run": "run_1"}, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(directory, "pending", "plane-MACH-1-1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o640 {
+		t.Fatalf("plane alert mode = %o, want 640", info.Mode().Perm())
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -150,6 +151,45 @@ type Alerts struct {
 	// requeues a job or schedules a backoff retry. Off by default: a retry is
 	// not a failure a human has to see.
 	HealingAlerts bool `toml:"healing_alerts"`
+	// FileMode is the octal mode spooled alert files are created with, e.g.
+	// "0640" (default) or "0660", so a group watcher can read them without
+	// root. World-writable and non-octal modes are rejected at load.
+	FileMode string `toml:"file_mode"`
+}
+
+// DefaultAlertFileMode is the spool file mode when [alerts] file_mode is
+// unset: owner read/write, group read.
+const DefaultAlertFileMode = 0o640
+
+// parseAlertFileMode parses an [alerts] file_mode value: an octal string
+// ("0640") that must not be world-writable. Empty selects the default.
+func parseAlertFileMode(value string) (os.FileMode, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return DefaultAlertFileMode, nil
+	}
+	mode, err := strconv.ParseUint(value, 8, 32)
+	if err != nil || mode > 0o777 {
+		return 0, fmt.Errorf("alerts.file_mode %q is not a valid octal mode (e.g. \"0640\")", value)
+	}
+	if mode&0o002 != 0 {
+		return 0, fmt.Errorf("alerts.file_mode %q is world-writable", value)
+	}
+	return os.FileMode(mode), nil
+}
+
+// validate rejects an unusable [alerts] section at config load.
+func (a Alerts) validate() error {
+	if _, err := parseAlertFileMode(a.FileMode); err != nil {
+		return err
+	}
+	return nil
+}
+
+// SpoolFileMode returns the mode spooled alert files are created with; the
+// default is 0640 so a group watcher can read them without root.
+func (a Alerts) SpoolFileMode() (os.FileMode, error) {
+	return parseAlertFileMode(a.FileMode)
 }
 
 // Healing configures the self-healing pass (MACH-25): when a run fails, times
@@ -447,6 +487,9 @@ func loadConfigFile(path string) (Config, error) {
 		if _, err := machinistConfig.ResolveTaskWorkflow(name, ""); err != nil {
 			return Config{}, err
 		}
+	}
+	if err := machinistConfig.Alerts.validate(); err != nil {
+		return Config{}, fmt.Errorf("parse Machinist config %q: %w", absPath, err)
 	}
 	return machinistConfig, nil
 }

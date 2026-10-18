@@ -191,10 +191,55 @@ func (w *failAlertWriter) deliver(body []byte) {
 // directory for an external alert poller, and POSTs each new alert to the
 // optional webhook. Writing is idempotent per run: an existing alert file is
 // left untouched and not re-posted, so a re-delivered completion never
-// duplicates the alert.
+// duplicates the alert. A zero fileMode keeps the default spool mode so
+// writers built without a mode stay group-readable (MACH-72).
 type failAlertWriter struct {
 	directory string
 	webhook   *alertWebhook
+	fileMode  os.FileMode
+}
+
+// spoolMode returns the file mode spooled alerts are created with.
+func (w *failAlertWriter) spoolMode() os.FileMode {
+	if w.fileMode == 0 {
+		return config.DefaultAlertFileMode
+	}
+	return w.fileMode
+}
+
+// alertDirectoryMode widens the spool file mode into a directory mode: the
+// owner can always traverse, and a group that can read spooled files can also
+// enter and manage them (the watcher moves files out of the spool).
+func alertDirectoryMode(fileMode os.FileMode) os.FileMode {
+	mode := fileMode.Perm() | 0o700
+	if mode&0o070 != 0 {
+		mode |= 0o070
+	}
+	return mode
+}
+
+// ensureAlertDirectory creates directory with the alert directory mode and
+// re-applies that mode so the process umask cannot narrow it. MkdirAll leaves
+// an existing directory alone; a setgid bit that is already set is kept.
+func ensureAlertDirectory(directory string, fileMode os.FileMode) error {
+	dirMode := alertDirectoryMode(fileMode)
+	if err := os.MkdirAll(directory, dirMode); err != nil {
+		return fmt.Errorf("create alert directory: %w", err)
+	}
+	info, err := os.Stat(directory)
+	if err != nil {
+		return fmt.Errorf("stat alert directory: %w", err)
+	}
+	mode := dirMode
+	if info.Mode()&os.ModeSetgid != 0 {
+		mode |= os.ModeSetgid
+	}
+	if info.Mode().Perm() != mode.Perm() {
+		if err := os.Chmod(directory, mode); err != nil {
+			return fmt.Errorf("mode alert directory: %w", err)
+		}
+	}
+	return nil
 }
 
 // writeAlert spools one alert under name and wakes the webhook. The boolean
@@ -203,8 +248,8 @@ func (w *failAlertWriter) writeAlert(name string, alert FailAlert) (bool, error)
 	if w == nil || w.directory == "" {
 		return false, nil
 	}
-	if err := os.MkdirAll(w.directory, 0o755); err != nil {
-		return false, fmt.Errorf("create alert directory: %w", err)
+	if err := ensureAlertDirectory(w.directory, w.spoolMode()); err != nil {
+		return false, err
 	}
 	body, err := json.MarshalIndent(alert, "", "  ")
 	if err != nil {
@@ -212,12 +257,18 @@ func (w *failAlertWriter) writeAlert(name string, alert FailAlert) (bool, error)
 	}
 	body = append(body, '\n')
 	path := filepath.Join(w.directory, name)
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, w.spoolMode())
 	if errors.Is(err, fs.ErrExist) {
 		return false, nil
 	}
 	if err != nil {
 		return false, fmt.Errorf("create fail alert %s: %w", path, err)
+	}
+	// The create mode only fills in bits the umask allows; chmod explicitly so
+	// the group bits survive a restrictive umask (MACH-72).
+	if err = file.Chmod(w.spoolMode()); err != nil {
+		file.Close()
+		return false, fmt.Errorf("mode fail alert %s: %w", path, err)
 	}
 	if _, err = file.Write(body); err != nil {
 		file.Close()

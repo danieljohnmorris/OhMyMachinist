@@ -29,8 +29,45 @@ missing, runs `systemctl daemon-reload`, restarts only the services whose unit
 files changed, and records every managed file with its sha256 and the deployed
 git SHA in `/etc/machinist/installed.json`.
 
+## Alert spool access for the watcher (MACH-72)
+
+The alert watcher runs as a separate local user and reads and moves spooled
+alerts (`fail-*`, `healing-*`, `health-*`, plane/PR/automerge notices) out of
+`~/.machinist/alerts/pending` without root:
+
+- **`[alerts] file_mode`** (default `"0640"`): the mode every spooled alert
+  file is created with. World-writable and non-octal values are rejected at
+  config load; the mode is applied explicitly so the process umask cannot
+  narrow the group bits.
+- **`[alerts] group`** (default `"machinist-alerts"`): `install.sh` creates the
+  group if missing, adds the service user and any `[alerts] readers` to it,
+  and creates the alerts directory plus its `pending` and `done`
+  subdirectories as `service-user:group`, mode `2770` (setgid), with default
+  ACLs giving the group `rwx`. Readers who must traverse the service user's
+  home get only `--x` by ACL on the parent directories — never a world-wide
+  chmod.
+- **`/etc/tmpfiles.d/machinist-alerts.conf`**: `d` and `a+` rules written by
+  `install.sh` (and recorded in the install manifest) so the setgid
+  directories and default ACLs survive reboots; `install.sh` runs
+  `systemd-tmpfiles --create` on it. The settings are read from
+  `config.toml` / `config.local.toml`; the conf is rewritten on every
+  install.
+- **Stopgap retirement**: `install.sh` disables and removes the old root
+  `machinist-alerts-perms.path`/`.service` chmod watcher; the drift check
+  flags `alerts_access` drift if they are still installed.
+
+`drift-check.sh` reports an `alerts_access` section: the group exists, the
+spool directories have the expected owner, group, mode and setgid bit, the
+default ACLs are present, the tmpfiles rule is installed, recent alert files
+are group-readable per `file_mode`, and the stopgap units are gone. Any
+mismatch is drift (exit 2, `machinist.drift` alert).
+
 Overridable paths (for tests and unusual hosts): `MACHINIST_FACTORY_DIR`,
-`MACHINIST_SYSTEMD_DIR`, `MACHINIST_CONFIG_DIR`, `MACHINIST_MANIFEST`.
+`MACHINIST_SYSTEMD_DIR`, `MACHINIST_CONFIG_DIR`, `MACHINIST_MANIFEST`,
+`MACHINIST_SERVICE_USER`, `MACHINIST_SERVICE_HOME`, `MACHINIST_TMPFILES_DIR`.
+`MACHINIST_ALERTS_PROVISION=1` runs the spool provisioning in privileged
+contexts that are not uid 0 (containers); a normal `sudo deploy/install.sh`
+does not need it.
 
 The normal deploy and the MACH-24 auto-deploy both call `deploy/install.sh`, so
 no file on the host is hand-edited.
