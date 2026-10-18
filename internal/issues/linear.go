@@ -235,6 +235,83 @@ func (l *LinearClient) SetState(ctx context.Context, key, state string) error {
 	return nil
 }
 
+// LinearRemoteProject is a remote Linear project.
+type LinearRemoteProject struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// Projects lists the workspace's projects, following the cursor until Linear
+// reports no further pages.
+func (l *LinearClient) Projects(ctx context.Context) ([]LinearRemoteProject, error) {
+	query := `query Projects($after: String) { projects(first: 100, after: $after) { nodes { id name } pageInfo { hasNextPage endCursor } } }`
+	var projects []LinearRemoteProject
+	variables := map[string]any{}
+	for {
+		var data struct {
+			Projects struct {
+				Nodes    []LinearRemoteProject `json:"nodes"`
+				PageInfo struct {
+					HasNextPage bool   `json:"hasNextPage"`
+					EndCursor   string `json:"endCursor"`
+				} `json:"pageInfo"`
+			} `json:"projects"`
+		}
+		if err := l.request(ctx, query, variables, &data); err != nil {
+			return nil, err
+		}
+		projects = append(projects, data.Projects.Nodes...)
+		if !data.Projects.PageInfo.HasNextPage || data.Projects.PageInfo.EndCursor == "" {
+			return projects, nil
+		}
+		variables["after"] = data.Projects.PageInfo.EndCursor
+	}
+}
+
+// IssueWithState pairs an issue with the workflow state it sits in. StateType
+// is Linear's state type (triage, backlog, unstarted, started, completed,
+// canceled) or Plane's state group (triage, backlog, started, completed,
+// cancelled).
+type IssueWithState struct {
+	Issue
+	StateName string
+	StateType string
+}
+
+// IssuesInProject lists every issue of the named project together with its
+// state, including completed and canceled issues so a bulk import can skip
+// them explicitly. Unlike the label poll this applies no state filter.
+func (l *LinearClient) IssuesInProject(ctx context.Context, project string) ([]IssueWithState, error) {
+	if err := requiresValue(project, "project"); err != nil {
+		return nil, err
+	}
+	query := fmt.Sprintf(`query Issues($project: String!, $after: String) { issues(filter: {project: {name: {eq: $project}}}, first: %d, after: $after) { nodes { %s } pageInfo { hasNextPage endCursor } } }`,
+		linearPageSize, linearIssueFields)
+	var result []IssueWithState
+	variables := map[string]any{"project": project}
+	for {
+		var data struct {
+			Issues struct {
+				Nodes    []linearIssueNode `json:"nodes"`
+				PageInfo struct {
+					HasNextPage bool   `json:"hasNextPage"`
+					EndCursor   string `json:"endCursor"`
+				} `json:"pageInfo"`
+			} `json:"issues"`
+		}
+		if err := l.request(ctx, query, variables, &data); err != nil {
+			return nil, err
+		}
+		for _, node := range data.Issues.Nodes {
+			result = append(result, IssueWithState{Issue: node.issue(), StateName: node.State.Name, StateType: node.State.Type})
+		}
+		if !data.Issues.PageInfo.HasNextPage || data.Issues.PageInfo.EndCursor == "" {
+			return result, nil
+		}
+		variables["after"] = data.Issues.PageInfo.EndCursor
+	}
+}
+
 type linearState struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`

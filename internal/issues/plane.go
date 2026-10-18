@@ -342,6 +342,106 @@ func (p *PlaneClient) requestOnce(ctx context.Context, method, endpoint string, 
 	return 0, json.Unmarshal(payload, output)
 }
 
+// PlaneRemoteProject is a remote Plane project.
+type PlaneRemoteProject struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Identifier string `json:"identifier"`
+}
+
+// Projects lists the workspace's projects. The client should be a workspace
+// client (NewPlaneWorkspaceClient); a project-bound client still reaches the
+// workspace roster but cannot import unbound projects.
+func (p *PlaneClient) Projects(ctx context.Context) ([]PlaneRemoteProject, error) {
+	var response struct {
+		Results []PlaneRemoteProject `json:"results"`
+	}
+	if err := p.request(ctx, http.MethodGet, p.workspaceEndpoint("projects/"), nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Results, nil
+}
+
+// planeIssueRow is one listed project issue with its state payload.
+type planeIssueRow struct {
+	ID          string          `json:"id"`
+	SequenceID  int64           `json:"sequence_id"`
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	URL         string          `json:"url"`
+	State       json.RawMessage `json:"state"`
+}
+
+// IssuesInProject lists every issue of the client's project together with its
+// state, including completed and cancelled issues so a bulk import can skip
+// them explicitly. Keys are the human ticket form (MACH-5) whenever Plane
+// reports the sequence number. Pages are followed until a page yields no new
+// issues, so imports survive servers that ignore the page parameter.
+func (p *PlaneClient) IssuesInProject(ctx context.Context) ([]IssueWithState, error) {
+	var identifier string
+	var result []IssueWithState
+	seen := map[string]bool{}
+	for page := 1; ; page++ {
+		query := url.Values{"expand": []string{"state"}, "page": []string{strconv.Itoa(page)}}
+		var response struct {
+			Results []planeIssueRow `json:"results"`
+		}
+		if err := p.request(ctx, http.MethodGet, p.endpoint("issues/?", query.Encode()), nil, &response); err != nil {
+			return nil, err
+		}
+		var fresh int
+		for _, row := range response.Results {
+			if seen[row.ID] {
+				continue
+			}
+			seen[row.ID] = true
+			fresh++
+			key := row.ID
+			if row.SequenceID > 0 {
+				if identifier == "" {
+					var err error
+					if identifier, err = p.projectIdentifier(ctx); err != nil {
+						return nil, err
+					}
+				}
+				key = identifier + "-" + strconv.FormatInt(row.SequenceID, 10)
+			}
+			name, group, err := p.stateNameAndGroup(ctx, row.State)
+			if err != nil {
+				return nil, fmt.Errorf("plane issue %s state: %w", row.ID, err)
+			}
+			result = append(result, IssueWithState{
+				Issue:     Issue{ID: row.ID, Key: key, Title: row.Name, Description: row.Description, URL: firstNonEmpty(row.URL, p.IssueURL(row.ID))},
+				StateName: name, StateType: group,
+			})
+		}
+		if fresh == 0 {
+			return result, nil
+		}
+	}
+}
+
+// stateNameAndGroup decodes an issue's state payload. Expanded states are
+// objects; unexpanded ones are UUIDs resolved through the project state list.
+func (p *PlaneClient) stateNameAndGroup(ctx context.Context, raw json.RawMessage) (string, string, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", "", nil
+	}
+	var state planeState
+	if err := json.Unmarshal(raw, &state); err == nil && (state.Name != "" || state.Group != "") {
+		return state.Name, state.Group, nil
+	}
+	var id string
+	if err := json.Unmarshal(raw, &id); err != nil || id == "" {
+		return "", "", nil
+	}
+	resolved, err := p.stateByID(ctx, p.config.ProjectID, id)
+	if err != nil {
+		return "", "", err
+	}
+	return resolved.Name, resolved.Group, nil
+}
+
 type planeLabel struct {
 	Name string `json:"name"`
 }
