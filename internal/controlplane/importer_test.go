@@ -339,3 +339,24 @@ func TestImportRouteAuth(t *testing.T) {
 		t.Fatalf("import with bogus token status = %d, want 401", response.StatusCode)
 	}
 }
+
+// A remote project name that only case-insensitively matches its configured
+// tracker key ("Omarchy Mobile" vs OMM) must import under the configured key:
+// approval and the project views look the project up exactly.
+func TestImportStampsConfiguredTrackerProject(t *testing.T) {
+	definition := config.Config{Tracker: config.Tracker{Projects: map[string]config.TrackerProject{
+		"OMM": {Repository: "mobile"},
+	}}}
+	result := importResult{Source: "plane", Project: "Omarchy Mobile", sourceRepository: "mobile", Tickets: []importTicket{{Key: "OMM-1", State: "backlog"}}}
+	stampTrackerProject(definition, &result)
+	if result.Project != "OMM" {
+		t.Fatalf("project = %q, want OMM", result.Project)
+	}
+	// No covering entry: the remote name survives untouched.
+	definition = config.Config{Tracker: config.Tracker{Projects: map[string]config.TrackerProject{}}}
+	unrouted := importResult{Source: "plane", Project: "Omarchy Mobile", sourceRepository: "mobile", Tickets: []importTicket{{Key: "OMM-2", State: "backlog"}}}
+	stampTrackerProject(definition, &unrouted)
+	if unrouted.Project != "Omarchy Mobile" {
+		t.Fatalf("project = %q, want the remote name", unrouted.Project)
+	}
+}

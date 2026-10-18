@@ -214,6 +214,7 @@ func (s *Server) planImport(ctx context.Context, definition config.Config, sourc
 		}
 		tickets, err := s.planTickets(ctx, listed)
 		result.Tickets = tickets
+		stampTrackerProject(definition, &result)
 		return result, err
 	case importSourceLinear:
 		connections := definition.IssueSources.LinearProjects()
@@ -238,9 +239,27 @@ func (s *Server) planImport(ctx context.Context, definition config.Config, sourc
 		}
 		tickets, err := s.planTickets(ctx, listed)
 		result.Tickets = tickets
+		stampTrackerProject(definition, &result)
 		return result, err
 	default:
 		return result, fmt.Errorf("%w: unknown source %q: want %q or %q", errInvalidImport, source, importSourcePlane, importSourceLinear)
+	}
+}
+
+// stampTrackerProject names the imported tickets' project after the
+// [tracker.projects] entry covering the source repository, when there is one.
+// Ticket approval and the project views look the project up exactly, so the
+// raw remote name ("Omarchy Mobile") only matches a config key ("OMM") by
+// coincidence; the routed spelling is the one the config defines.
+func stampTrackerProject(definition config.Config, result *importResult) {
+	if result.sourceRepository == "" || len(result.Tickets) == 0 {
+		return
+	}
+	for name, project := range definition.Tracker.Projects {
+		if strings.EqualFold(strings.TrimSpace(project.Repository), result.sourceRepository) {
+			result.Project = strings.ToUpper(strings.TrimSpace(name))
+			return
+		}
 	}
 }
 
