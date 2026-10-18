@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -47,10 +46,13 @@ type Store struct {
 	artifactStore artifacts.Store
 	storageConfig config.ResolvedStorage
 	db            *sql.DB
-	// path is the sqlite file, recorded so alert payloads can carry an
-	// inspect command pointing at it.
+	// path is the sqlite file (or Postgres URL), recorded so alert payloads
+	// can carry an inspect command pointing at it.
 	path string
-	now  func() time.Time
+	// dialect names the storage adapter: dialectSQLite (default) or
+	// dialectPostgres. Schema init and the pragma-safe helpers branch on it.
+	dialect string
+	now     func() time.Time
 	// startedAt is when this store (and with it the control plane) came up;
 	// leaseGrace counts from here, not from the last pre-restart heartbeat.
 	startedAt time.Time
@@ -224,58 +226,35 @@ type CreateJobOptions struct {
 	IssueKey string
 }
 
-func OpenStore(path string) (*Store, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, fmt.Errorf("create database directory: %w", err)
-	}
-	db, err := sql.Open("sqlite", path)
+// OpenStore opens the configured database: a filesystem path opens SQLite
+// (the default), a postgres:// or postgresql:// URL opens the Postgres
+// adapter. See dialect.go and store_postgres.go.
+func OpenStore(database string) (*Store, error) {
+	store, err := openStoreDialect(database)
 	if err != nil {
-		return nil, fmt.Errorf("open database: %w", err)
-	}
-	db.SetMaxOpenConns(1)
-	store := &Store{db: db, path: path, now: time.Now, startedAt: time.Now().UTC(), leaseGrace: defaultLeaseGrace}
-	if err := store.initialize(context.Background()); err != nil {
-		db.Close()
 		return nil, err
 	}
-	resolved, e := (config.Config{}).ResolveStorage(filepath.Join(filepath.Dir(path), "artifacts"))
+	dir := "."
+	if !postgresDialect(database) {
+		dir = filepath.Dir(database)
+	}
+	resolved, e := (config.Config{}).ResolveStorage(filepath.Join(dir, "artifacts"))
 	if e != nil {
-		db.Close()
+		store.db.Close()
 		return nil, e
 	}
 	if e = store.configureStorage(resolved); e != nil {
-		db.Close()
+		store.db.Close()
 		return nil, e
 	}
 	return store, nil
 }
 
-func (s *Store) Close() error { return s.db.Close() }
-
-func (s *Store) initialize(ctx context.Context) error {
-	const schemaVersion = 13
-	var version int
-	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
-		return fmt.Errorf("read database schema version: %w", err)
-	}
-	if version > schemaVersion {
-		return fmt.Errorf("database schema version %d is newer than supported version %d", version, schemaVersion)
-	}
-	if version < 1 {
-		if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys=OFF;
-DROP TABLE IF EXISTS github_trigger_requests; DROP TABLE IF EXISTS trigger_state; DROP TABLE IF EXISTS schedule_state;
-DROP TABLE IF EXISTS known_repositories; DROP TABLE IF EXISTS worker_repositories; DROP TABLE IF EXISTS workers;
-DROP TABLE IF EXISTS runs; DROP TABLE IF EXISTS jobs; PRAGMA foreign_keys=ON;`); err != nil {
-			return fmt.Errorf("replace legacy database schema: %w", err)
-		}
-	}
-	if version == 1 {
-		if err := s.upgradeToVersionTwo(ctx); err != nil {
-			return fmt.Errorf("upgrade database schema to version 2: %w", err)
-		}
-	}
-	const schema = `
-PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
+// baseSchema is the schema shared verbatim by both adapters; the Postgres
+// path translates it (postgresDDL) instead of keeping a second copy that
+// would drift. PRAGMA lines and trigger bodies are SQLite-only and are
+// stripped or replaced per dialect.
+const baseSchema = `
 CREATE TABLE IF NOT EXISTS jobs (
  id TEXT PRIMARY KEY, prompt TEXT NOT NULL, repository TEXT NOT NULL, command TEXT NOT NULL,
  title TEXT NOT NULL DEFAULT '',
@@ -344,7 +323,37 @@ END;
 CREATE TRIGGER IF NOT EXISTS job_state_history_update AFTER UPDATE OF state ON jobs WHEN old.state<>new.state
 BEGIN
  INSERT INTO job_state_history(job_id,state,changed_at) VALUES (new.id,new.state,new.updated_at);
-END;`
+END;
+`
+
+func (s *Store) Close() error { return s.db.Close() }
+
+func (s *Store) initialize(ctx context.Context) error {
+	const schemaVersion = 13
+	if s.dialect == dialectPostgres {
+		return s.initializePostgres(ctx, schemaVersion)
+	}
+	var version int
+	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		return fmt.Errorf("read database schema version: %w", err)
+	}
+	if version > schemaVersion {
+		return fmt.Errorf("database schema version %d is newer than supported version %d", version, schemaVersion)
+	}
+	if version < 1 {
+		if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys=OFF;
+DROP TABLE IF EXISTS github_trigger_requests; DROP TABLE IF EXISTS trigger_state; DROP TABLE IF EXISTS schedule_state;
+DROP TABLE IF EXISTS known_repositories; DROP TABLE IF EXISTS worker_repositories; DROP TABLE IF EXISTS workers;
+DROP TABLE IF EXISTS runs; DROP TABLE IF EXISTS jobs; PRAGMA foreign_keys=ON;`); err != nil {
+			return fmt.Errorf("replace legacy database schema: %w", err)
+		}
+	}
+	if version == 1 {
+		if err := s.upgradeToVersionTwo(ctx); err != nil {
+			return fmt.Errorf("upgrade database schema to version 2: %w", err)
+		}
+	}
+	schema := "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;\n" + baseSchema
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("initialize database: %w", err)
 	}
@@ -403,14 +412,14 @@ END;`
 // addRunWIP records where a cancelled attempt's uncommitted lane work was
 // saved (MACH-65). Existing rows keep an empty value.
 func (s *Store) addRunWIP(ctx context.Context) error {
-	var columns int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name='wip'`).Scan(&columns); err != nil {
+	present, err := s.columnExists(ctx, "runs", "wip")
+	if err != nil {
 		return err
 	}
-	if columns > 0 {
+	if present {
 		return nil
 	}
-	_, err := s.db.ExecContext(ctx, `ALTER TABLE runs ADD COLUMN wip TEXT NOT NULL DEFAULT ''`)
+	_, err = s.db.ExecContext(ctx, `ALTER TABLE runs ADD COLUMN wip TEXT NOT NULL DEFAULT ''`)
 	return err
 }
 
@@ -419,11 +428,11 @@ func (s *Store) addRunWIP(ctx context.Context) error {
 func (s *Store) addTicketProjectColumns(ctx context.Context) error {
 	// Legacy and fresh databases create tickets with these columns via
 	// ticketSchema below; only an existing pre-13 table needs the ALTER.
-	var tables int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tickets'`).Scan(&tables); err != nil {
+	tables, err := s.tableExists(ctx, "tickets")
+	if err != nil {
 		return err
 	}
-	if tables == 0 {
+	if !tables {
 		return nil
 	}
 	for _, column := range []string{
@@ -431,11 +440,11 @@ func (s *Store) addTicketProjectColumns(ctx context.Context) error {
 		"pr_url TEXT NOT NULL DEFAULT ''",
 	} {
 		name, _, _ := strings.Cut(column, " ")
-		var present int
-		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('tickets') WHERE name=?`, name).Scan(&present); err != nil {
+		present, err := s.columnExists(ctx, "tickets", name)
+		if err != nil {
 			return err
 		}
-		if present > 0 {
+		if present {
 			continue
 		}
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE tickets ADD COLUMN `+column); err != nil {
@@ -455,11 +464,11 @@ func (s *Store) addJobResolution(ctx context.Context) error {
 		"resolved_at TEXT",
 	} {
 		name, _, _ := strings.Cut(column, " ")
-		var present int
-		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name=?`, name).Scan(&present); err != nil {
+		present, err := s.columnExists(ctx, "jobs", name)
+		if err != nil {
 			return err
 		}
-		if present > 0 {
+		if present {
 			continue
 		}
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN `+column); err != nil {
@@ -471,26 +480,26 @@ func (s *Store) addJobResolution(ctx context.Context) error {
 
 // addRunSkills records the skills a run loaded as JSON on the run row.
 func (s *Store) addRunSkills(ctx context.Context) error {
-	var columns int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name='skills'`).Scan(&columns); err != nil {
+	present, err := s.columnExists(ctx, "runs", "skills")
+	if err != nil {
 		return err
 	}
-	if columns > 0 {
+	if present {
 		return nil
 	}
-	_, err := s.db.ExecContext(ctx, `ALTER TABLE runs ADD COLUMN skills TEXT NOT NULL DEFAULT ''`)
+	_, err = s.db.ExecContext(ctx, `ALTER TABLE runs ADD COLUMN skills TEXT NOT NULL DEFAULT ''`)
 	return err
 }
 
 func (s *Store) addJobTitle(ctx context.Context) error {
-	var columns int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name='title'`).Scan(&columns); err != nil {
+	present, err := s.columnExists(ctx, "jobs", "title")
+	if err != nil {
 		return err
 	}
-	if columns > 0 {
+	if present {
 		return nil
 	}
-	_, err := s.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN title TEXT NOT NULL DEFAULT ''`)
+	_, err = s.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN title TEXT NOT NULL DEFAULT ''`)
 	return err
 }
 
@@ -502,11 +511,11 @@ func (s *Store) addJobAttemptColumns(ctx context.Context) error {
 		{"attempt", "INTEGER NOT NULL DEFAULT 1"},
 		{"superseded_by", "TEXT NOT NULL DEFAULT ''"},
 	} {
-		var present int
-		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name=?`, column.name).Scan(&present); err != nil {
+		present, err := s.columnExists(ctx, "jobs", column.name)
+		if err != nil {
 			return err
 		}
-		if present > 0 {
+		if present {
 			continue
 		}
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN `+column.name+` `+column.definition); err != nil {
@@ -1194,7 +1203,7 @@ func (s *Store) poll(ctx context.Context, request protocol.PollRequest, maxConcu
 	}
 	repositories := stringSet(request.Repositories)
 	for repository := range repositories {
-		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO known_repositories(repository) VALUES(?)`, repository); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO known_repositories(repository) VALUES(?) ON CONFLICT DO NOTHING`, repository); err != nil {
 			return nil, fmt.Errorf("store known repository: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO worker_repositories(worker_instance,repository) VALUES(?,?)`, request.InstanceID, repository); err != nil {
