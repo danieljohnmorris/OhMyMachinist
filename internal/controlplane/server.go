@@ -991,6 +991,10 @@ func limitRequestBody(response http.ResponseWriter, request *http.Request, limit
 }
 
 func writeJSON(response http.ResponseWriter, status int, body any) {
+	// API responses are dynamic and some carry per-instance credentials (the
+	// CSRF token in status); a heuristically cached response 401s every read
+	// until the entry expires or the user hard-refreshes.
+	response.Header().Set("Cache-Control", "no-store")
 	response.Header().Set("Content-Type", "application/json")
 	response.WriteHeader(status)
 	_ = json.NewEncoder(response).Encode(body)
