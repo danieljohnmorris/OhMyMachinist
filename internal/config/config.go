@@ -749,6 +749,13 @@ func applyWorkerDefaultsWithHostname(worker Worker, getHostname func() (string, 
 	return worker, nil
 }
 
+// isDatabaseURL reports whether the configured database is a connection URL
+// (Postgres) rather than a SQLite file path.
+func isDatabaseURL(database string) bool {
+	trimmed := strings.TrimSpace(database)
+	return strings.HasPrefix(trimmed, "postgres://") || strings.HasPrefix(trimmed, "postgresql://")
+}
+
 func applyServerDefaults(server Server) (Server, error) {
 	if server.Listen == "" {
 		server.Listen = "127.0.0.1:7331"
@@ -759,6 +766,10 @@ func applyServerDefaults(server Server) (Server, error) {
 			return Server{}, fmt.Errorf("find user home directory: %w", err)
 		}
 		server.Database = filepath.Join(home, filepath.FromSlash(defaultServerDirName), "machinist.db")
+	} else if isDatabaseURL(server.Database) {
+		// A postgres:// (or postgresql://) URL is a connection string, not a
+		// filesystem path: it is used verbatim and never home-expanded.
+		server.Database = strings.TrimSpace(server.Database)
 	} else {
 		path, err := resolveConfigPath(server.Database, server.configDir)
 		if err != nil {
