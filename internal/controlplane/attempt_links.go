@@ -54,6 +54,12 @@ func (s *Store) linkTicketAttempts(ctx context.Context) error {
 				return fmt.Errorf("link attempt %s: %w", job.ID, err)
 			}
 		}
+		// A failed attempt superseded by a later one is bookkeeping, not an
+		// outstanding failure: record why it ended so raw counts can tell the
+		// difference. Guarded so a ticket-level resolution is never clobbered.
+		if _, err := s.db.ExecContext(ctx, `UPDATE jobs SET resolution_kind='superseded', resolution_detail=? WHERE state='failed' AND resolution_kind='' AND superseded_by<>''`, "retried by a later attempt"); err != nil {
+			return fmt.Errorf("record superseded attempts: %w", err)
+		}
 	}
 	return nil
 }

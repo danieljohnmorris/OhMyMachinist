@@ -240,6 +240,21 @@ or by an issue link in its body. For external trackers, resolution moves the
 ticket to Done and posts a comment. Built-in tickets are marked Done with a
 comment and their linked finished jobs are resolved in one transaction.
 
+Merged-PR detection only covers repositories listed in `[github.repositories]`.
+A ticket whose pull request lands in an unlisted repo — the job ran in a
+machinist repository whose GitHub slug is not configured — is never detected,
+so list every repository that carries ticket work.
+
+Two watchdogs run inside the periodic state pass. At startup, failures from
+the last 24 hours that carry no healing record — the ones a crash or reboot
+silently orphaned between recording the failure and the heal pass — are
+re-healed once; superseded attempts, already-requeued jobs (same repository
+and title), and anything outside the window are left alone. And whenever runs
+are queued but no worker has heartbeated for ten minutes, a
+`worker-starvation.json` alert spools into the alerts directory (removed
+again once a worker returns), catching the rebooted-with-no-workers case that
+endpoint health checks cannot see.
+
 Point issue webhooks at `POST /api/v1/webhooks/issues`. Plane uses HMAC-SHA256
 in `X-Signature`; Linear uses `Linear-Signature` over the raw body and requires
 a `webhookTimestamp` within five minutes of server time. The shared secret

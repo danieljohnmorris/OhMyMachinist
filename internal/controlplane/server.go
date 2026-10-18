@@ -61,6 +61,7 @@ type Server struct {
 	health               config.Health
 	healthChecker        *healthChecker
 	healingEvery         time.Duration
+	healSweepPending     bool
 	autoMergeEvery       time.Duration
 	deployRunner         shellRunner
 	planeIntake          *PlaneIntake
@@ -197,6 +198,7 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 		health:            definition.Health,
 		healthChecker:     &healthChecker{alerts: failAlerts, timeout: 10 * time.Second, now: time.Now},
 		healingEvery:      30 * time.Second,
+		healSweepPending:  true,
 		autoMergeEvery:    defaultAutoMergeEvery,
 		deployRunner:      bashRunner{},
 		maxConcurrentJobs: maxConcurrentJobs, workerToken: workerToken, csrfToken: csrfToken,
@@ -359,6 +361,15 @@ func sleep(ctx context.Context, duration time.Duration) bool {
 }
 
 func (s *Server) maintainState(ctx context.Context) error {
+	if s.healSweepPending {
+		s.healSweepPending = false
+		if err := s.sweepUnhealedFailures(ctx); err != nil {
+			log.Printf("healing sweep: %v", err)
+		}
+	}
+	if err := s.checkWorkerLiveness(ctx); err != nil {
+		log.Printf("worker liveness check: %v", err)
+	}
 	_, reclaimErr := s.store.ReclaimExpiredLeases(ctx)
 	_, pruneErr := s.store.PruneSupersededWorkers(ctx, s.store.now().UTC().Add(-workerAvailabilityWindow))
 	return errors.Join(reclaimErr, pruneErr)
