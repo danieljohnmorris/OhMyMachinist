@@ -106,8 +106,8 @@ func (w *failAlertWriter) writeNamed(name string, payload any) error {
 	if w == nil || w.directory == "" {
 		return nil
 	}
-	if err := os.MkdirAll(w.directory, 0o755); err != nil {
-		return fmt.Errorf("create alert directory: %w", err)
+	if err := ensureAlertDirectory(w.directory, w.spoolMode()); err != nil {
+		return err
 	}
 	body, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
@@ -115,8 +115,13 @@ func (w *failAlertWriter) writeNamed(name string, payload any) error {
 	}
 	body = append(body, '\n')
 	path := filepath.Join(w.directory, name)
-	if err := os.WriteFile(path, body, 0o600); err != nil {
+	if err := os.WriteFile(path, body, w.spoolMode()); err != nil {
 		return fmt.Errorf("write alert %s: %w", path, err)
+	}
+	// The create mode is narrowed by the umask; re-apply it explicitly so the
+	// group watcher keeps read access (MACH-72).
+	if err := os.Chmod(path, w.spoolMode()); err != nil {
+		return fmt.Errorf("mode alert %s: %w", path, err)
 	}
 	go w.deliver(body)
 	return nil
@@ -127,8 +132,8 @@ func (w *failAlertWriter) remove(name string) error {
 	if w == nil || w.directory == "" {
 		return nil
 	}
-	if err := os.MkdirAll(w.directory, 0o755); err != nil {
-		return fmt.Errorf("create alert directory: %w", err)
+	if err := ensureAlertDirectory(w.directory, w.spoolMode()); err != nil {
+		return err
 	}
 	if err := os.Remove(filepath.Join(w.directory, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err

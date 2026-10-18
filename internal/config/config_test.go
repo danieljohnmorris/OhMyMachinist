@@ -601,3 +601,63 @@ path = "repo"
 		t.Fatalf("worker = %#v, want base values preserved", worker)
 	}
 }
+
+func TestAlertFileModeDefaultAndResolution(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "config.toml")
+	writeTestFile(t, filepath.Join(directory, "token"), "secret")
+	writeTestFile(t, path, "[server]\nworker_token_file = \"token\"\n\n[alerts]\ndirectory = \"alerts/pending\"\n")
+
+	machinistConfig, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mode, err := machinistConfig.Alerts.SpoolFileMode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode != 0o640 {
+		t.Fatalf("default file mode = %o, want 640", mode)
+	}
+}
+
+func TestLoadConfigAcceptsConfiguredAlertFileModes(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "config.toml")
+	writeTestFile(t, filepath.Join(directory, "token"), "secret")
+	writeTestFile(t, path, "[server]\nworker_token_file = \"token\"\n\n[alerts]\ndirectory = \"alerts/pending\"\nfile_mode = \"0660\"\n")
+
+	machinistConfig, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode, err := machinistConfig.Alerts.SpoolFileMode(); err != nil || mode != 0o660 {
+		t.Fatalf("file mode = %o, %v", mode, err)
+	}
+}
+
+func TestLoadConfigRejectsInvalidAlertFileModes(t *testing.T) {
+	for _, fileMode := range []string{"999", "0812", "0640x", "-0640"} {
+		directory := t.TempDir()
+		path := filepath.Join(directory, "config.toml")
+		writeTestFile(t, filepath.Join(directory, "token"), "secret")
+		writeTestFile(t, path, "[server]\nworker_token_file = \"token\"\n\n[alerts]\ndirectory = \"alerts/pending\"\nfile_mode = \""+fileMode+"\"\n")
+
+		if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "not a valid octal mode") {
+			t.Fatalf("file_mode %q: error = %v, want invalid octal mode failure", fileMode, err)
+		}
+	}
+}
+
+func TestLoadConfigRejectsWorldWritableAlertFileModes(t *testing.T) {
+	for _, fileMode := range []string{"0642", "0666", "0777"} {
+		directory := t.TempDir()
+		path := filepath.Join(directory, "config.toml")
+		writeTestFile(t, filepath.Join(directory, "token"), "secret")
+		writeTestFile(t, path, "[server]\nworker_token_file = \"token\"\n\n[alerts]\ndirectory = \"alerts/pending\"\nfile_mode = \""+fileMode+"\"\n")
+
+		if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "world-writable") {
+			t.Fatalf("file_mode %q: error = %v, want world-writable failure", fileMode, err)
+		}
+	}
+}

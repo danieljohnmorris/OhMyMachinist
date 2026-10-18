@@ -528,7 +528,7 @@ func (s *Server) writeAutoMergeAlert(ctx context.Context, entry AutoMergeJob, al
 	if cfg.AlertsDirectory == "" {
 		return nil
 	}
-	return writeAlertFile(cfg.AlertsDirectory, fmt.Sprintf("automerge-%s-%s.json", entry.IssueKey, entry.JobID), alert)
+	return writeAlertFile(cfg.AlertsDirectory, fmt.Sprintf("automerge-%s-%s.json", entry.IssueKey, entry.JobID), alert, cfg.AlertsFileMode)
 }
 
 // runAutoMergeHealthCheck executes the policy health check with {sha} bound

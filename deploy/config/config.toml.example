@@ -36,6 +36,22 @@ max_concurrent_jobs = 1
 # alert nowhere.
 [alerts]
 directory = "~/.machinist/alerts/pending"
+# Mode spooled alert files are created with (MACH-72). "0640" (owner rw,
+# group r) lets the alert watcher read and move the files without root;
+# "0660" also lets it edit them. World-writable and non-octal values are
+# rejected at config load, and the mode is applied explicitly so the process
+# umask cannot narrow the group bits. deploy/install.sh provisions the group,
+# the setgid spool directories and the tmpfiles rule; see ../README.md.
+#file_mode = "0640"
+# Reader group for the alert watcher (MACH-72). The watcher user and any
+# readers below are added to it, and the spool directories are owned by
+# service-user:group with mode 2770 plus default ACLs. Default
+# "machinist-alerts". Provisioned by deploy/install.sh, not by the server.
+#group = "machinist-alerts"
+# Optional extra local users allowed to read the spool; install.sh adds them
+# to the group and grants them --x by ACL on the parent directories they need
+# to traverse (never a world-wide chmod).
+#readers = []
 # Optional webhook: every spooled alert is POSTed here so the watcher can wake
 # on push instead of polling. The secret is read from an env var or a file and
 # sent in the header; it is never logged. A webhook failure is logged and
