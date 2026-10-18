@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Tabs } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -7,12 +8,48 @@ import { PageHeading, QuietState } from "@/components/ui/page-heading";
 import { loadReviewProfile, loadReviewProfiles, previewReviewProfile, saveReviewDefaultProfile, saveReviewProfileSetting } from "@/review-settings";
 import { createToken, loadTokens, revokeToken } from "@/api-tokens";
 import { ProjectSkillsCard, saveSetting } from "@/project-skills-card";
+import { FactorySettings } from "@/factory";
+import { WorkflowsPanel } from "@/catalog";
+import { SkillsPanel } from "./skills.jsx";
 
-// Settings: per-project review profile for the built-in PR review (MACH-32).
-// The review runs from a resolved profile: repo .machinist/review.yaml at the
-// PR base ref > this project setting > the global default > the shipped
-// default profile.
-export function SettingsPage({ repositories = [], csrfToken }) {
+// Settings sections and their deep-link routes: Factory, Workflows and Skills
+// are configuration surfaces, so they live here instead of the primary nav.
+// The ids are the hash routes (#/<id>), which keeps every old link working.
+const SETTINGS_SECTIONS = [
+  { id: "settings", label: "General" },
+  { id: "factory", label: "Factory" },
+  { id: "workflows", label: "Workflows" },
+  { id: "skills", label: "Skills" },
+];
+
+// SettingsPage is the configuration page: one heading, a section tab strip,
+// and the active section. `section` is the route view ("settings", "factory",
+// "workflows" or "skills"); the legacy #/commands view maps to "workflows".
+export function SettingsPage({ section = "settings", repositories = [], csrfToken, factory, factoryLoaded, factoryError, onFactoryChanged }) {
+  const active = SETTINGS_SECTIONS.some((item) => item.id === section) ? section : "settings";
+  return <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
+    <PageHeading title="Settings" description="Factory, workflow and skills configuration. Review profiles for the built-in pull-request review run after every PR opens: lane checks, parallel reviewer passes, then a docs pass — all driven by the resolved profile." />
+    <Tabs
+      label="Settings sections"
+      selected={active}
+      onSelect={(id) => { window.location.hash = `#/${id}`; }}
+      items={SETTINGS_SECTIONS.map(({ id, label }) => ({
+        id,
+        label,
+        content: active !== id ? null
+          : id === "factory" ? <FactorySettings factory={factory} csrfToken={csrfToken} onChanged={onFactoryChanged} loaded={factoryLoaded} error={factoryError} />
+          : id === "workflows" ? <WorkflowsPanel />
+          : id === "skills" ? <SkillsPanel csrfToken={csrfToken} />
+          : <GeneralSettings repositories={repositories} csrfToken={csrfToken} />,
+      }))}
+    />
+  </div>;
+}
+
+// GeneralSettings holds the settings that are neither factory, workflow nor
+// skills: per-project review profiles, project skills, the Plane intake and
+// API tokens.
+function GeneralSettings({ repositories = [], csrfToken }) {
   const [project, setProject] = useState("");
   const [mode, setMode] = useState("library");
   const [profileName, setProfileName] = useState("");
@@ -132,8 +169,7 @@ export function SettingsPage({ repositories = [], csrfToken }) {
     }
   };
 
-  return <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
-    <PageHeading title="Settings" description="Review profiles for the built-in pull-request review. The review runs after every PR opens: lane checks, parallel reviewer passes, then a docs pass — all driven by the resolved profile." />
+  return <>
     <Card className="p-4 sm:p-5">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
         <label className="flex flex-1 items-center gap-2">
@@ -210,7 +246,7 @@ export function SettingsPage({ repositories = [], csrfToken }) {
     <ProjectSkillsCard project={project} csrfToken={csrfToken} />
     <PlaneIntakeCard csrfToken={csrfToken} project={project} />
     <TokensCard csrfToken={csrfToken} />
-  </div>;
+  </>;
 }
 
 // PlaneIntakeCard edits the built-in Plane intake configuration. Every value

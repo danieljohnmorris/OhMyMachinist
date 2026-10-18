@@ -4,14 +4,15 @@ import { Badge } from "@/components/ui/badge";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { PageHeading, QuietState } from "@/components/ui/page-heading";
+import { QuietState } from "@/components/ui/page-heading";
 import { formatTimestamp } from "./task-display.jsx";
 import { installSkill, loadSkills, pinSkill, shortVersion, skillInstalledAt, skillUpdatedAt, uninstallSkill, updateSkill, uploadSkill } from "./skills.js";
 
-// Skills page (MACH-51): the installed versioned skills library. Install from a
-// URL, directory or zip (or upload a .zip/SKILL.md), update to the recorded
-// source's latest version, pin/rollback the active version, and uninstall.
-export function SkillsPage({ csrfToken }) {
+// SkillsPanel is the Skills section inside Settings (MACH-51): the installed
+// versioned skills library. Install from a URL, directory or zip (or upload a
+// .zip/SKILL.md), update to the recorded source's latest version, pin/rollback
+// the active version, and uninstall.
+export function SkillsPanel({ csrfToken }) {
   const [skills, setSkills] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState("");
@@ -97,9 +98,7 @@ export function SkillsPage({ csrfToken }) {
     });
   };
 
-  return <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
-    <PageHeading title="Skills" description="The versioned skills library runs load at execution time. A run composes repository, project and global lists into the installed versions here." />
-
+  return <>
     <Card className="space-y-4 p-4 sm:p-5">
       <form className="flex flex-col gap-3 sm:flex-row sm:items-end" onSubmit={submitInstall}>
         <label className="flex-1 space-y-1">
@@ -194,5 +193,5 @@ export function SkillsPage({ csrfToken }) {
             </tbody>
           </table>
         </Card>}
-  </div>;
+  </>;
 }

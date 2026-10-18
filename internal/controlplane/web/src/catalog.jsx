@@ -41,7 +41,9 @@ export function WorkersPage({ workers, loaded, error, csrfToken, onChanged }) {
 
 const displayName = name => String(name).replaceAll("_", " ").replaceAll("-", " ").replace(/^./, c => c.toUpperCase());
 
-export function CommandsPage() {
+// WorkflowsPanel is the Workflows section inside Settings: the workflow and
+// command definitions with their prompt templates.
+export function WorkflowsPanel() {
   const definitions = useDefinitions();
   const [selection, setSelection] = useState("");
   const data = definitions.value;
@@ -49,7 +51,7 @@ export function CommandsPage() {
   const selected = names.includes(selection) ? selection : names[0];
   const steps = data.workflows?.[selected] || [];
   const commands = steps.map(step => data.commands.find(command => command.name === step.name));
-  return <Page title="Workflows" description="Choose how a run gets done, from one agent to a sequence of steps.">
+  return <>
     {definitions.loading ? <Loading /> : definitions.error ? <Failure value={definitions.error} /> : names.length ? <div className="max-w-4xl space-y-6">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <label className="block w-full max-w-sm"><span className="field-label">Workflow</span><select className="field-control" value={selected} onChange={event=>setSelection(event.target.value)}>{names.map(name=><option key={name} value={name}>{displayName(name)}</option>)}</select></label>
@@ -69,7 +71,7 @@ export function CommandsPage() {
         {id:"help",label:"Template help",content:<TemplateHelp />},
       ]} />
     </div> : data.commands.length ? <div className="max-w-4xl space-y-5"><p className="text-sm text-muted-foreground">These commands can run directly. To give a run multiple steps, add a workflow in config.toml.</p><pre className="rounded-lg border border-border p-4 text-sm">{`[workflows.deliver]\nsteps = ["${data.commands[0].name}"]`}</pre>{data.commands.map(command=><Card key={command.name} className="p-5"><h2 className="text-sm font-semibold">{displayName(command.name)}</h2><p className="mt-1 text-xs text-muted-foreground">{command.executor} · {command.timeout}</p></Card>)}</div> : <Empty value="No workflows configured." />}
-  </Page>;
+  </>;
 }
 
 function TemplateHelp() {
