@@ -26,7 +26,7 @@ export function ProjectSkillsCard({ project, csrfToken }) {
 
   useEffect(() => {
     const controller = new AbortController();
-    loadSkills(controller.signal).then(setLibrary).catch(() => setLibrary([]));
+    loadSkills(csrfToken, controller.signal).then(setLibrary).catch(() => setLibrary([]));
     return () => controller.abort();
   }, []);
 
@@ -42,7 +42,7 @@ export function ProjectSkillsCard({ project, csrfToken }) {
     setError("");
     setNotice("");
     setPreview(null);
-    loadSettings(controller.signal)
+    loadSettings(controller.signal, csrfToken)
       .then((settings) => {
         if (sequence.current !== current) return;
         setEntries(parseSkillsSetting(settings[`skills.project.${project}`] || ""));
@@ -95,7 +95,7 @@ export function ProjectSkillsCard({ project, csrfToken }) {
     setError("");
     setPreview(null);
     try {
-      const settings = await loadSettings();
+      const settings = await loadSettings(undefined, csrfToken);
       const globalEntries = parseSkillsSetting(settings["skills.default"] || "");
       setPreview(composeSkills({ projectEntries: entries, globalEntries, kind, skills: library }));
     } catch (previewError) {
@@ -181,8 +181,10 @@ export function ProjectSkillsCard({ project, csrfToken }) {
 }
 
 // loadSettings reads every stored setting key/value pair.
-export async function loadSettings(signal) {
-  const response = await fetch("/api/v1/settings", { headers: { Accept: "application/json" }, signal });
+export async function loadSettings(signal, csrfToken) {
+  const headers = { Accept: "application/json" };
+  if (csrfToken) headers["X-Machinist-CSRF"] = csrfToken;
+  const response = await fetch("/api/v1/settings", { headers, signal });
   if (!response.ok) throw new Error(`Settings request failed (${response.status})`);
   const body = await response.json().catch(() => ({}));
   return body.settings && typeof body.settings === "object" ? body.settings : {};
