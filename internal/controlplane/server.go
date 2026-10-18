@@ -389,6 +389,8 @@ func (s *Server) routes() (http.Handler, error) {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/trackers", s.authorizeRead(s.trackersHandler))
+	mux.HandleFunc("GET /api/v1/import/preview", s.authorizeRead(s.importPreviewHandler))
+	mux.HandleFunc("POST /api/v1/import", s.authorizeSubmission(s.importHandler))
 	mux.HandleFunc("GET /api/v1/tickets", s.authorizeRead(s.listTicketsHandler))
 	mux.HandleFunc("POST /api/v1/tickets", s.authorizeSubmission(s.createTicketHandler))
 	mux.HandleFunc("GET /api/v1/tickets/{key}", s.authorizeRead(s.getTicketHandler))

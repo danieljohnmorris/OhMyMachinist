@@ -100,3 +100,17 @@ export function commentOnTicket(csrfToken, key, body) {
 export function deleteTicket(csrfToken, key) {
   return request(ticketPath(key), { method: "DELETE", csrfToken, fallback: `Unable to delete ${key}` });
 }
+
+// previewImport reads the import plan without writing: without a project the
+// remote project roster, with one the tickets that would be created.
+export async function previewImport(csrfToken, source, project = "") {
+  const params = new URLSearchParams({ source });
+  if (project) params.set("project", project);
+  return request(`/api/v1/import/preview?${params.toString()}`, { fallback: "Unable to preview the import", csrfToken });
+}
+
+// runImport copies a project's issues into the tickets table; the response
+// carries created/skipped counts and the per-ticket plan.
+export function runImport(csrfToken, source, project) {
+  return request("/api/v1/import", { method: "POST", body: { source, project }, csrfToken, fallback: "Unable to run the import" });
+}

@@ -54,6 +54,7 @@ All requests and responses are `application/json`. Errors are
 | GET | `/api/v1/skills/{name}` | One installed skill with every version. |
 | GET | `/api/v1/plane/intake` | Plane intake settings, shadow-mode decisions and imported script jobs. |
 | GET | `/api/v1/trackers` | Default tracker and configured status for built-in, Plane and Linear. |
+| GET | `/api/v1/import/preview?source=plane\|linear&project=NAME` | Bulk import plan. Without `project`: the source's remote projects (`projects`, each with `repository` when a configured `[issue_sources.*]` entry covers it). With `project`: the tickets that would be created (`key`, `title`, mapped `state`, `action` of `create`/`skip` and `reason` of `exists`/`completed`). Writes nothing. |
 | GET | `/api/v1/tickets` | Built-in tickets, newest first, as `{"tickets": [...]}`. |
 | GET | `/api/v1/tickets/{key}` | One built-in ticket with comments and its factory `job_id`. |
 
@@ -96,6 +97,7 @@ returns 400; unknown keys return 404; conflicting changes return 409.
 | POST | `/api/v1/jobs/{id}/move-to-queue` | Stop a running or stalled job's current attempt and requeue it as the next attempt on the same card. Returns `{"job_id": "job_…"}` (the new attempt id); a repeated call returns the same id. The attempt is cancelled with the reason `moved to queue`, the lane's uncommitted work (tracked and untracked) is saved by the worker that held the lease and recorded on the cancelled attempt, and the new attempt carries the prior transcript and waits at the back of the queue. |
 | DELETE | `/api/v1/jobs/{id}` | Delete a terminal job. |
 | POST | `/api/v1/tickets` | Create a built-in draft. Body: `title`, optional `description`, `repository`, `project` (a configured `[tracker.projects]` name; unknown projects return 400). |
+| POST | `/api/v1/import` | One-shot import of a configured Plane or Linear project into the built-in tickets table. Body: `source` (`plane`\|`linear`), `project` (remote project name), optional `dry_run` (plans without writing). Keys are the external ticket keys (ENG-123, MACH-5); completed or canceled states are skipped, started maps to `in_progress`, everything else to `backlog`. Idempotent: existing keys are skipped. Returns `created`/`skipped` counts and the per-ticket plan. |
 | PATCH | `/api/v1/tickets/{key}` | Edit `title`, `description`, `repository`, or planning/completion `state`. `project` is fixed at creation. |
 | DELETE | `/api/v1/tickets/{key}` | Delete an unapproved ticket; linked tickets return 409. |
 | DELETE | `/api/v1/workers/{instance_id}` | Forget a registered worker. Unknown workers return 404; a worker running a job returns 409. |

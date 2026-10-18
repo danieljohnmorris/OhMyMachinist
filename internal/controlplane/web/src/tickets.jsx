@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { PageHeading, QuietState } from "@/components/ui/page-heading";
 import { approveTicket, canApproveTicket, commentOnTicket, createTicket, deleteTicket, getTicket, listTickets, loadTrackers, ticketStateLabel, ticketStateTone, updateTicket } from "./tickets-api.js";
+import { ImportSection } from "./import-section.jsx";
 import { cardLinks, trackerNames } from "./run-links.js";
 import { relativeTime, State } from "./task-display.jsx";
 import { linkifyText } from "./linkify.js";
@@ -26,7 +27,9 @@ export function TicketsPage({ csrfToken, repositories = [], jobs = [], ticketKey
   useEffect(() => {
     let cancelled = false;
     let timer;
-    setLoaded(false);
+    // A revision refresh (a mutation or import landed) updates in place; only
+    // the first load shows the loading state, so cards keep their state.
+    if (!revision) setLoaded(false);
     setSelected(null);
     if (ticketKey) setTracker("builtin");
     async function refresh() {
@@ -81,6 +84,7 @@ export function TicketsPage({ csrfToken, repositories = [], jobs = [], ticketKey
     {error && <Alert>{error} <button className="ml-2 underline" onClick={() => setRevision(value => value + 1)}>Retry</button></Alert>}
     {!loaded ? <QuietState title="Loading tickets" description="Reading the tracker and its delivery history." role="status" /> : ticketKey ? selected ?
       <TicketDetail key={selected.key} ticket={selected} csrfToken={csrfToken} repositories={repositories} pending={pending} mutate={mutate} /> : <QuietState title="Ticket unavailable" description="Check the key or return to the ticket list." /> : tracker === "builtin" ? <>
+      <ImportSection csrfToken={csrfToken} trackers={trackers} onImported={() => setRevision((value) => value + 1)} />
       {creating && <Card className="p-5"><h2 className="mb-4 text-base font-semibold">New ticket</h2><TicketForm projects={projects} repositories={repositories} pending={pending === "create"} onSave={create} onCancel={() => setCreating(false)} /></Card>}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <label className="w-full sm:max-w-sm"><span className="sr-only">Search tickets</span><input className="field-control" placeholder="Search title, key, or repository" value={search} onChange={event => setSearch(event.target.value)} /></label>
