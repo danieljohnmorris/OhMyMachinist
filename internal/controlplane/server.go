@@ -450,7 +450,16 @@ func (s *Server) routes() (http.Handler, error) {
 	mux.HandleFunc("POST /mcp", s.handleMCP)
 	mux.HandleFunc("GET /mcp", methodNotAllowed)
 	mux.HandleFunc("DELETE /mcp", methodNotAllowed)
-	mux.Handle("/", http.FileServer(http.FS(dist)))
+	// index.html references content-hashed assets; a cached stale index
+	// requests a deleted bundle and 404s the whole app until a hard refresh.
+	// Assets keep their hashed names and may cache; the entry point may not.
+	static := http.FileServer(http.FS(dist))
+	mux.Handle("/", http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/" || request.URL.Path == "/index.html" {
+			response.Header().Set("Cache-Control", "no-cache")
+		}
+		static.ServeHTTP(response, request)
+	}))
 	return securityHeaders(mux), nil
 }
 
