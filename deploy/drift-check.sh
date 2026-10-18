@@ -117,7 +117,7 @@ def read_alerts_settings(path):
     return settings
 
 alerts_cfg = {}
-for path in (overlay, config_file):  # the overlay wins
+for path in (config_file, overlay):  # base first; the overlay wins
     alerts_cfg.update(read_alerts_settings(path))
 
 def service_user_name():
@@ -185,9 +185,12 @@ def check_alerts_access():
         if stat_module.S_IMODE(info.st_mode) != 0o2770:
             reasons.append("alert directory %s mode is %04o, want setgid 2770"
                            % (directory, stat_module.S_IMODE(info.st_mode)))
-        getfacl = subprocess.run(
-            ["getfacl", "-p", "--absolute-names", directory], capture_output=True)
-        if getfacl.returncode == 0:
+        try:
+            getfacl = subprocess.run(
+                ["getfacl", "-p", "--absolute-names", directory], capture_output=True)
+        except FileNotFoundError:
+            getfacl = None  # not installed; install.sh also skips ACLs then
+        if getfacl is not None and getfacl.returncode == 0:
             text = getfacl.stdout.decode()
             if "default:group:%s:rwx" % group not in text:
                 reasons.append("alert directory %s lacks the default ACL for group %s"

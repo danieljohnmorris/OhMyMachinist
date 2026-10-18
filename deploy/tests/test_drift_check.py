@@ -3,6 +3,7 @@ import getpass
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -142,6 +143,25 @@ class DriftCheckTest(unittest.TestCase):
         self.assertIn("does not exist", status["alerts_access"]["reasons"][0])
         alerts = list(self.alerts.glob("drift-*.json"))
         self.assertEqual(len(alerts), 1)
+
+    def test_alerts_settings_overlay_wins_over_base_config(self):
+        env = self.provision_alerts()
+        overlay = pathlib.Path(self.tmp.name) / "config.local.toml"
+        overlay.write_text('[alerts]\ngroup = "no-such-group"\n')
+        result = self.run_check({**env, "MACHINIST_CONFIG_OVERLAY": str(overlay)})
+        self.assertEqual(result.returncode, 2, result.stderr)
+        reasons = json.loads(self.status.read_text())["alerts_access"]["reasons"]
+        self.assertIn("alert group no-such-group does not exist", reasons[0])
+
+    def test_alerts_access_skips_acl_probe_when_getfacl_is_missing(self):
+        env = self.provision_alerts()
+        shim = self.root / "path-shim"
+        shim.mkdir(exist_ok=True)
+        for binary in ("bash", "python3", "git"):
+            os.symlink(shutil.which(binary), shim / binary)
+        result = self.run_check({**env, "PATH": str(shim)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads(self.status.read_text())["alerts_access"]["ok"])
 
     def test_alerts_access_drifts_when_dir_mode_changes(self):
         env = self.provision_alerts()
