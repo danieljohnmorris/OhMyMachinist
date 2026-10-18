@@ -424,9 +424,7 @@ function RunCard({ job, priors = [], onCancelJob, onMoveToQueue }) {
       </div>
       {resolution && <p className="text-xs text-success">{resolution}</p>}
       {priors.length === 0 && attemptBadges(job)}
-    </a><RunCardLinks job={job} />{priors.length > 0 && <div className="flex items-center border-t border-border px-4 py-2.5">
-      <Badge tone="surface" tabIndex={0} aria-label={`${attemptCount} attempts: ${priors.map((prior) => `${stateLabel(prior.state)} ${relativeTime(attemptTime(prior))}`).join(", ")}`} title={[...priors].reverse().map((prior) => `${stateLabel(prior.state)} · ${relativeTime(attemptTime(prior))}`).join("\n")}>{attemptCount} attempts</Badge>
-    </div>}{canCancelJob(job) && <div className="flex justify-end px-4 pb-4"><Button size="sm" variant="outline" aria-label={`Cancel run ${title}`} onClick={() => onCancelJob(job)}>Cancel</Button></div>}{canMoveToQueue(job) && <div className="flex justify-end px-4 pb-4"><MoveToQueueButton job={job} onMoveToQueue={onMoveToQueue} /></div>}</Card>;
+    </a><RunCardFooter job={job} attemptCount={attemptCount} priors={priors} />{canCancelJob(job) && <div className="flex justify-end px-4 pb-4"><Button size="sm" variant="outline" aria-label={`Cancel run ${title}`} onClick={() => onCancelJob(job)}>Cancel</Button></div>}{canMoveToQueue(job) && <div className="flex justify-end px-4 pb-4"><MoveToQueueButton job={job} onMoveToQueue={onMoveToQueue} /></div>}</Card>;
 }
 
 function RunCardLinks({ job }) {
@@ -435,6 +433,19 @@ function RunCardLinks({ job }) {
   return <div className="flex flex-wrap gap-x-4 gap-y-2 border-t border-border px-4 py-2.5 text-xs">
     {ticket && <a className="text-primary underline" href={ticket.href} target={ticket.external ? "_blank" : undefined} rel={ticket.external ? "noopener noreferrer" : undefined}>{ticket.text}</a>}
     {pullRequest && <a className="text-primary underline" href={pullRequest.href} target="_blank" rel="noopener noreferrer">{pullRequest.text}</a>}
+  </div>;
+}
+
+// RunCardFooter is one shared bottom row for the ticket/PR links and the
+// attempts badge; stacking them as separate bordered rows made every card
+// with history two rows taller than its content.
+function RunCardFooter({ job, attemptCount, priors }) {
+  const { ticket, pullRequest } = cardLinks(job);
+  if (!ticket && !pullRequest && priors.length === 0) return null;
+  return <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-border px-4 py-2.5 text-xs">
+    {ticket && <a className="text-primary underline" href={ticket.href} target={ticket.external ? "_blank" : undefined} rel={ticket.external ? "noopener noreferrer" : undefined}>{ticket.text}</a>}
+    {pullRequest && <a className="text-primary underline" href={pullRequest.href} target="_blank" rel="noopener noreferrer">{pullRequest.text}</a>}
+    {priors.length > 0 && <Badge tone="surface" className="ml-auto" tabIndex={0} aria-label={`${attemptCount} attempts: ${priors.map((prior) => `${stateLabel(prior.state)} ${relativeTime(attemptTime(prior))}`).join(", ")}`} title={[...priors].reverse().map((prior) => `${stateLabel(prior.state)} · ${relativeTime(attemptTime(prior))}`).join("\n")}>{attemptCount} attempts</Badge>}
   </div>;
 }
 
