@@ -6,24 +6,21 @@ import { State, friendlyName, relativeTime, stateLabel } from "./task-display.js
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "@fontsource-variable/manrope";
-import { Activity, BarChart3, Bot, Factory, FolderGit2, GitBranch, LayoutDashboard, Moon, Play, Plus, Server, Settings, Sparkles, Sun, Table2, Ticket, TimerReset, X } from "lucide-react";
+import { Activity, BarChart3, FolderGit2, GitBranch, LayoutDashboard, Moon, Play, Plus, Server, Settings, Sun, Table2, Ticket, X } from "lucide-react";
 import { Analytics } from "@/analytics";
-import { CommandsPage, WorkersPage } from "@/catalog";
-import { FactoryControls, FactoryPage } from "@/factory";
+import { FactoryControls } from "@/factory";
 import { SettingsPage } from "@/settings";
 import { ProjectsPage } from "@/projects";
-import { SkillsPage } from "@/skills.jsx";
 import { Badge } from "@/components/ui/badge";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { PageHeading } from "@/components/ui/page-heading";
 import { cn } from "@/lib/utils";
-import { routeFromHash } from "@/routes";
+import { routeFromHash, settingsHash } from "@/routes";
 import { attemptTime, boardCardTimestamp, boardColumns, boardDateFilters, boardFiltersFromHash, boardHash, canCancelJob, canMoveToQueue, collapseIssueAttempts, collapseJobsByTicket, currentRun, filterBoardJobs, filterJobsByDate, groupEntriesByBoardColumn, groupJobsByBoardColumn, jobCounts, jobDisplayTitle, resolutionLabel } from "@/runs-board";
 import { groupEntriesByProject, groupJobsByProject } from "@/project";
 import { createStatusLoader } from "@/status-loader";
-import { TriggersPage } from "@/triggers";
 import "./styles.css";
 
 
@@ -260,11 +257,6 @@ function App() {
           <a href="#/tickets" aria-current={view === "tickets" ? "page" : undefined} className={cn("nav-item", view === "tickets" && "nav-item-active")}><Ticket className="size-4" /><span>Tickets</span></a>
           <a href="#/projects" aria-current={view === "projects" ? "page" : undefined} className={cn("nav-item", view === "projects" && "nav-item-active")}><FolderGit2 className="size-4" /><span>Projects</span></a>
           <a href="#/analytics" aria-current={view === "analytics" ? "page" : undefined} className={cn("nav-item", view === "analytics" && "nav-item-active")}><BarChart3 className="size-4" /><span>Analytics</span></a>
-          <a href="#/workers" aria-current={view === "workers" ? "page" : undefined} className={cn("nav-item", view === "workers" && "nav-item-active")}><Server className="size-4" /><span>Workers</span></a>
-          <a href="#/triggers" aria-current={view === "triggers" ? "page" : undefined} className={cn("nav-item", view === "triggers" && "nav-item-active")}><TimerReset className="size-4" /><span>Triggers</span><span className="ml-auto text-xs text-muted-foreground">{status.triggers?.length || 0}</span></a>
-          <a href="#/factory" aria-current={view === "factory" ? "page" : undefined} className={cn("nav-item", view === "factory" && "nav-item-active")}><Factory className="size-4" /><span>Factory</span></a>
-          <a href="#/workflows" aria-current={["commands", "workflows"].includes(view) ? "page" : undefined} className={cn("nav-item", ["commands", "workflows"].includes(view) && "nav-item-active")}><Bot className="size-4" /><span>Workflows</span></a>
-          <a href="#/skills" aria-current={view === "skills" ? "page" : undefined} className={cn("nav-item", view === "skills" && "nav-item-active")}><Sparkles className="size-4" /><span>Skills</span></a>
           <a href="#/settings" aria-current={view === "settings" ? "page" : undefined} className={cn("nav-item", view === "settings" && "nav-item-active")}><Settings className="size-4" /><span>Settings</span></a>
         </nav>
         <div className="hidden border-t border-border pt-3 md:block">
@@ -279,7 +271,7 @@ function App() {
       </aside>
 
       <main className="workshop min-w-0 flex-1">
-        {view === "projects" ? <ProjectsPage repositories={repositories} commands={status.commands} csrfToken={status.csrf_token} /> : view === "tickets" ? <TicketsPage csrfToken={status.csrf_token} repositories={status.repositories} jobs={status.jobs} ticketKey={route.ticketKey} onChanged={refreshStatus} /> : view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={displayJob} jobs={status.jobs} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} onCancelJob={cancelJob} onMoveToQueue={moveJobToQueue} onAttemptChange={selectTaskAttempt} tab={route.tab} onTabChange={selectTaskTab} /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : view === "workers" ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} csrfToken={status.csrf_token} onChanged={refreshStatus} /> : view === "factory" ? <FactoryPage factory={status.factory} csrfToken={status.csrf_token} onChanged={refreshStatus} loaded={statusLoaded} error={statusError} /> : view === "triggers" ? <TriggersPage triggers={status.triggers || []} loaded={statusLoaded} error={statusError} /> : view === "skills" ? <SkillsPage csrfToken={status.csrf_token} /> : view === "settings" ? <SettingsPage repositories={status.repositories || []} csrfToken={status.csrf_token} /> : ["commands", "workflows"].includes(view) ? <CommandsPage /> : <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
+        {view === "projects" ? <ProjectsPage repositories={repositories} commands={status.commands} csrfToken={status.csrf_token} /> : view === "tickets" ? <TicketsPage csrfToken={status.csrf_token} repositories={status.repositories} jobs={status.jobs} ticketKey={route.ticketKey} onChanged={refreshStatus} /> : view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={displayJob} jobs={status.jobs} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} onCancelJob={cancelJob} onMoveToQueue={moveJobToQueue} onAttemptChange={selectTaskAttempt} tab={route.tab} onTabChange={selectTaskTab} /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : view === "settings" ? <SettingsPage section={route.section} onSectionChange={(next) => { window.location.hash = settingsHash(next); }} repositories={status.repositories || []} csrfToken={status.csrf_token} workers={status.workers} triggers={status.triggers || []} factory={status.factory} loaded={statusLoaded} error={statusError} onChanged={refreshStatus} /> : <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
           <PageHeading title="Runs" description="Describe the work. Review the result.">
             <div className="flex items-center gap-2">
               <Button className="text-xs!" onClick={() => setComposerOpen(true)}><Plus className="size-4" />New run</Button>
@@ -337,7 +329,7 @@ function RunComposer({ title,setTitle,sourceURL,setSourceURL,choices,repositorie
     <div className="flex items-center justify-between border-b border-border px-5 py-3"><h2 className="text-sm font-semibold">New run</h2><Button variant="ghost" size="icon" onClick={close} aria-label="Close new run form"><X className="size-4" /></Button></div>
     <form onSubmit={submit} className="space-y-5 p-5">
       <label className="block space-y-2"><span className="text-sm font-medium">What do you want done?</span><textarea autoFocus aria-describedby={specHintID} className="field-control min-h-32 resize-y" value={prompt} onChange={e=>setPrompt(e.target.value)} placeholder="Describe a change or paste an issue link…" required={!sourceURL.trim() || !isTask} /></label>
-      <p id={specHintID} className="text-xs leading-5 text-muted-foreground">{isTask ? <>This is your run’s spec: describe what to build and what counts as done. Prompt templates reference it as <code>{"{{task.spec}}"}</code>. A link on its own is saved as the source instead. <a href="#/workflows" className="text-primary underline">Template variables</a></> : "Write the instructions for this command. Its prompt template receives them as {{machinist.prompt}}."}</p>
+      <p id={specHintID} className="text-xs leading-5 text-muted-foreground">{isTask ? <>This is your run’s spec: describe what to build and what counts as done. Prompt templates reference it as <code>{"{{task.spec}}"}</code>. A link on its own is saved as the source instead. <a href="#/settings/workflows" className="text-primary underline">Template variables</a></> : "Write the instructions for this command. Its prompt template receives them as {{machinist.prompt}}."}</p>
       <section className="text-sm">
         <div className="grid gap-4 sm:grid-cols-2">
           <label><span className="field-label">{isTask ? "Workflow" : "Command"}</span><select className="field-control" value={selection} onChange={e=>setSelection(e.target.value)} required>{choices.map(c=><option key={c.value} value={c.value}>{c.label}</option>)}</select></label>

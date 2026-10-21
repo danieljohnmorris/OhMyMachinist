@@ -4,7 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { PageHeading, QuietState } from "@/components/ui/page-heading";
+import { QuietState } from "@/components/ui/page-heading";
 import { busyLaneCount, factoryActions, factoryStateLabel, factoryStateSummary, jobCapMax, laneStateLabel, laneTone, stepJobCap } from "@/factory-controls";
 import { capacityLabel } from "@/concurrency";
 import { relativeTime } from "@/task-display.jsx";
@@ -195,12 +195,11 @@ function LaneSlots({ factory, csrfToken, onChanged }) {
   </section>;
 }
 
-// FactoryPage wraps the panel with the page chrome.
-export function FactoryPage({ factory, csrfToken, onChanged, loaded, error }) {
-  return <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
-    <PageHeading title="Factory" description="Pause or resume the factory, set how many jobs run at once, and manage lanes." />
+// FactorySection is the factory panel without page chrome; Settings hosts it.
+export function FactorySection({ factory, csrfToken, onChanged, loaded, error }) {
+  return <>
     {error && <Alert>{error}</Alert>}
     {!loaded && !error ? <Card><QuietState title="Reading the factory" description="Fetching the current dispatch state." role="status" /></Card>
       : <FactoryControls factory={factory} csrfToken={csrfToken} onChanged={onChanged} />}
-  </div>;
+  </>;
 }

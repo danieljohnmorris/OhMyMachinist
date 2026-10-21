@@ -50,9 +50,9 @@ test("skills page lists skills with references and runs actions against the API"
     }
   });
 
-  const { SkillsPage } = await server.ssrLoadModule("/src/skills.jsx");
+  const { SkillsSection } = await server.ssrLoadModule("/src/skills.jsx");
   root = createRoot(document.getElementById("root"));
-  await act(async () => root.render(React.createElement(SkillsPage, { csrfToken: "csrf" })));
+  await act(async () => root.render(React.createElement(SkillsSection, { csrfToken: "csrf" })));
 
   await eventually(() => assert.match(document.body.textContent, /feature-dev:code-reviewer/));
   assert.match(document.body.textContent, /abc123/, "active version is shown");

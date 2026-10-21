@@ -4,6 +4,11 @@ import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { PageHeading, QuietState } from "@/components/ui/page-heading";
+import { Tabs } from "@/components/ui/tabs";
+import { WorkflowsSection, WorkersSection } from "@/catalog";
+import { FactorySection } from "@/factory";
+import { SkillsSection } from "@/skills.jsx";
+import { TriggersSection } from "@/triggers";
 import { loadReviewProfile, loadReviewProfiles, previewReviewProfile, saveReviewDefaultProfile, saveReviewProfileSetting } from "@/review-settings";
 import { createToken, loadTokens, revokeToken } from "@/api-tokens";
 import { ProjectSkillsCard, saveSetting } from "@/project-skills-card";
@@ -12,7 +17,7 @@ import { ProjectSkillsCard, saveSetting } from "@/project-skills-card";
 // The review runs from a resolved profile: repo .machinist/review.yaml at the
 // PR base ref > this project setting > the global default > the shipped
 // default profile.
-export function SettingsPage({ repositories = [], csrfToken }) {
+export function SettingsConfiguration({ repositories = [], csrfToken }) {
   const [project, setProject] = useState("");
   const [mode, setMode] = useState("library");
   const [profileName, setProfileName] = useState("");
@@ -132,8 +137,7 @@ export function SettingsPage({ repositories = [], csrfToken }) {
     }
   };
 
-  return <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
-    <PageHeading title="Settings" description="Review profiles for the built-in pull-request review. The review runs after every PR opens: lane checks, parallel reviewer passes, then a docs pass — all driven by the resolved profile." />
+  return <>
     <Card className="p-4 sm:p-5">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
         <label className="flex flex-1 items-center gap-2">
@@ -210,7 +214,7 @@ export function SettingsPage({ repositories = [], csrfToken }) {
     <ProjectSkillsCard project={project} csrfToken={csrfToken} />
     <PlaneIntakeCard csrfToken={csrfToken} project={project} />
     <TokensCard csrfToken={csrfToken} />
-  </div>;
+  </>;
 }
 
 // PlaneIntakeCard edits the built-in Plane intake configuration. Every value
@@ -481,5 +485,27 @@ function PreviewResult({ preview }) {
         </li>)}
       </ul>
     </div>}
+  </div>;
+}
+
+// Settings gathers configuration that used to be top-level pages: the review
+// profile and project settings, workers, triggers, the factory, workflows and
+// the skills library. The section lives in the hash, so every tab is a link.
+export function SettingsPage({ section = "review", onSectionChange, repositories = [], csrfToken, workers = [], triggers = [], factory, loaded = false, error = "", onChanged }) {
+  return <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
+    <PageHeading title="Settings" description="Review profiles, workers, triggers, factory controls, workflows and skills for this shop." />
+    <Tabs
+      label="Settings sections"
+      selected={section}
+      onSelect={(next) => onSectionChange?.(next)}
+      items={[
+        { id: "review", label: "Review", content: <SettingsConfiguration repositories={repositories} csrfToken={csrfToken} /> },
+        { id: "workers", label: "Workers", content: <WorkersSection workers={workers} loaded={loaded} error={error} csrfToken={csrfToken} onChanged={onChanged} /> },
+        { id: "triggers", label: "Triggers", content: <TriggersSection triggers={triggers} loaded={loaded} error={error} /> },
+        { id: "factory", label: "Factory", content: <FactorySection factory={factory} csrfToken={csrfToken} onChanged={onChanged} loaded={loaded} error={error} /> },
+        { id: "workflows", label: "Workflows", content: <WorkflowsSection /> },
+        { id: "skills", label: "Skills", content: <SkillsSection csrfToken={csrfToken} /> },
+      ]}
+    />
   </div>;
 }

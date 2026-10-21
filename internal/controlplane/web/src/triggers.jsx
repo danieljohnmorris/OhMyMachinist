@@ -2,15 +2,15 @@ import { Clock3, GitBranch, TimerReset } from "lucide-react";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
-import { PageHeading, QuietState } from "@/components/ui/page-heading";
+import { QuietState } from "@/components/ui/page-heading";
 import { cn } from "@/lib/utils";
 import { triggerHealthTone, triggerView } from "@/trigger-state";
 
-export function TriggersPage({ triggers = [], loaded, error }) {
-  return <Page title="Triggers">
+export function TriggersSection({ triggers = [], loaded, error }) {
+  return <>
     {error && <Failure value={error} />}
     {!loaded && !error ? <Loading /> : loaded && (triggers.length ? <div className="grid gap-4 xl:grid-cols-2">{triggers.map((trigger) => <TriggerCard key={trigger.identity} trigger={trigger} />)}</div> : <Empty />)}
-  </Page>;
+  </>;
 }
 
 function TriggerCard({ trigger }) {
@@ -37,7 +37,6 @@ function formatDate(value) {
   return Number.isNaN(date.valueOf()) ? value : date.toLocaleString();
 }
 
-function Page({ title, children }) { return <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8"><PageHeading title={title} description="Scheduled and managed ways work enters the shop." />{children}</div>; }
 function Loading() { return <Card><QuietState title="Checking the schedule" description="Loading managed trigger state." role="status" /></Card>; }
 function Failure({ value }) { return <Alert>{value}</Alert>; }
 function Empty() { return <Card><QuietState title="No managed triggers" description="Configured schedules and event sources will appear here." /></Card>; }

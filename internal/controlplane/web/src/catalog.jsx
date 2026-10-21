@@ -4,10 +4,10 @@ import { Server } from "lucide-react";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
-import { PageHeading, QuietState } from "@/components/ui/page-heading";
+import { QuietState } from "@/components/ui/page-heading";
 import { Button } from "@/components/ui/button";
 
-export function WorkersPage({ workers, loaded, error, csrfToken, onChanged }) {
+export function WorkersSection({ workers, loaded, error, csrfToken, onChanged }) {
   const [removing, setRemoving] = useState("");
   const [removeError, setRemoveError] = useState("");
 
@@ -32,24 +32,25 @@ export function WorkersPage({ workers, loaded, error, csrfToken, onChanged }) {
     }
   }
 
-  return <Page title="Workers" description="The machines available to pick up and execute work.">{(error || removeError) && <Failure value={error || removeError} />}{!loaded && !error ? <Loading description="Checking live worker status." /> : loaded && (workers.length ? <Card className="overflow-hidden">{workers.map((worker) => <article key={worker.instance_id} className="grid gap-4 border-b border-border p-4 last:border-b-0 sm:grid-cols-[minmax(12rem,1fr)_minmax(12rem,1fr)_10rem] sm:items-center sm:px-5">
+  return <>{(error || removeError) && <Failure value={error || removeError} />}{!loaded && !error ? <Loading description="Checking live worker status." /> : loaded && (workers.length ? <Card className="overflow-hidden">{workers.map((worker) => <article key={worker.instance_id} className="grid gap-4 border-b border-border p-4 last:border-b-0 sm:grid-cols-[minmax(12rem,1fr)_minmax(12rem,1fr)_10rem] sm:items-center sm:px-5">
     <div className="min-w-0"><div className="flex items-center gap-2"><Server className="size-4 text-muted-foreground" /><h2 className="truncate text-sm font-medium">{worker.name}</h2></div><p className="mt-1 truncate font-mono text-xs text-muted-foreground">{worker.instance_id}</p></div>
     <div className="flex flex-wrap gap-1.5">{worker.repositories?.length ? worker.repositories.map((repository) => <Badge key={repository} className="font-mono">{repository}</Badge>) : <span className="text-xs text-muted-foreground">No repositories</span>}</div>
     <div className="flex flex-col items-end gap-1.5"><Badge tone={worker.connected ? "success" : "neutral"} dot>{worker.connected ? "Connected" : "Disconnected"}</Badge><div className="flex items-center gap-2"><time className="text-xs text-muted-foreground sm:text-right" dateTime={worker.last_seen_at} title={new Date(worker.last_seen_at).toLocaleString()}>Last seen {relativeTime(worker.last_seen_at)}</time><Button size="sm" variant="ghost" className="text-danger" disabled={removing === worker.instance_id} onClick={() => remove(worker)} aria-label={`Remove worker ${worker.name || worker.instance_id}`}>{removing === worker.instance_id ? "Removing…" : "Remove"}</Button></div></div>
-  </article>)}</Card> : <Empty value="No workers registered." description="Start a worker to register this machine with the control plane." />)}</Page>;
+  </article>)}</Card> : <Empty value="No workers registered." description="Start a worker to register this machine with the control plane." />)}</>;
 }
 
 const displayName = name => String(name).replaceAll("_", " ").replaceAll("-", " ").replace(/^./, c => c.toUpperCase());
 
-export function CommandsPage() {
+export function WorkflowsSection() {
   const definitions = useDefinitions();
   const [selection, setSelection] = useState("");
   const data = definitions.value;
   const names = Object.keys(data.workflows || {});
+  const available = data.commands || [];
   const selected = names.includes(selection) ? selection : names[0];
   const steps = data.workflows?.[selected] || [];
-  const commands = steps.map(step => data.commands.find(command => command.name === step.name));
-  return <Page title="Workflows" description="Choose how a run gets done, from one agent to a sequence of steps.">
+  const commands = steps.map(step => available.find(command => command.name === step.name));
+  return <>
     {definitions.loading ? <Loading /> : definitions.error ? <Failure value={definitions.error} /> : names.length ? <div className="max-w-4xl space-y-6">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <label className="block w-full max-w-sm"><span className="field-label">Workflow</span><select className="field-control" value={selected} onChange={event=>setSelection(event.target.value)}>{names.map(name=><option key={name} value={name}>{displayName(name)}</option>)}</select></label>
@@ -68,8 +69,8 @@ export function CommandsPage() {
         {id:"prompts",label:"Prompts",content:<div className="space-y-5">{steps.map((step,index)=><Card key={index} className="overflow-hidden"><header className="flex flex-wrap justify-between gap-2 border-b border-border px-5 py-3"><h2 className="text-sm font-semibold">{index+1}. {displayName(step.name)}</h2><p className="text-xs text-muted-foreground">{commands[index]?.executor} · {commands[index]?.timeout}</p></header><pre tabIndex={0} aria-label={`${step.name} prompt template`} className="max-h-96 overflow-auto whitespace-pre-wrap break-words p-5 font-mono text-xs leading-6">{commands[index]?.prompt || "Uses the run instructions directly."}</pre></Card>)}</div>},
         {id:"help",label:"Template help",content:<TemplateHelp />},
       ]} />
-    </div> : data.commands.length ? <div className="max-w-4xl space-y-5"><p className="text-sm text-muted-foreground">These commands can run directly. To give a run multiple steps, add a workflow in config.toml.</p><pre className="rounded-lg border border-border p-4 text-sm">{`[workflows.deliver]\nsteps = ["${data.commands[0].name}"]`}</pre>{data.commands.map(command=><Card key={command.name} className="p-5"><h2 className="text-sm font-semibold">{displayName(command.name)}</h2><p className="mt-1 text-xs text-muted-foreground">{command.executor} · {command.timeout}</p></Card>)}</div> : <Empty value="No workflows configured." />}
-  </Page>;
+    </div> : available.length ? <div className="max-w-4xl space-y-5"><p className="text-sm text-muted-foreground">These commands can run directly. To give a run multiple steps, add a workflow in config.toml.</p><pre className="rounded-lg border border-border p-4 text-sm">{`[workflows.deliver]\nsteps = ["${available[0].name}"]`}</pre>{available.map(command=><Card key={command.name} className="p-5"><h2 className="text-sm font-semibold">{displayName(command.name)}</h2><p className="mt-1 text-xs text-muted-foreground">{command.executor} · {command.timeout}</p></Card>)}</div> : <Empty value="No workflows configured." />}
+  </>;
 }
 
 function TemplateHelp() {
@@ -83,7 +84,6 @@ function TemplateHelp() {
   <p className="text-muted-foreground">Only save deliverables in the shared folder. Use <code>MACHINIST_SCRATCH_DIR</code> for temporary scripts, clones and logs.</p></section>;
 }
 
-function Page({ title, description, children }) { return <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8"><PageHeading title={title} description={description} />{children}</div>; }
 function Loading({ description = "Loading the latest configuration." }) { return <Card><QuietState title="Preparing the bench" description={description} role="status" /></Card>; }
 function Empty({ value, description = "Configuration added on the control plane will appear here." }) { return <Card><QuietState title={value} description={description} /></Card>; }
 function Failure({ value }) { return <Alert>{value}</Alert>; }
